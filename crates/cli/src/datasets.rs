@@ -11,10 +11,10 @@ use parquet_opendal::AsyncReader;
 use crate::counter::BigramCounter;
 
 pub const DATASETS: &[Dataset] = &[
+    Dataset { name: "github-code", repo: "codeparrot/github-code",
+              field: "code", prefix: "data/", weight: 50 },
     Dataset { name: "fineweb", repo: "HuggingFaceFW/fineweb",
-              field: "text", prefix: "data/CC-MAIN-2024-10/", weight: 50 },
-    Dataset { name: "fineweb-older", repo: "HuggingFaceFW/fineweb",
-              field: "text", prefix: "data/CC-MAIN-2023-50/", weight: 30 },
+              field: "text", prefix: "data/CC-MAIN-2024-10/", weight: 30 },
     Dataset { name: "redpajama", repo: "togethercomputer/RedPajama-Data-V2",
               field: "raw_content", prefix: "data/", weight: 20 },
 ];
@@ -28,7 +28,7 @@ pub struct Dataset {
     pub weight: u8,
 }
 
-/// Build a reusable operator. Create once per dataset.
+/// Build a reusable operator.
 ///
 /// # Errors
 ///
@@ -43,34 +43,18 @@ pub fn operator(ds: &Dataset, token: Option<&str>) -> anyhow::Result<Operator> {
     Ok(op.layer(opendal::layers::RetryLayer::new().with_max_times(3)))
 }
 
-/// List parquet files via HF tree API (single HTTP call, sub-second).
+/// List parquet files via opendal.
 ///
 /// # Errors
 ///
 /// Returns error if HF repo is inaccessible.
-pub async fn list_files(ds: &Dataset, token: &str) -> anyhow::Result<Vec<String>> {
-    let url = format!(
-        "https://huggingface.co/api/datasets/{}/tree/main/{}?recursive=true",
-        ds.repo, ds.prefix,
-    );
-    let client = reqwest::Client::new();
-    let resp = client.get(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .context("listing files")?;
-
-    let body: serde_json::Value = resp.json().await.context("parsing file list")?;
-    let mut files = Vec::new();
-    if let Some(arr) = body.as_array() {
-        for entry in arr {
-            if let Some(path) = entry.get("path").and_then(|p| p.as_str()) {
-                if path.ends_with(".parquet") {
-                    files.push(path.to_owned());
-                }
-            }
-        }
-    }
+pub async fn list_files(op: &Operator, prefix: &str) -> anyhow::Result<Vec<String>> {
+    let entries = op.list(prefix).await.context("listing files")?;
+    let mut files: Vec<String> = entries
+        .into_iter()
+        .filter(|e| e.path().ends_with(".parquet"))
+        .map(|e| e.path().to_owned())
+        .collect();
     files.sort();
     Ok(files)
 }
@@ -139,7 +123,7 @@ fn count_bin(bytes: &mut u64, counter: &BigramCounter, val: &[u8]) {
     *bytes += val.len() as u64;
 }
 
-const CONTENT_FIELDS: &[&str] = &["content", "text", "raw_content", "body"];
+const CONTENT_FIELDS: &[&str] = &["content", "text", "code", "raw_content", "body"];
 
 fn find_field(
     schema: &arrow::datatypes::SchemaRef,

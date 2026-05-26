@@ -72,7 +72,7 @@ async fn stream_datasets(
         if !quiet { eprintln!("  Listing {}", ds.name); }
 
         let op = datasets::operator(ds, Some(token))?;
-        let files = datasets::list_files(ds, token).await?;
+        let files = datasets::list_files(&op, ds.prefix).await?;
 
         if !quiet { eprintln!("  {} -> {} files", ds.name, files.len()); }
 
