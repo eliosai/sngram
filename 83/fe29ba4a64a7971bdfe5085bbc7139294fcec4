@@ -1,0 +1,38 @@
+tests/Cargo.toml
+  s_142c8c108c7a17::t_fde66459da6f45 2,6,9-11
+crates/cli/src/datasets.rs
+  s_142c8c108c7a17::t_7505ba50387b5b 50-51
+crates/cli/src/engine.rs
+  s_142c8c108c7a17::t_cb332135ff14b8 103-118
+  s_142c8c108c7a17::t_5fa4ad9521cb61 38
+  s_142c8c108c7a17::t_fd87ca9c76f82f 68,70,77-79
+  s_142c8c108c7a17::t_5263ea79a60b38 23
+tests/src/lib.rs
+  s_142c8c108c7a17::t_53b6ea91c3d513 42,45,47-49,51-53
+  s_142c8c108c7a17::t_331e9d1e83490a 1-2,6-25,27,32,39-41,43,56-58,60,62,66,69,76-94,96-99,102-106,108-112,114
+  s_142c8c108c7a17::t_df994dcacef2a6 26,28-31,33-38,44,46,50,54-55,59,61,63-65,67-68,70-75,95,107,113
+crates/cli/src/cmd/resume.rs
+  s_142c8c108c7a17::t_9aa6318b6c043f 12,24
+crates/cli/src/session.rs
+  s_142c8c108c7a17::t_ea099bbd91a7d5 47-69
+crates/cli/src/cmd/learn.rs
+  s_142c8c108c7a17::t_1ba1235ffec2df 12-13
+crates/cli/src/progress.rs
+  s_142c8c108c7a17::t_d77a9f27c9e6b1 6,8,10,19,24-25,28,35,37,43-45,48-49,53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.0",
+  "base_commit_sha": "83fe29ba4a64a7971bdfe5085bbc7139294fcec4",
+  "prompts": {},
+  "sessions": {
+    "s_142c8c108c7a17": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351904bc-a71c-4479-af6d-1aed12bdf8ca",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "jsmey7 <joshua.smotritsky@gmail.com>"
+    }
+  }
+}
