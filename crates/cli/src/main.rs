@@ -1,4 +1,5 @@
 //! `sngram` — Sparse n-gram weight table learner.
+#![recursion_limit = "512"]
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
