@@ -1,0 +1,30 @@
+crates/cli/src/cmd/learn.rs
+  s_142c8c108c7a17::t_087663fcbcaae9 10,12,14-15,18,25-26
+  s_142c8c108c7a17::t_cca38a78bc899f 1,5,13,19-22
+crates/cli/src/checkpoint.rs
+  s_142c8c108c7a17::t_fff0a8dc3a23ad 3,15-20,24-29,31-32,34-35,42,47-48,61,71,74-76,86,99,101,104,107-109,124-129,139,141,143,159,163,165-168
+crates/cli/src/engine.rs
+  s_142c8c108c7a17::t_12d7d000573726 1-139
+crates/cli/src/datasets.rs
+  s_142c8c108c7a17::t_d00cdea637ec44 4,14-19,30-31,34-37,39-43,57,59,62-64,66,70,74,76,78,109-112,116
+crates/cli/src/cmd/resume.rs
+  s_142c8c108c7a17::t_5f206197de6177 1,5,10,12-13,17-20,24-26,29-33,36-37
+crates/cli/src/main.rs
+  s_142c8c108c7a17::t_604de292c8ebca 11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.0",
+  "base_commit_sha": "8b9ce0cda96a422dd7a91c71cc6a67598db29edf",
+  "prompts": {},
+  "sessions": {
+    "s_142c8c108c7a17": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351904bc-a71c-4479-af6d-1aed12bdf8ca",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "jsmey7 <joshua.smotritsky@gmail.com>"
+    }
+  }
+}
