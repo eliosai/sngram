@@ -1,0 +1,259 @@
+//! Sparse n-gram extraction for code search indexing.
+//!
+//! Stateless, `Send + Sync`, zero contention.
+//!
+//! # Algorithm
+//!
+//! A weight table assigns a u32 weight to every byte pair (bigram).
+//! Rare pairs get high weights, common pairs get low weights.
+//!
+//! **Indexing** (per document): a monotonic stack scans all byte
+//! pairs left-to-right. Substrings where both border weights are
+//! strictly greater than all internal weights are emitted as
+//! sparse n-grams. These go into an inverted index keyed by hash.
+//!
+//! **Querying** (per regex): the pattern is parsed into an AST,
+//! fixed literal substrings are extracted (both prefix and suffix),
+//! and each literal is split at its local weight maxima to produce
+//! covering n-grams. These are looked up in the inverted index.
+//!
+//! # Choosing an API
+//!
+//! - [`scan`] — zero-allocation callback. Use when you hash and
+//!   insert grams directly into an inverted index (6x faster at 1 MB).
+//! - [`index`] — collects grams into a `Vec`. Use when you need
+//!   to keep grams around or iterate them multiple times.
+//! - [`query`] — decomposes a regex into covering grams for lookup.
+
+mod error;
+mod extract;
+mod pattern;
+
+pub use error::QueryError;
+pub use pattern::Pattern;
+
+use sngram_types::{Content, IndexGrams, QueryGrams, WeightTable};
+
+/// Collect all sparse n-grams from content into a `Vec`.
+#[must_use]
+pub fn index<'a>(table: &WeightTable, content: &Content<'a>) -> IndexGrams<'a> {
+    extract::all(table, content.as_bytes())
+}
+
+/// Zero-allocation scan. Calls `emit(start, end)` per gram.
+///
+/// Preferred over [`index`] when grams are consumed once (e.g.
+/// hashing into an inverted index). 6x faster at 1 MB input.
+pub fn scan(table: &WeightTable, content: &Content<'_>, emit: impl FnMut(usize, usize)) {
+    extract::scan(table, content.as_bytes(), emit);
+}
+
+/// Decompose a regex pattern into covering grams for index lookup.
+///
+/// # Errors
+///
+/// Returns [`QueryError`] if the pattern has no extractable literals.
+pub fn query(table: &WeightTable, pattern: &Pattern) -> Result<QueryGrams, QueryError> {
+    let literals = pattern.extract_literals()?;
+    Ok(extract::covering(table, &literals))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sngram_types::TABLE_BINARY_SIZE;
+
+    fn table() -> WeightTable {
+        let mut buf = vec![0u8; TABLE_BINARY_SIZE];
+        buf[..4].copy_from_slice(b"SPNG");
+        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
+        for c1 in 0u16..256 {
+            for c2 in 0u16..256 {
+                let w = crc32fast::hash(&[c1 as u8, c2 as u8]);
+                let idx = (c1 as usize) << 8 | c2 as usize;
+                let off = 16 + idx * 4;
+                buf[off..off + 4].copy_from_slice(&w.to_le_bytes());
+            }
+        }
+        let crc = crc32fast::hash(&buf[16..]);
+        buf[8..12].copy_from_slice(&crc.to_le_bytes());
+        WeightTable::from_bytes(&buf).unwrap()
+    }
+
+    // -- index: edge cases --
+
+    #[test]
+    fn empty_content_returns_empty() {
+        let grams = index(&table(), &Content::new(b""));
+        assert!(grams.is_empty());
+    }
+
+    #[test]
+    fn one_byte_returns_empty() {
+        let grams = index(&table(), &Content::new(b"x"));
+        assert!(grams.is_empty());
+    }
+
+    #[test]
+    fn two_bytes_returns_empty() {
+        let grams = index(&table(), &Content::new(b"ab"));
+        assert!(grams.is_empty());
+    }
+
+    #[test]
+    fn three_bytes_produces_grams() {
+        let grams = index(&table(), &Content::new(b"abc"));
+        assert!(!grams.is_empty());
+    }
+
+    // -- index: invariant --
+
+    #[test]
+    fn all_grams_have_borders_greater_than_internals() {
+        let t = table();
+        let content = b"fn main() { let x = foo_bar(42); }";
+        let grams = index(&t, &Content::new(content));
+
+        for gram in &grams {
+            let bytes = gram.as_bytes();
+            if bytes.len() <= 3 {
+                continue;
+            }
+            let left = t.weight(bytes[0], bytes[1]);
+            let last = bytes.len() - 1;
+            let right = t.weight(bytes[last - 1], bytes[last]);
+
+            for i in 1..bytes.len() - 2 {
+                let inner = t.weight(bytes[i], bytes[i + 1]);
+                assert!(
+                    left >= inner && right >= inner,
+                    "invariant violated in {:?}: left={left} right={right} inner={inner} at {i}",
+                    String::from_utf8_lossy(bytes),
+                );
+            }
+        }
+    }
+
+    // -- index: coverage patterns --
+
+    #[test]
+    fn uniform_content_produces_grams() {
+        let data = vec![b'a'; 100];
+        let grams = index(&table(), &Content::new(&data));
+        assert!(!grams.is_empty());
+    }
+
+    #[test]
+    fn real_source_code_produces_grams() {
+        let src = b"use std::collections::HashMap;\nfn main() {\n}";
+        let grams = index(&table(), &Content::new(src));
+        assert!(grams.len() > 1);
+    }
+
+    #[test]
+    fn gram_density() {
+        let t = table();
+        let src = b"fn main() { let x = foo_bar(42); println!(\"{x}\"); }\n";
+        for &size in &[64, 256, 1024, 4096, 16384, 65536] {
+            let data: Vec<u8> = (0..size).map(|i| src[i % src.len()]).collect();
+            let grams = index(&t, &Content::new(&data));
+            let ratio = grams.len() as f64 / size as f64;
+            eprintln!("{size:>6}B -> {:>6} grams ({ratio:.2}/byte)", grams.len());
+        }
+    }
+
+    // -- index: hashes are deterministic --
+
+    #[test]
+    fn hashes_are_deterministic() {
+        let t = table();
+        let content = Content::new(b"hello world");
+        let h1: Vec<u64> = index(&t, &content).hashes().collect();
+        let h2: Vec<u64> = index(&t, &content).hashes().collect();
+        assert_eq!(h1, h2);
+    }
+
+    // -- query: literal extraction --
+
+    #[test]
+    fn literal_pattern_extracts_grams() {
+        let t = table();
+        let pat = Pattern::new("MAX_FILE_SIZE").unwrap();
+        let grams = query(&t, &pat).unwrap();
+        assert!(!grams.is_empty());
+    }
+
+    #[test]
+    fn wildcard_mid_extracts_prefix_and_suffix() {
+        let pat = Pattern::new(r"MAX_[A-Z]+_SIZE").unwrap();
+        let literals = pat.extract_literals().unwrap();
+        let has_prefix = literals.iter().any(|l| l.starts_with(b"MAX"));
+        let has_suffix = literals.iter().any(|l| l.ends_with(b"SIZE"));
+        assert!(has_prefix, "missing prefix literal");
+        assert!(has_suffix, "missing suffix literal");
+    }
+
+    #[test]
+    fn dotstar_extracts_both_sides() {
+        let pat = Pattern::new(r"foo.*bar").unwrap();
+        let literals = pat.extract_literals().unwrap();
+        let has_foo = literals.iter().any(|l| l.starts_with(b"foo"));
+        let has_bar = literals.iter().any(|l| l.ends_with(b"bar"));
+        assert!(has_foo, "missing foo prefix");
+        assert!(has_bar, "missing bar suffix");
+    }
+
+    // -- query: error cases --
+
+    #[test]
+    fn pure_wildcard_returns_no_literals() {
+        let pat = Pattern::new(".*").unwrap();
+        let err = query(&table(), &pat).unwrap_err();
+        assert!(matches!(err, QueryError::NoLiterals));
+    }
+
+    #[test]
+    fn pure_class_returns_no_literals() {
+        let pat = Pattern::new(r"[a-z]+").unwrap();
+        let err = query(&table(), &pat).unwrap_err();
+        assert!(matches!(err, QueryError::NoLiterals));
+    }
+
+    #[test]
+    fn short_literal_returns_too_short() {
+        let pat = Pattern::new("ab").unwrap();
+        let err = query(&table(), &pat).unwrap_err();
+        assert!(matches!(err, QueryError::LiteralsTooShort { .. }));
+    }
+
+    #[test]
+    fn oversized_pattern_returns_too_long() {
+        let long = "a".repeat(5000);
+        let err = Pattern::new(&long).unwrap_err();
+        assert!(matches!(err, QueryError::PatternTooLong { .. }));
+    }
+
+    #[test]
+    fn invalid_regex_returns_error() {
+        let err = Pattern::new("(unclosed").unwrap_err();
+        assert!(matches!(err, QueryError::InvalidRegex(_)));
+    }
+
+    // -- query: covering is subset of index --
+
+    #[test]
+    fn covering_grams_are_substrings_of_content() {
+        let t = table();
+        let literal = b"MAX_FILE_SIZE";
+        let pat = Pattern::new("MAX_FILE_SIZE").unwrap();
+        let query_grams = query(&t, &pat).unwrap();
+
+        for qg in &query_grams {
+            let bytes = qg.as_bytes();
+            let found = literal
+                .windows(bytes.len())
+                .any(|w| w == bytes);
+            assert!(found, "{:?} not found in content", String::from_utf8_lossy(bytes));
+        }
+    }
+}

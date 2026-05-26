@@ -1,0 +1,110 @@
+[workspace]
+resolver = "3"
+members = ["crates/types", "crates/lib", "crates/cli", "tests", "benches"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Joshua Smotritsky"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[workspace.dependencies]
+# Internal
+sngram-types = { path = "crates/types" }
+sngram = { path = "crates/lib" }
+
+# Types / zero-copy
+bytemuck = { version = "1.25", features = ["derive"] }
+crc32fast = "1.5"
+
+# Regex parsing
+regex-syntax = "0.8"
+
+# Hashing
+rustc-hash = "2.1"
+
+# Async
+tokio = { version = "1.52", default-features = false }
+
+# HF streaming
+opendal = { version = "0.56", default-features = false }
+parquet_opendal = "0.8"
+parquet = { version = "58", default-features = false }
+arrow = { version = "58", default-features = false }
+
+# Checkpoint
+redb = "4.1"
+rkyv = { version = "0.8", default-features = false, features = ["std", "alloc", "bytecheck"] }
+roaring = { version = "0.11", features = ["serde"] }
+
+# System
+sysinfo = "0.35"
+num_cpus = "1.16"
+
+# CLI
+clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
+
+# Progress / logging
+indicatif = "0.18"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-indicatif = "0.3"
+
+# Signals
+signal-hook = "0.4"
+
+# Resilience
+tokio-retry = "0.3"
+
+# Utilities
+directories = "6.0"
+tempfile = "3.27"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+flate2 = "1.0"
+thiserror = "2.0"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Don't panic
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+
+# Async safety
+await_holding_lock = "warn"
+await_holding_refcell_ref = "warn"
+
+# Numeric correctness
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_precision_loss = "warn"
+
+# Code quality
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+too_many_arguments = "warn"
+
+# API design
+must_use_candidate = "warn"
+missing_errors_doc = "warn"
+missing_const_for_fn = "warn"
+wildcard_imports = "warn"
+
+# Allowed (too noisy)
+blanket_clippy_restriction_lints = "allow"
+module_name_repetitions = "allow"

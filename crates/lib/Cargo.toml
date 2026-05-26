@@ -1,0 +1,18 @@
+[package]
+name = "sngram"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Sparse n-gram extraction for code search indexing"
+
+[dependencies]
+sngram-types = { workspace = true }
+regex-syntax = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+crc32fast = { workspace = true }
+
+[lints]
+workspace = true

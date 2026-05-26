@@ -1,0 +1,17 @@
+[package]
+name = "sngram-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Types for sparse n-gram weight tables"
+
+[dependencies]
+bytemuck = { workspace = true }
+crc32fast = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
