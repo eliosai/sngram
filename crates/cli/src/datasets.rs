@@ -11,10 +11,10 @@ use parquet_opendal::AsyncReader;
 use crate::counter::BigramCounter;
 
 pub const DATASETS: &[Dataset] = &[
-    Dataset { name: "the-stack", repo: "bigcode/the-stack",
-              field: "content", prefix: "data/", weight: 50 },
-    Dataset { name: "fineweb-2", repo: "HuggingFaceFW/fineweb-2",
-              field: "text", prefix: "data/", weight: 30 },
+    Dataset { name: "fineweb", repo: "HuggingFaceFW/fineweb",
+              field: "text", prefix: "data/CC-MAIN-2024-10/", weight: 50 },
+    Dataset { name: "fineweb-older", repo: "HuggingFaceFW/fineweb",
+              field: "text", prefix: "data/CC-MAIN-2023-50/", weight: 30 },
     Dataset { name: "redpajama", repo: "togethercomputer/RedPajama-Data-V2",
               field: "raw_content", prefix: "data/", weight: 20 },
 ];
