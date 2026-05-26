@@ -1,0 +1,19 @@
+crates/cli/src/datasets.rs
+  s_142c8c108c7a17::t_e9210e25bec29d 3-4,22,31,37-43,62,70-76,89,94,96,98-100,102-106,108-109,112-121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.0",
+  "base_commit_sha": "3894687af7ff9b18349a582ef37a4030a76e6a2a",
+  "prompts": {},
+  "sessions": {
+    "s_142c8c108c7a17": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351904bc-a71c-4479-af6d-1aed12bdf8ca",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "jsmey7 <joshua.smotritsky@gmail.com>"
+    }
+  }
+}
