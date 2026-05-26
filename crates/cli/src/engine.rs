@@ -7,8 +7,6 @@ use anyhow::Context;
 
 use crate::{checkpoint, counter, datasets, progress, resources, session};
 
-/// Run the streaming engine, starting from `skip_datasets` already completed.
-///
 /// # Errors
 ///
 /// Returns error on streaming or checkpoint failure.
@@ -34,70 +32,68 @@ pub fn run(
         .build()
         .context("building runtime")?;
 
-    let completed = rt.block_on(stream_datasets(
-        name, &counter, Some(token.as_str()), &shutdown, skip_datasets, quiet,
-    ))?;
+    let completed = rt.block_on(
+        stream_datasets(name, &counter, &token, &shutdown, skip_datasets, quiet),
+    )?;
 
+    finalize(name, &counter, &shutdown, completed, quiet)
+}
+
+fn finalize(
+    name: &str,
+    counter: &counter::BigramCounter,
+    shutdown: &AtomicBool,
+    completed: usize,
+    quiet: bool,
+) -> anyhow::Result<()> {
     if shutdown.load(Ordering::Relaxed) {
-        checkpoint::save(&session::checkpoint(name), &counter, completed)?;
-        if !quiet {
-            println!("\n  Checkpoint saved. Resume: sngram resume --name {name}");
-        }
+        checkpoint::save(&session::checkpoint(name), counter, completed)?;
+        if !quiet { println!("\n  Checkpoint saved. Resume: sngram resume --name {name}"); }
         return Ok(());
     }
-
     std::fs::write(session::weights(name), counter.to_table_bytes())
         .context("writing weights")?;
-    if !quiet { print_complete(name, &counter); }
+    if !quiet { print_complete(name, counter); }
     Ok(())
 }
 
 async fn stream_datasets(
     name: &str,
     counter: &Arc<counter::BigramCounter>,
-    token: Option<&str>,
+    token: &str,
     shutdown: &Arc<AtomicBool>,
     skip: usize,
     quiet: bool,
 ) -> anyhow::Result<usize> {
-    let remaining: Vec<_> = datasets::DATASETS.iter().enumerate()
-        .skip(skip)
-        .collect();
-
-    let file_counts = list_files_for(&remaining, token).await?;
-    let names: Vec<&str> = remaining.iter().map(|(_, ds)| ds.name).collect();
-    let counts: Vec<u64> = file_counts.iter().map(|f| f.len() as u64).collect();
-    let prog = if quiet { None } else { Some(progress::Progress::named(&names, &counts)) };
-
     let mut completed = skip;
-    for (i, (ds_idx, ds)) in remaining.iter().enumerate() {
-        let op = datasets::operator(ds, token)?;
-        for path in &file_counts[i] {
+
+    for (ds_idx, ds) in datasets::DATASETS.iter().enumerate().skip(skip) {
+        if shutdown.load(Ordering::Relaxed) { return Ok(completed); }
+        if !quiet { eprintln!("  Listing {}", ds.name); }
+
+        let op = datasets::operator(ds, Some(token))?;
+        let files = datasets::list_files(ds, token).await?;
+
+        if !quiet { eprintln!("  {} -> {} files", ds.name, files.len()); }
+
+        let names = [ds.name];
+        let counts = [files.len() as u64];
+        let prog = if quiet { None } else { Some(progress::Progress::named(&names, &counts)) };
+
+        for path in &files {
             if shutdown.load(Ordering::Relaxed) { return Ok(completed); }
             if let Err(e) = datasets::stream_file(&op, path, ds.field, counter).await {
                 eprintln!("  warning: {path}: {e:#}");
             }
-            if let Some(p) = &prog { p.inc_bytes(i, 1); }
+            if let Some(p) = &prog { p.inc_bytes(0, 1); }
         }
+
+        if let Some(p) = &prog { p.finish_all(); }
         completed = ds_idx + 1;
-        if let Some(p) = &prog { p.finish_dataset(i); }
         checkpoint::save(&session::checkpoint(name), counter, completed)?;
     }
 
-    if let Some(p) = &prog { p.finish_all(); }
     Ok(completed)
-}
-
-async fn list_files_for(
-    datasets: &[(usize, &datasets::Dataset)],
-    token: Option<&str>,
-) -> anyhow::Result<Vec<Vec<String>>> {
-    let mut all = Vec::with_capacity(datasets.len());
-    for (_, ds) in datasets {
-        let op = datasets::operator(ds, token)?;
-        all.push(datasets::list_files(&op, ds.prefix).await?);
-    }
-    Ok(all)
 }
 
 fn require_hf_token() -> anyhow::Result<String> {

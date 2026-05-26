@@ -11,7 +11,7 @@ use parquet_opendal::AsyncReader;
 use crate::counter::BigramCounter;
 
 pub const DATASETS: &[Dataset] = &[
-    Dataset { name: "the-stack-v2", repo: "bigcode/the-stack-v2-dedup",
+    Dataset { name: "the-stack", repo: "bigcode/the-stack",
               field: "content", prefix: "data/", weight: 50 },
     Dataset { name: "fineweb-2", repo: "HuggingFaceFW/fineweb-2",
               field: "text", prefix: "data/", weight: 30 },
@@ -43,17 +43,34 @@ pub fn operator(ds: &Dataset, token: Option<&str>) -> anyhow::Result<Operator> {
     Ok(op.layer(opendal::layers::RetryLayer::new().with_max_times(3)))
 }
 
+/// List parquet files via HF tree API (single HTTP call, sub-second).
+///
 /// # Errors
 ///
 /// Returns error if HF repo is inaccessible.
-pub async fn list_files(op: &Operator, prefix: &str) -> anyhow::Result<Vec<String>> {
-    let entries = op.list_with(prefix).recursive(true)
-        .await.context("listing files")?;
-    let mut files: Vec<String> = entries
-        .into_iter()
-        .filter(|e| e.path().ends_with(".parquet"))
-        .map(|e| e.path().to_owned())
-        .collect();
+pub async fn list_files(ds: &Dataset, token: &str) -> anyhow::Result<Vec<String>> {
+    let url = format!(
+        "https://huggingface.co/api/datasets/{}/tree/main/{}?recursive=true",
+        ds.repo, ds.prefix,
+    );
+    let client = reqwest::Client::new();
+    let resp = client.get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .context("listing files")?;
+
+    let body: serde_json::Value = resp.json().await.context("parsing file list")?;
+    let mut files = Vec::new();
+    if let Some(arr) = body.as_array() {
+        for entry in arr {
+            if let Some(path) = entry.get("path").and_then(|p| p.as_str()) {
+                if path.ends_with(".parquet") {
+                    files.push(path.to_owned());
+                }
+            }
+        }
+    }
     files.sort();
     Ok(files)
 }
@@ -122,12 +139,20 @@ fn count_bin(bytes: &mut u64, counter: &BigramCounter, val: &[u8]) {
     *bytes += val.len() as u64;
 }
 
+const CONTENT_FIELDS: &[&str] = &["content", "text", "raw_content", "body"];
+
 fn find_field(
     schema: &arrow::datatypes::SchemaRef,
-    name: &str,
+    preferred: &str,
 ) -> anyhow::Result<usize> {
-    schema.fields()
-        .iter()
-        .position(|f| f.name() == name)
-        .with_context(|| format!("field '{name}' not found"))
+    let names = std::iter::once(preferred).chain(
+        CONTENT_FIELDS.iter().copied().filter(|&n| n != preferred),
+    );
+    for name in names {
+        if let Some(idx) = schema.fields().iter().position(|f| f.name() == name) {
+            return Ok(idx);
+        }
+    }
+    let available: Vec<_> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    anyhow::bail!("no content field found. Available: {available:?}")
 }

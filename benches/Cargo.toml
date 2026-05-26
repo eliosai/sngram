@@ -7,10 +7,12 @@ publish = false
 
 [[bench]]
 name = "extract"
+path = "src/extract.rs"
 harness = false
 
 [[bench]]
 name = "query"
+path = "src/query.rs"
 harness = false
 
 [dependencies]

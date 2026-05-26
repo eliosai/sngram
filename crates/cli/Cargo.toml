@@ -25,6 +25,7 @@ opendal = { workspace = true, features = ["services-huggingface"] }
 parquet_opendal = { workspace = true }
 parquet = { workspace = true, features = ["async", "snap", "zstd", "lz4"] }
 arrow = { workspace = true }
+reqwest = { workspace = true }
 
 # Checkpoint
 redb = { workspace = true }
