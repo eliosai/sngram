@@ -18,6 +18,7 @@ clap = { workspace = true }
 
 # Async
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "sync", "signal", "macros"] }
+futures = { workspace = true }
 
 # HF streaming
 opendal = { workspace = true, features = ["services-huggingface"] }

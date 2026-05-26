@@ -30,6 +30,7 @@ rustc-hash = "2.1"
 
 # Async
 tokio = { version = "1.52", default-features = false }
+futures = "0.3"
 
 # HF streaming
 opendal = { version = "0.56", default-features = false }
