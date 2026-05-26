@@ -1,7 +1,7 @@
 //! Canonical HF dataset streaming via opendal + parquet.
 
-use anyhow::Context;
-use arrow::array::{Array, BinaryArray, StringArray};
+use anyhow::{Context, bail};
+use arrow::array::{Array, BinaryArray, LargeBinaryArray, LargeStringArray, StringArray};
 use futures::TryStreamExt;
 use opendal::Operator;
 use opendal::services::Huggingface;
@@ -19,6 +19,7 @@ pub const DATASETS: &[Dataset] = &[
               field: "raw_content", prefix: "data/", weight: 20 },
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dataset {
     pub name: &'static str,
     pub repo: &'static str,
@@ -27,13 +28,19 @@ pub struct Dataset {
     pub weight: u8,
 }
 
-/// Build a reusable operator for a dataset. Create once, use for all files.
+/// Build a reusable operator. Create once per dataset.
 ///
 /// # Errors
 ///
 /// Returns error if HF backend cannot be initialized.
 pub fn operator(ds: &Dataset, token: Option<&str>) -> anyhow::Result<Operator> {
-    build_operator(ds.repo, token)
+    let mut builder = Huggingface::default();
+    builder = builder.repo_type("dataset").repo_id(ds.repo);
+    if let Some(t) = token {
+        builder = builder.token(t);
+    }
+    let op = Operator::new(builder).context("building operator")?.finish();
+    Ok(op.layer(opendal::layers::RetryLayer::new().with_max_times(3)))
 }
 
 /// # Errors
@@ -52,7 +59,7 @@ pub async fn list_files(op: &Operator, prefix: &str) -> anyhow::Result<Vec<Strin
 
 /// # Errors
 ///
-/// Returns error on network or parsing failure.
+/// Returns error on network, parsing, or unsupported column type.
 pub async fn stream_file(
     op: &Operator,
     path: &str,
@@ -60,7 +67,13 @@ pub async fn stream_file(
     counter: &BigramCounter,
 ) -> anyhow::Result<u64> {
     let meta = op.stat(path).await.context("stat file")?;
-    let reader = op.reader(path).await.context("opening reader")?;
+    let reader = op
+        .reader_with(path)
+        .gap(512 * 1024)
+        .chunk(16 * 1024 * 1024)
+        .concurrent(8)
+        .await
+        .context("opening reader")?;
     let async_reader = AsyncReader::new(reader, meta.content_length());
 
     let builder = ParquetRecordBatchStreamBuilder::new(async_reader)
@@ -73,37 +86,39 @@ pub async fn stream_file(
 
     let mut bytes = 0u64;
     while let Some(batch) = stream.try_next().await.context("reading batch")? {
-        bytes += process_column(batch.column(field_idx), counter);
+        bytes += process_column(batch.column(field_idx), counter)?;
     }
     Ok(bytes)
 }
 
-fn process_column(col: &dyn Array, counter: &BigramCounter) -> u64 {
+fn process_column(col: &dyn Array, counter: &BigramCounter) -> anyhow::Result<u64> {
     let mut bytes = 0u64;
+
     if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-        for val in arr.iter().flatten() {
-            counter.process(val.as_bytes());
-            bytes += val.len() as u64;
-        }
+        for val in arr.iter().flatten() { count_str(&mut bytes, counter, val); }
+    } else if let Some(arr) = col.as_any().downcast_ref::<LargeStringArray>() {
+        for val in arr.iter().flatten() { count_str(&mut bytes, counter, val); }
     } else if let Some(arr) = col.as_any().downcast_ref::<BinaryArray>() {
-        for val in arr.iter().flatten() {
-            counter.process(val);
-            bytes += val.len() as u64;
-        }
+        for val in arr.iter().flatten() { count_bin(&mut bytes, counter, val); }
+    } else if let Some(arr) = col.as_any().downcast_ref::<LargeBinaryArray>() {
+        for val in arr.iter().flatten() { count_bin(&mut bytes, counter, val); }
+    } else {
+        bail!("unsupported column type: {:?}", col.data_type());
     }
-    bytes
+
+    Ok(bytes)
 }
 
-fn build_operator(repo: &str, token: Option<&str>) -> anyhow::Result<Operator> {
-    let mut builder = Huggingface::default();
-    builder = builder.repo_type("dataset").repo_id(repo);
-    if let Some(t) = token {
-        builder = builder.token(t);
-    }
-    let op = Operator::new(builder)
-        .context("building HF operator")?
-        .finish();
-    Ok(op.layer(opendal::layers::RetryLayer::new().with_max_times(3)))
+#[inline]
+fn count_str(bytes: &mut u64, counter: &BigramCounter, val: &str) {
+    counter.process(val.as_bytes());
+    *bytes += val.len() as u64;
+}
+
+#[inline]
+fn count_bin(bytes: &mut u64, counter: &BigramCounter, val: &[u8]) {
+    counter.process(val);
+    *bytes += val.len() as u64;
 }
 
 fn find_field(
