@@ -11,10 +11,12 @@ use parquet_opendal::AsyncReader;
 use crate::counter::BigramCounter;
 
 pub const DATASETS: &[Dataset] = &[
+    Dataset { name: "the-stack-dedup", repo: "bigcode/the-stack-dedup",
+              field: "content", prefix: "data/", weight: 20 },
     Dataset { name: "github-code", repo: "codeparrot/github-code",
-              field: "code", prefix: "data/", weight: 50 },
-    Dataset { name: "fineweb", repo: "HuggingFaceFW/fineweb",
-              field: "text", prefix: "data/CC-MAIN-2024-10/", weight: 30 },
+              field: "code", prefix: "data/", weight: 10 },
+    Dataset { name: "fineweb-2", repo: "HuggingFaceFW/fineweb-2",
+              field: "text", prefix: "data/", weight: 50 },
     Dataset { name: "redpajama", repo: "togethercomputer/RedPajama-Data-V2",
               field: "raw_content", prefix: "data/", weight: 20 },
 ];
@@ -49,7 +51,8 @@ pub fn operator(ds: &Dataset, token: Option<&str>) -> anyhow::Result<Operator> {
 ///
 /// Returns error if HF repo is inaccessible.
 pub async fn list_files(op: &Operator, prefix: &str) -> anyhow::Result<Vec<String>> {
-    let entries = op.list(prefix).await.context("listing files")?;
+    let entries = op.list_with(prefix).recursive(true)
+        .await.context("listing files")?;
     let mut files: Vec<String> = entries
         .into_iter()
         .filter(|e| e.path().ends_with(".parquet"))
