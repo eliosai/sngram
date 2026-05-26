@@ -63,6 +63,20 @@ impl BigramCounter {
         self.counts[idx].load(Ordering::Relaxed)
     }
 
+    #[allow(clippy::indexing_slicing, reason = "u8<<8|u8 < 65536")]
+    pub fn add(&self, c1: u8, c2: u8, n: u64) {
+        let idx = usize::from(c1) << 8 | usize::from(c2);
+        self.counts[idx].fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn add_pairs(&self, n: u64) {
+        self.pairs_processed.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn add_files(&self, n: u64) {
+        self.files_processed.fetch_add(n, Ordering::Relaxed);
+    }
+
     #[must_use]
     #[allow(clippy::indexing_slicing, reason = "fixed-size buffer")]
     pub fn to_table_bytes(&self) -> Vec<u8> {

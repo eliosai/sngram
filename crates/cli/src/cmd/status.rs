@@ -36,6 +36,5 @@ fn format_state(st: session::State) -> &'static str {
         session::State::Paused => "paused",
         session::State::Completed => "completed",
         session::State::Running => "running",
-        _ => "unknown",
     }
 }

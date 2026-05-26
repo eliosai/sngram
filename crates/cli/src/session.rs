@@ -64,7 +64,6 @@ pub fn create(name: &str) -> anyhow::Result<PathBuf> {
         State::Paused => bail!("session '{name}' exists, use resume"),
         State::Completed => bail!("session '{name}' already completed"),
         State::Running => bail!("session '{name}' is currently running"),
-        _ => bail!("session '{name}' in unexpected state"),
     }
     let d = dir(name);
     fs::create_dir_all(&d).context("creating session directory")?;
@@ -80,7 +79,6 @@ pub fn resume(name: &str) -> anyhow::Result<PathBuf> {
         State::New => bail!("session '{name}' not found"),
         State::Completed => bail!("session '{name}' already completed"),
         State::Running => bail!("session '{name}' is currently running"),
-        _ => bail!("session '{name}' in unexpected state"),
     }
 }
 
