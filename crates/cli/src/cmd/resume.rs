@@ -1,85 +1,38 @@
-//! Resume an interrupted learning session.
+//! Resume subcommand.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::Context;
-
-use crate::{checkpoint, counter, datasets, progress, resources, session};
+use crate::{checkpoint, engine, session};
 
 /// # Errors
 ///
 /// Returns error if session cannot be resumed.
-pub fn run(name: &str, verbose: bool, quiet: bool) -> anyhow::Result<()> {
+pub fn run(name: &str, _verbose: bool, quiet: bool) -> anyhow::Result<()> {
     session::resume(name)?;
-    let cp_path = session::checkpoint(name);
-    let counter = Arc::new(checkpoint::restore(&cp_path)?);
-    let token = std::env::var("HF_TOKEN").ok();
+    write_lock(name)?;
+    let data = checkpoint::restore(&session::checkpoint(name))?;
 
     if !quiet {
         println!();
-        println!("  Resuming session '{name}'");
-        println!("    Pairs so far    {}", counter.pairs_processed());
-        println!("    Files so far    {}", counter.files_processed());
+        println!("  Resuming '{name}'");
+        println!("    Datasets done  {}", data.completed_datasets);
+        println!("    Pairs so far   {}", data.counter.pairs_processed());
+        println!("    Files so far   {}", data.counter.files_processed());
         println!();
     }
 
-    run_remaining(name, &counter, token.as_deref(), verbose, quiet)
+    let result = engine::run(name, Arc::new(data.counter), data.completed_datasets, quiet);
+    remove_lock(name);
+    result
 }
 
-fn run_remaining(
-    name: &str,
-    counter: &Arc<counter::BigramCounter>,
-    token: Option<&str>,
-    _verbose: bool,
-    quiet: bool,
-) -> anyhow::Result<()> {
-    let profile = resources::MachineProfile::detect();
-    let alloc = resources::ThreadAllocation::from_cores(profile.cores);
-
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let flag = shutdown.clone();
-    let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, flag.clone());
-    let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, flag);
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(alloc.stack + alloc.fineweb + alloc.redpajama)
-        .enable_all()
-        .build()
-        .context("building tokio runtime")?;
-
-    rt.block_on(stream_remaining(name, counter, token, &shutdown, quiet))?;
-
-    if shutdown.load(Ordering::Relaxed) {
-        checkpoint::save(&session::checkpoint(name), counter)?;
-        if !quiet { println!("\n  Checkpoint saved. Resume with: sngram resume --name {name}"); }
-        return Ok(());
-    }
-
-    let table_bytes = counter.to_table_bytes();
-    std::fs::write(session::weights(name), &table_bytes).context("writing weights")?;
-    if !quiet {
-        println!();
-        println!("  Session '{name}' complete.");
-        println!("    Output  {}", session::weights(name).display());
-    }
-    Ok(())
+fn write_lock(name: &str) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let pid = std::process::id().to_string();
+    std::fs::write(session::lock(name), pid.as_bytes())
+        .context("writing lock")
 }
 
-async fn stream_remaining(
-    name: &str,
-    counter: &Arc<counter::BigramCounter>,
-    token: Option<&str>,
-    shutdown: &Arc<AtomicBool>,
-    quiet: bool,
-) -> anyhow::Result<()> {
-    for (ds_idx, ds) in datasets::DATASETS.iter().enumerate() {
-        let files = datasets::list_files(ds, token).await?;
-        for path in &files {
-            if shutdown.load(Ordering::Relaxed) { return Ok(()); }
-            let _bytes = datasets::stream_file(ds, path, token, counter).await?;
-        }
-        checkpoint::save(&session::checkpoint(name), counter)?;
-    }
-    Ok(())
+fn remove_lock(name: &str) {
+    let _ = std::fs::remove_file(session::lock(name));
 }

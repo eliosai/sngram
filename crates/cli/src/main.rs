@@ -8,6 +8,7 @@ mod checkpoint;
 mod cmd;
 mod counter;
 mod datasets;
+mod engine;
 mod progress;
 mod resources;
 mod session;
