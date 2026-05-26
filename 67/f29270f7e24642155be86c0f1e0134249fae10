@@ -1,0 +1,31 @@
+crates/cli/src/engine.rs
+  s_142c8c108c7a17::t_5e391536a92bf7 75
+  s_142c8c108c7a17::t_8c9b26c73859b5 35-40,42-48,50-51,56,63,68,70-72,74,76-83,88,90-91
+benches/Cargo.toml
+  s_142c8c108c7a17::t_6f94c00d9e6283 10,15
+crates/cli/src/datasets.rs
+  s_142c8c108c7a17::t_51d26dd52298e8 47,51-52,55-60,62-64,70-73
+  s_142c8c108c7a17::t_56f4c04c3babb8 46,53-54,61,65-69
+  s_142c8c108c7a17::t_34ee2a0e730846 142-143,146,148-157
+  s_142c8c108c7a17::t_6f04ee45606e2b 14
+Cargo.toml
+  s_142c8c108c7a17::t_1fa796472ef790 40
+crates/cli/Cargo.toml
+  s_142c8c108c7a17::t_34728e7799bb0a 28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.0",
+  "base_commit_sha": "67f29270f7e24642155be86c0f1e0134249fae10",
+  "prompts": {},
+  "sessions": {
+    "s_142c8c108c7a17": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351904bc-a71c-4479-af6d-1aed12bdf8ca",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "jsmey7 <joshua.smotritsky@gmail.com>"
+    }
+  }
+}
