@@ -9,7 +9,7 @@ use crate::{checkpoint, engine, session};
 /// Returns error if session cannot be resumed.
 pub fn run(name: &str, _verbose: bool, quiet: bool) -> anyhow::Result<()> {
     session::resume(name)?;
-    write_lock(name)?;
+    let _lock = session::LockGuard::acquire(name)?;
     let data = checkpoint::restore(&session::checkpoint(name))?;
 
     if !quiet {
@@ -21,18 +21,5 @@ pub fn run(name: &str, _verbose: bool, quiet: bool) -> anyhow::Result<()> {
         println!();
     }
 
-    let result = engine::run(name, Arc::new(data.counter), data.completed_datasets, quiet);
-    remove_lock(name);
-    result
-}
-
-fn write_lock(name: &str) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let pid = std::process::id().to_string();
-    std::fs::write(session::lock(name), pid.as_bytes())
-        .context("writing lock")
-}
-
-fn remove_lock(name: &str) {
-    let _ = std::fs::remove_file(session::lock(name));
+    engine::run(name, Arc::new(data.counter), data.completed_datasets, quiet)
 }

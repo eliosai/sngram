@@ -47,7 +47,8 @@ pub fn operator(ds: &Dataset, token: Option<&str>) -> anyhow::Result<Operator> {
 ///
 /// Returns error if HF repo is inaccessible.
 pub async fn list_files(op: &Operator, prefix: &str) -> anyhow::Result<Vec<String>> {
-    let entries = op.list(prefix).await.context("listing files")?;
+    let entries = op.list_with(prefix).recursive(true)
+        .await.context("listing files")?;
     let mut files: Vec<String> = entries
         .into_iter()
         .filter(|e| e.path().ends_with(".parquet"))

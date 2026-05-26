@@ -20,7 +20,7 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let profile = resources::MachineProfile::detect();
     let alloc = resources::ThreadAllocation::from_cores(profile.cores);
-    let token = std::env::var("HF_TOKEN").ok();
+    let token = require_hf_token()?;
 
     if !quiet { print_header(&profile, &alloc); }
 
@@ -35,7 +35,7 @@ pub fn run(
         .context("building runtime")?;
 
     let completed = rt.block_on(stream_datasets(
-        name, &counter, token.as_deref(), &shutdown, skip_datasets, quiet,
+        name, &counter, Some(token.as_str()), &shutdown, skip_datasets, quiet,
     ))?;
 
     if shutdown.load(Ordering::Relaxed) {
@@ -65,15 +65,18 @@ async fn stream_datasets(
         .collect();
 
     let file_counts = list_files_for(&remaining, token).await?;
+    let names: Vec<&str> = remaining.iter().map(|(_, ds)| ds.name).collect();
     let counts: Vec<u64> = file_counts.iter().map(|f| f.len() as u64).collect();
-    let prog = if quiet { None } else { Some(progress::Progress::new(&counts)) };
+    let prog = if quiet { None } else { Some(progress::Progress::named(&names, &counts)) };
 
     let mut completed = skip;
     for (i, (ds_idx, ds)) in remaining.iter().enumerate() {
         let op = datasets::operator(ds, token)?;
         for path in &file_counts[i] {
             if shutdown.load(Ordering::Relaxed) { return Ok(completed); }
-            let _ = datasets::stream_file(&op, path, ds.field, counter).await;
+            if let Err(e) = datasets::stream_file(&op, path, ds.field, counter).await {
+                eprintln!("  warning: {path}: {e:#}");
+            }
             if let Some(p) = &prog { p.inc_bytes(i, 1); }
         }
         completed = ds_idx + 1;
@@ -95,6 +98,22 @@ async fn list_files_for(
         all.push(datasets::list_files(&op, ds.prefix).await?);
     }
     Ok(all)
+}
+
+fn require_hf_token() -> anyhow::Result<String> {
+    if let Ok(token) = std::env::var("HF_TOKEN") {
+        return Ok(token);
+    }
+    let env_path = std::path::Path::new(".env");
+    if env_path.exists() {
+        let content = std::fs::read_to_string(env_path)?;
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("HF_TOKEN=") {
+                return Ok(val.trim().to_owned());
+            }
+        }
+    }
+    anyhow::bail!("HF_TOKEN not set. Export it or add to .env file.")
 }
 
 fn setup_signals(shutdown: &Arc<AtomicBool>) -> anyhow::Result<()> {

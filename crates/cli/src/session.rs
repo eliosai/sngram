@@ -44,6 +44,29 @@ pub fn weights(name: &str) -> PathBuf { dir(name).join("weights.bin") }
 #[must_use]
 pub fn lock(name: &str) -> PathBuf { dir(name).join("lock") }
 
+/// RAII lock guard — removes lock file on drop (panic-safe).
+pub struct LockGuard {
+    name: String,
+}
+
+impl LockGuard {
+    /// # Errors
+    ///
+    /// Returns error if lock file cannot be written.
+    pub fn acquire(name: &str) -> anyhow::Result<Self> {
+        let pid = std::process::id().to_string();
+        std::fs::write(lock(name), pid.as_bytes())
+            .context("writing lock")?;
+        Ok(Self { name: name.to_owned() })
+    }
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(lock(&self.name));
+    }
+}
+
 /// Derive session state from filesystem.
 #[must_use]
 pub fn state(name: &str) -> State {
