@@ -1,11 +1,14 @@
 //! Sparse n-gram extraction via monotonic stack (convex hull).
 
+use std::collections::VecDeque;
+
 use sngram_types::{IndexGram, IndexGrams, QueryGram, QueryGrams, WeightTable};
 
 const MIN_LEN: usize = 3;
 const MAX_LEN: usize = 100;
 const STACK_CAP: usize = 128;
 
+#[allow(clippy::indexing_slicing, reason = "scan emits start..end within content")]
 pub fn all<'a>(table: &WeightTable, content: &'a [u8]) -> IndexGrams<'a> {
     if content.len() < MIN_LEN {
         return IndexGrams::new(Vec::new());
@@ -73,7 +76,7 @@ fn top_emit(stack: &FixedStack, end: usize, emit: &mut impl FnMut(usize, usize))
 #[inline]
 fn try_emit(start: usize, end: usize, emit: &mut impl FnMut(usize, usize)) {
     let len = end - start;
-    if len >= MIN_LEN && len <= MAX_LEN {
+    if (MIN_LEN..=MAX_LEN).contains(&len) {
         emit(start, end);
     }
 }
@@ -83,74 +86,95 @@ struct FixedStack {
     len: usize,
 }
 
+#[allow(clippy::indexing_slicing, reason = "indices stay < len <= STACK_CAP")]
 impl FixedStack {
     #[inline]
-    fn new() -> Self {
+    const fn new() -> Self {
         Self { buf: [(0, 0); STACK_CAP], len: 0 }
     }
 
     #[inline]
     fn push(&mut self, pos: usize, weight: u32) {
-        if self.len < STACK_CAP {
-            self.buf[self.len] = (pos, weight);
-            self.len += 1;
+        // Full: oldest entry is too far back to yield a gram <= MAX_LEN; drop it.
+        if self.len == STACK_CAP {
+            self.buf.copy_within(1.., 0);
+            self.len -= 1;
         }
+        self.buf[self.len] = (pos, weight);
+        self.len += 1;
     }
 
     #[inline]
-    fn pop(&mut self) {
+    const fn pop(&mut self) {
         self.len = self.len.saturating_sub(1);
     }
 
     #[inline]
-    fn peek(&self) -> Option<(usize, u32)> {
+    const fn peek(&self) -> Option<(usize, u32)> {
         if self.len > 0 { Some(self.buf[self.len - 1]) } else { None }
     }
 
     #[inline]
-    fn dedup(&mut self, w: u32) {
+    const fn dedup(&mut self, w: u32) {
         while self.len > 0 && self.buf[self.len - 1].1 == w {
             self.len -= 1;
         }
     }
 }
 
+#[allow(clippy::indexing_slicing, reason = "cover emits start..end within literal")]
 fn emit_covering(table: &WeightTable, literal: &[u8]) -> Vec<QueryGram> {
-    if literal.len() < MIN_LEN {
-        return Vec::new();
-    }
-    split_at_maxima(table, literal)
-}
-
-#[allow(clippy::indexing_slicing, reason = "indices bounded by loop range")]
-fn split_at_maxima(table: &WeightTable, content: &[u8]) -> Vec<QueryGram> {
-    let last = content.len() - 2;
     let mut grams = Vec::new();
-    let mut start = 0;
-
-    for i in 0..=last {
-        if !is_local_max(table, content, i, last) {
-            continue;
+    cover(table, literal, |start, end| {
+        if (MIN_LEN..=MAX_LEN).contains(&(end - start)) {
+            grams.push(QueryGram::new(literal[start..end].to_vec(), start));
         }
-        let end = (i + 2).min(content.len());
-        if end - start >= MIN_LEN {
-            grams.push(QueryGram::new(content[start..end].to_vec(), start));
-        }
-        start = i;
-    }
-
-    if content.len() - start >= MIN_LEN {
-        grams.push(QueryGram::new(content[start..].to_vec(), start));
-    }
-
+    });
     grams
 }
 
-#[inline]
-#[allow(clippy::indexing_slicing, reason = "bounds checked by caller")]
-fn is_local_max(table: &WeightTable, c: &[u8], i: usize, last: usize) -> bool {
-    let w = table.weight(c[i], c[i + 1]);
-    let left_ok = i == 0 || w > table.weight(c[i - 1], c[i]);
-    let right_ok = i == last || w > table.weight(c[i + 1], c[i + 2]);
-    left_ok && right_ok
+/// Minimal covering n-grams (danlark1 `BuildCoveringNgrams`): the same hull as
+/// [`scan`] restricted to the minimal set, so `cover(L)` is always a subset of
+/// `scan(D)` for any `D` containing `L` — the guarantee against missed matches.
+#[allow(clippy::indexing_slicing, reason = "front read only while deque non-empty")]
+fn cover(table: &WeightTable, s: &[u8], mut emit: impl FnMut(usize, usize)) {
+    let mut stack: VecDeque<(u32, usize)> = VecDeque::new();
+
+    for i in 0..s.len().saturating_sub(1) {
+        let w = table.weight(s[i], s[i + 1]);
+        if stack.len() > 1 && i + 3 - stack[0].1 >= MAX_LEN {
+            emit(stack[0].1, stack[1].1 + 2);
+            stack.pop_front();
+        }
+        while let Some(&(top, pos)) = stack.back() {
+            if w <= top { break; }
+            if stack[0].0 == top {
+                glue_plateau(&mut stack, pos, i + 2, &mut emit);
+            }
+            stack.pop_back();
+        }
+        stack.push_back((w, i));
+    }
+    drain(&mut stack, &mut emit);
+}
+
+/// Emit the consecutive grams of an equal-weight plateau, left to right.
+fn glue_plateau(
+    stack: &mut VecDeque<(u32, usize)>,
+    back_pos: usize,
+    end: usize,
+    emit: &mut impl FnMut(usize, usize),
+) {
+    emit(back_pos, end);
+    drain(stack, emit);
+}
+
+/// Pop the stack down to one entry, emitting the gram spanning each popped pair.
+fn drain(stack: &mut VecDeque<(u32, usize)>, emit: &mut impl FnMut(usize, usize)) {
+    while stack.len() > 1 {
+        let Some((_, top)) = stack.pop_back() else { break; };
+        if let Some(&(_, below)) = stack.back() {
+            emit(below, top + 2);
+        }
+    }
 }

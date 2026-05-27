@@ -14,8 +14,9 @@
 //!
 //! **Querying** (per regex): the pattern is parsed into an AST,
 //! fixed literal substrings are extracted (both prefix and suffix),
-//! and each literal is split at its local weight maxima to produce
-//! covering n-grams. These are looked up in the inverted index.
+//! and each literal is decomposed into a minimal covering set of
+//! sparse n-grams (a subset of the index set). These are looked up
+//! in the inverted index.
 //!
 //! # Choosing an API
 //!
@@ -67,10 +68,10 @@ mod tests {
         let mut buf = vec![0u8; TABLE_BINARY_SIZE];
         buf[..4].copy_from_slice(b"SPNG");
         buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-        for c1 in 0u16..256 {
-            for c2 in 0u16..256 {
-                let w = crc32fast::hash(&[c1 as u8, c2 as u8]);
-                let idx = (c1 as usize) << 8 | c2 as usize;
+        for c1 in 0u8..=255 {
+            for c2 in 0u8..=255 {
+                let w = crc32fast::hash(&[c1, c2]);
+                let idx = (usize::from(c1) << 8) | usize::from(c2);
                 let off = 16 + idx * 4;
                 buf[off..off + 4].copy_from_slice(&w.to_le_bytes());
             }
@@ -78,6 +79,136 @@ mod tests {
         let crc = crc32fast::hash(&buf[16..]);
         buf[8..12].copy_from_slice(&crc.to_le_bytes());
         WeightTable::from_bytes(&buf).unwrap()
+    }
+
+    fn index_set(t: &WeightTable, doc: &[u8]) -> std::collections::HashSet<Vec<u8>> {
+        index(t, &Content::new(doc)).iter().map(|g| g.as_bytes().to_vec()).collect()
+    }
+
+    // Weights that strictly decrease along the byte run 1,2,3,... so the index
+    // scan's stack only ever grows — the worst case for a bounded stack.
+    fn monotonic_table() -> WeightTable {
+        let mut buf = vec![0u8; TABLE_BINARY_SIZE];
+        buf[..4].copy_from_slice(b"SPNG");
+        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
+        for v in 1u16..200 {
+            let idx = ((v << 8) | (v + 1)) as usize;
+            let off = 16 + idx * 4;
+            let w = 1_000_000u32 - u32::from(v);
+            buf[off..off + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        let crc = crc32fast::hash(&buf[16..]);
+        buf[8..12].copy_from_slice(&crc.to_le_bytes());
+        WeightTable::from_bytes(&buf).unwrap()
+    }
+
+    // Every covering gram of a literal MUST appear in the index of any document
+    // containing it, or the match is missed.
+    fn assert_covering_in_index(t: &WeightTable, lit: &[u8], prefix: &[u8], suffix: &[u8]) {
+        let mut doc = Vec::with_capacity(prefix.len() + lit.len() + suffix.len());
+        doc.extend_from_slice(prefix);
+        doc.extend_from_slice(lit);
+        doc.extend_from_slice(suffix);
+        let idx = index_set(t, &doc);
+        for g in &crate::extract::covering(t, &[lit.to_vec()]) {
+            assert!(
+                idx.contains(g.as_bytes()),
+                "FALSE NEGATIVE: gram {:?} of {:?} absent from index",
+                String::from_utf8_lossy(g.as_bytes()),
+                String::from_utf8_lossy(lit),
+            );
+        }
+    }
+
+    #[test]
+    fn covering_grams_are_subset_of_index() {
+        let t = table();
+        let lits: &[&[u8]] = &[
+            b"MAX_FILE_SIZE", b"the quick brown fox", b"alpha_beta_gamma_delta",
+            b"0xDEADBEEFcafe", b"snake_case_identifier_name",
+        ];
+        let ctxs: &[(&[u8], &[u8])] = &[
+            (b"", b""),
+            (b"zzz", b"qqq"),
+            (b"a_longer_prefix_context ", b" a_longer_suffix_context"),
+        ];
+        for lit in lits {
+            for (p, s) in ctxs {
+                assert_covering_in_index(&t, lit, p, s);
+            }
+        }
+    }
+
+    #[test]
+    fn covering_constrains_a_long_literal() {
+        let t = table();
+        let cov = crate::extract::covering(&t, &[b"MAX_FILE_SIZE".to_vec()]);
+        assert!(cov.iter().next().is_some(), "covering must produce grams for a long literal");
+    }
+
+    // INDEX path: a long strictly-decreasing weight run grows the scan stack
+    // without bound. If it overflows and drops recent positions, deep grams go
+    // missing and matches are lost. covering ⊆ index must hold past the cap.
+    #[test]
+    fn index_keeps_deep_grams_past_the_stack_cap() {
+        let t = monotonic_table();
+        let doc: Vec<u8> = (1u8..=200).collect();
+        let idx = index_set(&t, &doc);
+        let deep = doc[140..175].to_vec();
+        let cov = crate::extract::covering(&t, &[deep]);
+        assert!(!cov.is_empty(), "covering must produce grams");
+        for g in &cov {
+            assert!(
+                idx.contains(g.as_bytes()),
+                "FALSE NEGATIVE past stack cap: {:?} missing from index",
+                String::from_utf8_lossy(g.as_bytes()),
+            );
+        }
+    }
+
+    fn set_weight(buf: &mut [u8], c1: u8, c2: u8, w: u32) {
+        let idx = (usize::from(c1) << 8) | usize::from(c2);
+        let off = 16 + idx * 4;
+        buf[off..off + 4].copy_from_slice(&w.to_le_bytes());
+    }
+
+    // One very rare border bigram (200,1) followed by an increasing run, so the
+    // covering hull holds position 0 while later positions drain — producing a
+    // ~98-byte covering gram and forcing `cover`'s max-length front-eviction.
+    fn increasing_table() -> WeightTable {
+        let mut buf = vec![0u8; TABLE_BINARY_SIZE];
+        buf[..4].copy_from_slice(b"SPNG");
+        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
+        set_weight(&mut buf, 200, 1, 2_000_000);
+        for k in 1u8..130 {
+            set_weight(&mut buf, k, k + 1, u32::from(k));
+        }
+        let crc = crc32fast::hash(&buf[16..]);
+        buf[8..12].copy_from_slice(&crc.to_le_bytes());
+        WeightTable::from_bytes(&buf).unwrap()
+    }
+
+    // QUERY path: a long literal must still decompose into covering grams that
+    // are all in the index and none longer than MAX_LEN — exercising the
+    // front-eviction branch that short literals never reach.
+    #[test]
+    fn covering_a_long_literal_stays_within_the_index() {
+        let t = increasing_table();
+        let mut doc = vec![200u8];
+        doc.extend(1u8..=130);
+        let idx = index_set(&t, &doc);
+        let cov = crate::extract::covering(&t, &[doc.clone()]);
+        assert!(
+            cov.iter().any(|g| g.as_bytes().len() > 50),
+            "test must exercise a long front-evicted gram",
+        );
+        for g in &cov {
+            assert!(
+                idx.contains(g.as_bytes()),
+                "FALSE NEGATIVE on long literal: gram of len {} missing from index",
+                g.as_bytes().len(),
+            );
+        }
     }
 
     // -- index: edge cases --
@@ -151,6 +282,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_precision_loss, reason = "diagnostic ratio only")]
     fn gram_density() {
         let t = table();
         let src = b"fn main() { let x = foo_bar(42); println!(\"{x}\"); }\n";
