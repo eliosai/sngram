@@ -1,0 +1,34 @@
+crates/lib/src/lib.rs
+  s_142c8c108c7a17::t_bd7c3fa61d7994 88-104
+  s_142c8c108c7a17::t_b829d8813d23ff 84-87,105,123-136,138-148
+  s_142c8c108c7a17::t_ca6d3509ca9d3d 71-74
+  s_142c8c108c7a17::t_c44d14a433e02f 149-182,185-213
+  s_142c8c108c7a17::t_bd8f7353533c4f 106-122,137
+  s_142c8c108c7a17::t_cfcfd1d0a0749d 17-19
+  s_142c8c108c7a17::t_9ff1d7bcc698b1 183-184
+  s_142c8c108c7a17::t_be704d1ada4132 285
+crates/lib/src/extract.rs
+  s_142c8c108c7a17::t_d7887e5e61dc17 98-101,103-104
+  s_142c8c108c7a17::t_b5f1f56ce4ae4c 125
+  s_142c8c108c7a17::t_217f3ef914a103 128-134,136-147,149-154,156,158-159,161-169,172-179
+  s_142c8c108c7a17::t_7982e8f80934a4 3-4
+  s_142c8c108c7a17::t_60ba79a5c34dba 89,92,108,113,118
+  s_142c8c108c7a17::t_debb4656779ffc 11
+  s_142c8c108c7a17::t_c6ca0014dadf4c 79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.0",
+  "base_commit_sha": "41bd50af9b100714f989a6b10ba1f9b1cdde4a10",
+  "prompts": {},
+  "sessions": {
+    "s_142c8c108c7a17": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351904bc-a71c-4479-af6d-1aed12bdf8ca",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "jsmey7 <joshua.smotritsky@gmail.com>"
+    }
+  }
+}
