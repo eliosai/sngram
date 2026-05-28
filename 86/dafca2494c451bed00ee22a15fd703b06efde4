@@ -1,0 +1,25 @@
+crates/cli/src/learn.rs
+  s_142c8c108c7a17::t_0ffc6ad2ba7953 66-70,80
+  s_142c8c108c7a17::t_8709b993ee91c9 111,118,129,140-142,155
+  s_142c8c108c7a17::t_1c30fa6b0b2f80 173
+  s_142c8c108c7a17::t_ad132f3ce819a0 197-206,224-236,242-250,264-271,276-290
+  s_142c8c108c7a17::t_3ab0ceef90280e 1,8-19
+crates/cli/src/main.rs
+  s_142c8c108c7a17::t_9210e85faa6ade 87,104-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "86dafca2494c451bed00ee22a15fd703b06efde4",
+  "prompts": {},
+  "sessions": {
+    "s_142c8c108c7a17": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351904bc-a71c-4479-af6d-1aed12bdf8ca",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "jsmey7 <joshua.smotritsky@gmail.com>"
+    }
+  }
+}
