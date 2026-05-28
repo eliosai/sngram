@@ -123,68 +123,89 @@ pub fn is_not_found(e: &anyhow::Error) -> bool {
     s.contains("NotFound") || s.contains("404") || s.contains("not found")
 }
 
-const ROW_GROUP_TIMEOUT: Duration = Duration::from_secs(90);
-const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
+pub const ROW_GROUP_TIMEOUT: Duration = Duration::from_secs(90);
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub async fn count_file(
+/// Open a content-column-only parquet stream for one file. Wraps the actual
+/// open in a 60s timeout to defeat silent stalls. Returned stream is `Send`.
+pub async fn open_stream(
     op: &Operator,
     file: &ParquetFile,
     field: &str,
-    counter: &BigramCounter,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<FileStream> {
     debug!(target: "sngram::stream", path = %file.path, size = file.size, "opening stream");
-    let open_t0 = Instant::now();
-    let mut stream = tokio::time::timeout(OPEN_TIMEOUT, open_content_stream(op, file, field))
+    tokio::time::timeout(OPEN_TIMEOUT, open_content_stream(op, file, field))
         .await
         .map_err(|_| {
             warn!(target: "sngram::stream", path = %file.path, timeout_s = OPEN_TIMEOUT.as_secs(), "open timed out (treating as transient)");
             anyhow::anyhow!("timeout opening stream for {} (>{}s, treating as transient)", file.path, OPEN_TIMEOUT.as_secs())
-        })??;
-    debug!(target: "sngram::stream", path = %file.path, open_ms = open_t0.elapsed().as_millis() as u64, "stream open");
-    let mut tally = LocalTally::new();
+        })?
+}
+
+/// Drain an opened stream into the counter, overlapping each row group's
+/// decode (CPU) with the next row group's fetch (network). All counts
+/// accumulate in a file-local tally and merge into the shared counter only
+/// at end-of-file — so a mid-file failure contributes nothing.
+pub async fn drain_stream(
+    mut stream: FileStream,
+    file: &ParquetFile,
+    counter: &BigramCounter,
+) -> anyhow::Result<u64> {
+    let path_s = file.path.clone();
+    let mut file_tally = LocalTally::new();
     let mut rg_idx: usize = 0;
-    loop {
-        let rg_t0 = Instant::now();
-        trace!(target: "sngram::rowgroup", path = %file.path, rg_idx, "fetching row group");
-        let next = tokio::time::timeout(ROW_GROUP_TIMEOUT, stream.next_row_group())
+
+    // Prime the pipeline by fetching the first row group.
+    let prime_t0 = Instant::now();
+    let mut pending = tokio::time::timeout(ROW_GROUP_TIMEOUT, stream.next_row_group())
+        .await
+        .map_err(|_| {
+            warn!(target: "sngram::rowgroup", path = %path_s, rg_idx = 0, timeout_s = ROW_GROUP_TIMEOUT.as_secs(), "row group fetch timed out (treating as transient)");
+            anyhow::anyhow!("timeout fetching row group for {path_s} (>{}s, treating as transient)", ROW_GROUP_TIMEOUT.as_secs())
+        })?
+        .context("fetching row group")?;
+    trace!(target: "sngram::rowgroup", path = %path_s, rg_idx = 0, prime_ms = prime_t0.elapsed().as_millis() as u64, "first row group ready");
+
+    while let Some(rg) = pending.take() {
+        let dec_t0 = Instant::now();
+        let decode_task = tokio::task::spawn_blocking(move || -> anyhow::Result<LocalTally> {
+            let mut t = LocalTally::new();
+            decode_row_group(rg, &mut t)?;
+            Ok(t)
+        });
+        let fetch_t0 = Instant::now();
+        let next_rg = tokio::time::timeout(ROW_GROUP_TIMEOUT, stream.next_row_group())
             .await
             .map_err(|_| {
-                warn!(target: "sngram::rowgroup", path = %file.path, rg_idx, timeout_s = ROW_GROUP_TIMEOUT.as_secs(), "row group fetch timed out (treating as transient)");
-                anyhow::anyhow!("timeout fetching row group for {} (>{}s, treating as transient)", file.path, ROW_GROUP_TIMEOUT.as_secs())
+                warn!(target: "sngram::rowgroup", path = %path_s, rg_idx, timeout_s = ROW_GROUP_TIMEOUT.as_secs(), "row group fetch timed out (treating as transient)");
+                anyhow::anyhow!("timeout fetching row group for {path_s} (>{}s, treating as transient)", ROW_GROUP_TIMEOUT.as_secs())
             })?
             .context("fetching row group")?;
-        let fetch_ms = rg_t0.elapsed().as_millis() as u64;
-        match next {
-            Some(rg) => {
-                trace!(target: "sngram::rowgroup", path = %file.path, rg_idx, fetch_ms, "row group fetched, decoding");
-                let dec_t0 = Instant::now();
-                let before_bytes = tally.bytes();
-                decode_row_group(rg, &mut tally)?;
-                let added = tally.bytes() - before_bytes;
-                trace!(
-                    target: "sngram::rowgroup",
-                    path = %file.path,
-                    rg_idx,
-                    fetch_ms,
-                    decode_ms = dec_t0.elapsed().as_millis() as u64,
-                    bytes_added = added,
-                    "row group done"
-                );
-                rg_idx += 1;
-            }
-            None => {
-                trace!(target: "sngram::rowgroup", path = %file.path, total_rg = rg_idx, "EOF");
-                break;
-            }
-        }
+        let fetch_ms = fetch_t0.elapsed().as_millis() as u64;
+        let rg_tally = decode_task.await.context("decode task panicked")??;
+        let decode_ms = dec_t0.elapsed().as_millis() as u64;
+        let added = rg_tally.bytes();
+        file_tally.add_from(&rg_tally);
+        trace!(
+            target: "sngram::rowgroup",
+            path = %path_s,
+            rg_idx,
+            fetch_ms,
+            decode_ms,
+            bytes_added = added,
+            "row group done (overlapped)"
+        );
+        rg_idx += 1;
+        pending = next_rg;
     }
-    let bytes = tally.bytes();
-    counter.merge(&tally);
+
+    let bytes = file_tally.bytes();
+    counter.merge(&file_tally);
     counter.inc_files(1);
     counter.add_downloaded(file.size);
     debug!(
         target: "sngram::stream",
-        path = %file.path,
+        path = %path_s,
         row_groups = rg_idx,
         text_bytes = bytes,
         compressed_bytes = file.size,
@@ -193,7 +214,20 @@ pub async fn count_file(
     Ok(bytes)
 }
 
-type FileStream = parquet::arrow::async_reader::ParquetRecordBatchStream<AsyncReader>;
+/// Simple combined path: open + drain. Used by tests; the streaming pipeline
+/// in `learn` uses `open_stream` and `drain_stream` separately to overlap
+/// the open of file N+1 with the drain of file N.
+pub async fn count_file(
+    op: &Operator,
+    file: &ParquetFile,
+    field: &str,
+    counter: &BigramCounter,
+) -> anyhow::Result<u64> {
+    let stream = open_stream(op, file, field).await?;
+    drain_stream(stream, file, counter).await
+}
+
+pub type FileStream = parquet::arrow::async_reader::ParquetRecordBatchStream<AsyncReader>;
 
 async fn open_content_stream(
     op: &Operator,
@@ -204,8 +238,8 @@ async fn open_content_stream(
     let reader = op
         .reader_with(&file.path)
         .gap(4 * 1024 * 1024)
-        .chunk(16 * 1024 * 1024)
-        .concurrent(4)
+        .chunk(64 * 1024 * 1024)
+        .concurrent(8)
         .await
         .context("opening reader")?;
     debug!(target: "sngram::stream", path = %file.path, reader_open_ms = reader_t0.elapsed().as_millis() as u64, "reader opened");

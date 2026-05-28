@@ -58,6 +58,18 @@ impl LocalTally {
 
     #[must_use]
     pub const fn bytes(&self) -> u64 { self.bytes }
+
+    /// Merge another tally's counts into this one — used when decoding
+    /// row groups in a background task and folding the result back into
+    /// the file-level tally to preserve exactly-once semantics.
+    #[allow(clippy::indexing_slicing, reason = "PAIR_COUNT loop")]
+    pub fn add_from(&mut self, other: &Self) {
+        for i in 0..PAIR_COUNT {
+            self.counts[i] = self.counts[i].saturating_add(other.counts[i]);
+        }
+        self.pairs += other.pairs;
+        self.bytes += other.bytes;
+    }
 }
 
 impl Default for BigramCounter {

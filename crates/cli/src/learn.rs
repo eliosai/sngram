@@ -22,7 +22,8 @@ use crate::counter::BigramCounter;
 use crate::mint::mint;
 use crate::paths::ensure_dir;
 use crate::source::{
-    DATASETS, ParquetFile, count_file, hf_operator, is_not_found, is_transient, list_files,
+    DATASETS, FileStream, ParquetFile, drain_stream, hf_operator, is_not_found, is_transient,
+    list_files, open_stream,
 };
 
 pub type Milestone = (u64, &'static str);
@@ -113,14 +114,15 @@ pub async fn learn(
             let list_t0 = Instant::now();
             let (files, list_outcome) = list_with_retry(&op, prefix).await;
             let list_ms = list_t0.elapsed().as_millis();
+            let n_files = files.len();
             match list_outcome {
                 ListOutcome::Ok => {
-                    say(&format!("   {} files", files.len()));
+                    say(&format!("   {} files", n_files));
                     info!(
                         target: "sngram::prefix",
                         dataset = ds.id,
                         prefix = %prefix,
-                        n_files = files.len(),
+                        n_files,
                         list_ms,
                         "list complete"
                     );
@@ -156,25 +158,37 @@ pub async fn learn(
                 debug!(target: "sngram::prefix", dataset = ds.id, prefix = %prefix, "empty prefix");
                 continue;
             }
-            for (i, f) in files.iter().enumerate() {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<PrefetchItem>(1);
+            let op_p = op.clone();
+            let field = ds.field;
+            let prefetch_handle = tokio::spawn(async move {
+                for (idx, file) in files.into_iter().enumerate() {
+                    let opened = open_with_inline_retry(&op_p, &file, field).await;
+                    if tx.send(PrefetchItem { idx, file, opened }).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            while let Some(item) = rx.recv().await {
                 debug!(
                     target: "sngram::file",
                     dataset = ds.id,
-                    idx = i + 1,
-                    of = files.len(),
-                    path = %f.path,
-                    compressed_size = f.size,
+                    idx = item.idx + 1,
+                    of = n_files,
+                    path = %item.file.path,
+                    compressed_size = item.file.size,
+                    prefetched = item.opened.is_ok(),
                     "starting file"
                 );
                 let t0 = Instant::now();
-                let bytes = match count_with_retry(&op, f, ds.field, &counter).await {
+                let bytes = match drain_with_inline_retry(&op, &item.file, ds.field, item.opened.ok(), &counter).await {
                     Ok(b) => b,
                     Err(e) => {
-                        say(&format!("!! skip {} ({e:#})", f.path));
+                        say(&format!("!! skip {} ({e:#})", item.file.path));
                         error!(
                             target: "sngram::file",
                             dataset = ds.id,
-                            path = %f.path,
+                            path = %item.file.path,
                             error = %format!("{e:#}"),
                             "permanent failure, skipping file"
                         );
@@ -189,6 +203,8 @@ pub async fn learn(
                 if first_count_at.is_none() {
                     first_count_at = Some(t0);
                 }
+                let i = item.idx;
+                let f = &item.file;
                 let active_secs = first_count_at
                     .map_or(1.0, |t| t.elapsed().as_secs_f64().max(1.0));
                 let avg_mbps = (bytes_to_f(cum)) / 1e6 / active_secs;
@@ -197,7 +213,7 @@ pub async fn learn(
                 say(&format!(
                     "   [{:>4}/{:<4}] +{:>7} KB  cum {:>7.2} GB  now {:>4.0} MB/s  avg {:>4.0} MB/s  {}",
                     i + 1,
-                    files.len(),
+                    n_files,
                     bytes / 1_000,
                     bytes_to_f(cum) / 1e9,
                     inst_mbps,
@@ -208,7 +224,7 @@ pub async fn learn(
                     target: "sngram::file",
                     dataset = ds.id,
                     idx = i + 1,
-                    of = files.len(),
+                    of = n_files,
                     file = leaf,
                     bytes_kb = bytes / 1_000,
                     cum_gb = format!("{:.2}", bytes_to_f(cum) / 1e9),
@@ -238,6 +254,7 @@ pub async fn learn(
                     next += 1;
                 }
             }
+            let _ = prefetch_handle.await;
         }
         say(&format!(
             "-- {} done: {} files counted, {} skipped, {} prefixes missing, {} failed, {:.2} GB",
@@ -363,29 +380,37 @@ async fn list_with_retry(op: &Operator, prefix: &str) -> (Vec<ParquetFile>, List
     }
 }
 
-async fn count_with_retry(
+struct PrefetchItem {
+    idx: usize,
+    file: ParquetFile,
+    opened: anyhow::Result<FileStream>,
+}
+
+/// Open a file's stream with inline retry on transient errors. Used by the
+/// prefetch task so the main loop can hand the already-opened stream
+/// directly to `drain_stream`, overlapping open of file N+1 with drain of N.
+async fn open_with_inline_retry(
     op: &Operator,
     file: &ParquetFile,
     field: &str,
-    counter: &BigramCounter,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<FileStream> {
     let mut delay = RETRY_BASE;
     let mut hard_attempts: u32 = 0;
     loop {
-        match count_file(op, file, field, counter).await {
-            Ok(b) => return Ok(b),
+        match open_stream(op, file, field).await {
+            Ok(s) => return Ok(s),
+            Err(e) if is_not_found(&e) => return Err(e),
             Err(e) if is_transient(&e) => {
                 warn!(
                     target: "sngram::file",
                     path = %file.path,
                     delay_s = delay.as_secs(),
                     error = %format!("{e:#}"),
-                    "transient file error (timeout / rate-limit / conn issue); retrying"
+                    "transient open error; retrying"
                 );
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(RETRY_CAP);
             }
-            Err(e) if is_not_found(&e) => return Err(e),
             Err(e) => {
                 hard_attempts += 1;
                 if hard_attempts >= HARD_RETRY_MAX {
@@ -398,7 +423,91 @@ async fn count_with_retry(
                     max = HARD_RETRY_MAX,
                     delay_s = delay.as_secs(),
                     error = %format!("{e:#}"),
-                    "hard file error; retrying"
+                    "hard open error; retrying"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(RETRY_CAP);
+            }
+        }
+    }
+}
+
+/// Drain a file into the counter, with inline retry on transient errors.
+/// Accepts a possibly-already-opened stream from the prefetcher; if drain
+/// fails transiently we re-open the file from scratch.
+async fn drain_with_inline_retry(
+    op: &Operator,
+    file: &ParquetFile,
+    field: &str,
+    mut prefetched: Option<FileStream>,
+    counter: &BigramCounter,
+) -> anyhow::Result<u64> {
+    let mut delay = RETRY_BASE;
+    let mut hard_attempts: u32 = 0;
+    loop {
+        let stream = match prefetched.take() {
+            Some(s) => s,
+            None => match open_stream(op, file, field).await {
+                Ok(s) => s,
+                Err(e) if is_not_found(&e) => return Err(e),
+                Err(e) if is_transient(&e) => {
+                    warn!(
+                        target: "sngram::file",
+                        path = %file.path,
+                        delay_s = delay.as_secs(),
+                        error = %format!("{e:#}"),
+                        "transient reopen error; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(RETRY_CAP);
+                    continue;
+                }
+                Err(e) => {
+                    hard_attempts += 1;
+                    if hard_attempts >= HARD_RETRY_MAX {
+                        return Err(e);
+                    }
+                    warn!(
+                        target: "sngram::file",
+                        path = %file.path,
+                        attempt = hard_attempts,
+                        delay_s = delay.as_secs(),
+                        error = %format!("{e:#}"),
+                        "hard reopen error; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(RETRY_CAP);
+                    continue;
+                }
+            },
+        };
+        match drain_stream(stream, file, counter).await {
+            Ok(b) => return Ok(b),
+            Err(e) if is_not_found(&e) => return Err(e),
+            Err(e) if is_transient(&e) => {
+                warn!(
+                    target: "sngram::file",
+                    path = %file.path,
+                    delay_s = delay.as_secs(),
+                    error = %format!("{e:#}"),
+                    "transient drain error (timeout / rate-limit / conn issue); reopening"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(RETRY_CAP);
+            }
+            Err(e) => {
+                hard_attempts += 1;
+                if hard_attempts >= HARD_RETRY_MAX {
+                    return Err(e);
+                }
+                warn!(
+                    target: "sngram::file",
+                    path = %file.path,
+                    attempt = hard_attempts,
+                    max = HARD_RETRY_MAX,
+                    delay_s = delay.as_secs(),
+                    error = %format!("{e:#}"),
+                    "hard drain error; reopening"
                 );
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(RETRY_CAP);
