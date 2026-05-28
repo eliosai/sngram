@@ -177,7 +177,15 @@ pub async fn learn(
 }
 
 fn say(msg: &str) {
-    println!("{msg}");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let secs = ts % 86400;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    println!("[{h:02}:{m:02}:{s:02}] {msg}");
     let _ = std::io::stdout().flush();
 }
 

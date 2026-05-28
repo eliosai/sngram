@@ -108,16 +108,28 @@ pub fn is_not_found(e: &anyhow::Error) -> bool {
     s.contains("NotFound") || s.contains("404") || s.contains("not found")
 }
 
+const ROW_GROUP_TIMEOUT: Duration = Duration::from_secs(90);
+const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub async fn count_file(
     op: &Operator,
     file: &ParquetFile,
     field: &str,
     counter: &BigramCounter,
 ) -> anyhow::Result<u64> {
-    let mut stream = open_content_stream(op, file, field).await?;
+    let mut stream = tokio::time::timeout(OPEN_TIMEOUT, open_content_stream(op, file, field))
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout opening stream for {} (>{}s, treating as transient)", file.path, OPEN_TIMEOUT.as_secs()))??;
     let mut tally = LocalTally::new();
-    while let Some(rg) = stream.next_row_group().await.context("fetching row group")? {
-        decode_row_group(rg, &mut tally)?;
+    loop {
+        let next = tokio::time::timeout(ROW_GROUP_TIMEOUT, stream.next_row_group())
+            .await
+            .map_err(|_| anyhow::anyhow!("timeout fetching row group for {} (>{}s, treating as transient)", file.path, ROW_GROUP_TIMEOUT.as_secs()))?
+            .context("fetching row group")?;
+        match next {
+            Some(rg) => decode_row_group(rg, &mut tally)?,
+            None => break,
+        }
     }
     let bytes = tally.bytes();
     counter.merge(&tally);
