@@ -1,128 +1,108 @@
-//! `sngram` — Sparse n-gram weight table learner.
+//! `sngram` — learn a sparse n-gram weight table by streaming HF datasets.
+//!
+//! Single sequential loop, one file at a time, never stops on rate limits.
+//! Two commands: `learn` and `inspect`.
+
 #![recursion_limit = "512"]
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-mod checkpoint;
-mod cmd;
-mod counter;
-mod datasets;
-mod engine;
-mod progress;
-mod resources;
-mod session;
+use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use anyhow::Context;
+use clap::{Parser, Subcommand};
+
+use sngram_cli::{learn, paths};
+
+const GB: u64 = 1_000_000_000;
+const TB: u64 = 1_000 * GB;
+
+const MILESTONES: &[(u64, &str)] = &[
+    (GB, "1gb"), (10 * GB, "10gb"), (50 * GB, "50gb"), (100 * GB, "100gb"),
+    (TB, "1tb"), (5 * TB, "5tb"), (10 * TB, "10tb"), (15 * TB, "15tb"),
+    (25 * TB, "25tb"), (30 * TB, "30tb"), (40 * TB, "40tb"), (45 * TB, "45tb"),
+];
 
 #[derive(Parser)]
 #[command(name = "sngram", version, about = "Sparse n-gram weight table learner")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-
-    /// Verbose: stream worker logs below progress bars.
-    #[arg(short, long, global = true)]
-    verbose: bool,
-
-    /// Quiet: progress bars only, no header.
-    #[arg(short, long, global = true)]
-    quiet: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Learn a weight table from the canonical datasets.
+    /// Learn the weight table. Sequential, one file at a time, never stops on rate limits.
     Learn {
-        /// Session name for checkpoint storage.
-        #[arg(short, long)]
-        name: String,
+        #[arg(long)]
+        mint_dir: Option<PathBuf>,
     },
-
-    /// Resume an interrupted learning session.
-    Resume {
-        /// Session name to resume.
-        #[arg(short, long)]
-        name: String,
-    },
-
-    /// Inspect a completed weight table.
+    /// Inspect a minted weight table.
     Inspect {
-        /// Session name to inspect.
-        #[arg(short, long)]
-        name: String,
-
-        /// Number of rarest bigrams to show.
-        #[arg(long, default_value = "20")]
-        top_rare: usize,
-
-        /// Number of most common bigrams to show.
-        #[arg(long, default_value = "20")]
-        top_common: usize,
+        path: PathBuf,
+        #[arg(long, default_value_t = 20)]
+        top: usize,
     },
-
-    /// Export a completed table to a file.
-    Export {
-        /// Session name to export.
-        #[arg(short, long)]
-        name: String,
-
-        /// Output format.
-        #[arg(short, long, value_enum)]
-        format: ExportFormat,
-
-        /// Output file path.
-        #[arg(short, long)]
-        output: PathBuf,
-    },
-
-    /// Show session status.
-    Status {
-        /// Session name (omit to list all sessions).
-        #[arg(short, long)]
-        name: Option<String>,
-    },
-
-    /// Delete a paused or completed session.
-    Delete {
-        /// Session name to delete.
-        #[arg(short, long)]
-        name: String,
-    },
-}
-
-/// Output formats for weight table export.
-#[derive(Clone, ValueEnum)]
-enum ExportFormat {
-    /// Binary format (256 KB, embeddable via `include_bytes!`).
-    Bin,
-    /// JSON with metadata and top bigrams.
-    Json,
-    /// CSV: c1, c2, weight.
-    Csv,
-    /// Rust source: `const TABLE: [u32; 65536] = [...]`.
-    Rust,
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
-    match cli.command {
-        Commands::Learn { name } => cmd::learn::run(&name, cli.verbose, cli.quiet),
-        Commands::Resume { name } => cmd::resume::run(&name, cli.verbose, cli.quiet),
-        Commands::Inspect {
-            name,
-            top_rare,
-            top_common,
-        } => cmd::inspect::run(&name, top_rare, top_common),
-        Commands::Export {
-            name,
-            format,
-            output,
-        } => cmd::export::run(&name, format, &output),
-        Commands::Status { name } => cmd::status::run(name.as_deref()),
-        Commands::Delete { name } => cmd::delete::run(&name),
+    match Cli::parse().command {
+        Commands::Learn { mint_dir } => learn_cmd(mint_dir),
+        Commands::Inspect { path, top } => inspect(&path, top),
     }
+}
+
+fn learn_cmd(mint_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let token = require_hf_token()?;
+    let mint_dir = mint_dir.unwrap_or_else(paths::default_mint_dir);
+    paths::ensure_dir(&paths::data_dir())?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building runtime")?;
+    rt.block_on(learn::learn(token, mint_dir, MILESTONES.to_vec()))
+}
+
+fn require_hf_token() -> anyhow::Result<String> {
+    if let Ok(t) = std::env::var("HF_TOKEN") {
+        return Ok(t);
+    }
+    let env = Path::new(".env");
+    if env.exists() {
+        let s = std::fs::read_to_string(env)?;
+        for line in s.lines() {
+            if let Some(v) = line.strip_prefix("HF_TOKEN=") {
+                return Ok(v.trim().to_string());
+            }
+        }
+    }
+    anyhow::bail!("HF_TOKEN not set. Export it or add it to .env.")
+}
+
+fn inspect(path: &Path, top: usize) -> anyhow::Result<()> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let table = sngram_types::WeightTable::from_bytes(&bytes)
+        .map_err(|e| anyhow::anyhow!("invalid weight table: {e}"))?;
+    let mut pairs: Vec<(u32, u8, u8)> = Vec::with_capacity(256 * 256);
+    for c1 in 0u8..=255 {
+        for c2 in 0u8..=255 {
+            pairs.push((table.weight(c1, c2), c1, c2));
+        }
+    }
+    pairs.sort_unstable();
+    println!("commonest bigrams (lowest weight):");
+    for &(w, a, b) in pairs.iter().take(top) {
+        println!("  {:<8} {}", w, show(a, b));
+    }
+    println!("rarest bigrams (highest weight):");
+    for &(w, a, b) in pairs.iter().rev().take(top) {
+        println!("  {:<8} {}", w, show(a, b));
+    }
+    Ok(())
+}
+
+fn show(a: u8, b: u8) -> String {
+    format!("{}{}", a.escape_ascii(), b.escape_ascii())
 }

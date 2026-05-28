@@ -10,5 +10,14 @@ sngram = { workspace = true }
 sngram-types = { workspace = true }
 crc32fast = { workspace = true }
 
+[dev-dependencies]
+sngram-cli = { workspace = true }
+opendal = { workspace = true, features = ["services-fs"] }
+parquet = { workspace = true, features = ["arrow"] }
+arrow = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }
+anyhow = { workspace = true }
+
 [lints]
 workspace = true

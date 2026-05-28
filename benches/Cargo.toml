@@ -15,6 +15,11 @@ name = "query"
 path = "src/query.rs"
 harness = false
 
+[[bench]]
+name = "counter"
+path = "src/counter.rs"
+harness = false
+
 [dependencies]
 sngram = { workspace = true }
 sngram-types = { workspace = true }
