@@ -1,8 +1,22 @@
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use opendal::Operator;
 use tracing::{debug, error, info, warn};
+
+fn say(msg: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let secs = ts % 86400;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    println!("[{h:02}:{m:02}:{s:02}] {msg}");
+    let _ = std::io::stdout().flush();
+}
 
 use crate::counter::BigramCounter;
 use crate::mint::mint;
@@ -49,6 +63,11 @@ pub async fn learn(
     let start = Instant::now();
     let mut first_count_at: Option<Instant> = None;
 
+    say(&format!("sngram learn -> {}", mint_dir.display()));
+    say(&format!(
+        "order: {}",
+        DATASETS.iter().map(|d| d.id).collect::<Vec<_>>().join(" -> ")
+    ));
     info!(
         target: "sngram::run",
         mint_dir = %mint_dir.display(),
@@ -58,6 +77,7 @@ pub async fn learn(
     );
 
     for ds in DATASETS {
+        say(&format!("\n====== {} ({}) ======", ds.id, ds.repo));
         info!(
             target: "sngram::dataset",
             dataset = ds.id,
@@ -88,12 +108,14 @@ pub async fn learn(
         };
         let mut ds_stats = Stats::default();
         for prefix in &prefixes {
+            say(&format!("-- {}/{}", ds.id, prefix.trim_end_matches('/')));
             info!(target: "sngram::prefix", dataset = ds.id, prefix = %prefix, "listing");
             let list_t0 = Instant::now();
             let (files, list_outcome) = list_with_retry(&op, prefix).await;
             let list_ms = list_t0.elapsed().as_millis();
             match list_outcome {
                 ListOutcome::Ok => {
+                    say(&format!("   {} files", files.len()));
                     info!(
                         target: "sngram::prefix",
                         dataset = ds.id,
@@ -104,6 +126,7 @@ pub async fn learn(
                     );
                 }
                 ListOutcome::Missing => {
+                    say(&format!("   .. prefix not found on HF: {prefix} (skipping)"));
                     warn!(
                         target: "sngram::prefix",
                         dataset = ds.id,
@@ -114,6 +137,9 @@ pub async fn learn(
                     continue;
                 }
                 ListOutcome::Failed => {
+                    say(&format!(
+                        "!! WARN list failed permanently for {prefix} after {HARD_RETRY_MAX} retries; skipping"
+                    ));
                     error!(
                         target: "sngram::prefix",
                         dataset = ds.id,
@@ -126,6 +152,7 @@ pub async fn learn(
                 }
             }
             if files.is_empty() {
+                say("   (no parquet files in this prefix)");
                 debug!(target: "sngram::prefix", dataset = ds.id, prefix = %prefix, "empty prefix");
                 continue;
             }
@@ -143,6 +170,7 @@ pub async fn learn(
                 let bytes = match count_with_retry(&op, f, ds.field, &counter).await {
                     Ok(b) => b,
                     Err(e) => {
+                        say(&format!("!! skip {} ({e:#})", f.path));
                         error!(
                             target: "sngram::file",
                             dataset = ds.id,
@@ -166,6 +194,16 @@ pub async fn learn(
                 let avg_mbps = (bytes_to_f(cum)) / 1e6 / active_secs;
                 let inst_mbps = (bytes_to_f(bytes)) / 1e6 / file_dt.as_secs_f64().max(0.001);
                 let leaf = f.path.rsplit('/').next().unwrap_or(&f.path);
+                say(&format!(
+                    "   [{:>4}/{:<4}] +{:>7} KB  cum {:>7.2} GB  now {:>4.0} MB/s  avg {:>4.0} MB/s  {}",
+                    i + 1,
+                    files.len(),
+                    bytes / 1_000,
+                    bytes_to_f(cum) / 1e9,
+                    inst_mbps,
+                    avg_mbps,
+                    leaf,
+                ));
                 info!(
                     target: "sngram::file",
                     dataset = ds.id,
@@ -183,18 +221,33 @@ pub async fn learn(
                     let label = milestones[next].1;
                     info!(target: "sngram::mint", label, cum_gb = format!("{:.2}", bytes_to_f(cum) / 1e9), "milestone hit");
                     match mint(&counter, &mint_dir, label) {
-                        Ok(path) => info!(target: "sngram::mint", label, path = %path.display(), "mint written"),
-                        Err(e) => error!(
-                            target: "sngram::mint",
-                            label,
-                            error = %format!("{e:#}"),
-                            "mint failed; continuing"
-                        ),
+                        Ok(path) => {
+                            say(&format!("** MINT [{label}] -> {}", path.display()));
+                            info!(target: "sngram::mint", label, path = %path.display(), "mint written");
+                        }
+                        Err(e) => {
+                            say(&format!("!! WARN mint failed for {label} ({e:#}); continuing"));
+                            error!(
+                                target: "sngram::mint",
+                                label,
+                                error = %format!("{e:#}"),
+                                "mint failed; continuing"
+                            );
+                        }
                     }
                     next += 1;
                 }
             }
         }
+        say(&format!(
+            "-- {} done: {} files counted, {} skipped, {} prefixes missing, {} failed, {:.2} GB",
+            ds.id,
+            ds_stats.files_ok,
+            ds_stats.files_skipped,
+            ds_stats.prefixes_missing,
+            ds_stats.prefixes_failed,
+            bytes_to_f(ds_stats.bytes) / 1e9,
+        ));
         info!(
             target: "sngram::dataset",
             dataset = ds.id,
@@ -208,12 +261,33 @@ pub async fn learn(
         overall.add(ds_stats);
     }
     match mint(&counter, &mint_dir, "final") {
-        Ok(path) => info!(target: "sngram::mint", path = %path.display(), "final mint written"),
-        Err(e) => error!(target: "sngram::mint", error = %format!("{e:#}"), "final mint failed"),
+        Ok(path) => {
+            say(&format!("** MINT [final] -> {}", path.display()));
+            info!(target: "sngram::mint", path = %path.display(), "final mint written");
+        }
+        Err(e) => {
+            say(&format!("!! WARN final mint failed ({e:#})"));
+            error!(target: "sngram::mint", error = %format!("{e:#}"), "final mint failed");
+        }
     }
     let wall = start.elapsed().as_secs();
     let active = first_count_at.map_or(wall, |t| t.elapsed().as_secs());
     let avg = if active > 0 { bytes_to_f(cum) / 1e6 / (active as f64) } else { 0.0 };
+    say(&format!(
+        "\n=== summary === total: {:.2} GB  wall {} s  active {} s  avg {:.0} MB/s",
+        bytes_to_f(cum) / 1e9,
+        wall,
+        active,
+        avg,
+    ));
+    say(&format!(
+        "files: {} counted, {} skipped",
+        overall.files_ok, overall.files_skipped
+    ));
+    say(&format!(
+        "prefixes: {} missing on HF (acceptable), {} failed permanently",
+        overall.prefixes_missing, overall.prefixes_failed
+    ));
     info!(
         target: "sngram::summary",
         total_gb = format!("{:.2}", bytes_to_f(cum) / 1e9),

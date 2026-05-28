@@ -84,16 +84,10 @@ fn init_tracing() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard>
 
     let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(
-            "info,sngram_cli=debug,opendal=info,reqwest=info,hyper=info,parquet=info",
+            "trace,sngram_cli=trace,opendal=debug,reqwest=debug,hyper=debug,parquet=debug",
         )
     });
 
-    let stdout_layer = fmt::layer()
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_level(true)
-        .with_ansi(true)
-        .with_writer(std::io::stdout);
     let file_layer = fmt::layer()
         .with_target(true)
         .with_thread_ids(true)
@@ -104,12 +98,12 @@ fn init_tracing() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard>
 
     tracing_subscriber::registry()
         .with(env)
-        .with(stdout_layer)
         .with(file_layer)
         .init();
 
-    eprintln!("=== LOG -> {}/{} ===", log_dir.display(), file_name);
-    info!(target: "sngram::run", log_file = %log_dir.join(&file_name).display(), epoch = ts, "tracing initialised");
+    let log_path = log_dir.join(&file_name);
+    println!("=== sngram log -> {} ===", log_path.display());
+    info!(target: "sngram::run", log_file = %log_path.display(), epoch = ts, "tracing initialised");
     Ok(guard)
 }
 
