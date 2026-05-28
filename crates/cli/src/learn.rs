@@ -158,7 +158,7 @@ pub async fn learn(
                 debug!(target: "sngram::prefix", dataset = ds.id, prefix = %prefix, "empty prefix");
                 continue;
             }
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<PrefetchItem>(1);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<PrefetchItem>(2);
             let op_p = op.clone();
             let field = ds.field;
             let prefetch_handle = tokio::spawn(async move {

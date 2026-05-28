@@ -167,13 +167,13 @@ pub async fn drain_stream(
     trace!(target: "sngram::rowgroup", path = %path_s, rg_idx = 0, prime_ms = prime_t0.elapsed().as_millis() as u64, "first row group ready");
 
     while let Some(rg) = pending.take() {
-        let dec_t0 = Instant::now();
-        let decode_task = tokio::task::spawn_blocking(move || -> anyhow::Result<LocalTally> {
+        let cycle_t0 = Instant::now();
+        let decode_task = tokio::task::spawn_blocking(move || -> anyhow::Result<(LocalTally, u64)> {
+            let dec_t0 = Instant::now();
             let mut t = LocalTally::new();
             decode_row_group(rg, &mut t)?;
-            Ok(t)
+            Ok((t, dec_t0.elapsed().as_millis() as u64))
         });
-        let fetch_t0 = Instant::now();
         let next_rg = tokio::time::timeout(ROW_GROUP_TIMEOUT, stream.next_row_group())
             .await
             .map_err(|_| {
@@ -181,9 +181,9 @@ pub async fn drain_stream(
                 anyhow::anyhow!("timeout fetching row group for {path_s} (>{}s, treating as transient)", ROW_GROUP_TIMEOUT.as_secs())
             })?
             .context("fetching row group")?;
-        let fetch_ms = fetch_t0.elapsed().as_millis() as u64;
-        let rg_tally = decode_task.await.context("decode task panicked")??;
-        let decode_ms = dec_t0.elapsed().as_millis() as u64;
+        let fetch_ms = cycle_t0.elapsed().as_millis() as u64;
+        let (rg_tally, decode_ms) = decode_task.await.context("decode task panicked")??;
+        let cycle_ms = cycle_t0.elapsed().as_millis() as u64;
         let added = rg_tally.bytes();
         file_tally.add_from(&rg_tally);
         trace!(
@@ -192,6 +192,7 @@ pub async fn drain_stream(
             rg_idx,
             fetch_ms,
             decode_ms,
+            cycle_ms,
             bytes_added = added,
             "row group done (overlapped)"
         );
@@ -237,7 +238,7 @@ async fn open_content_stream(
     let reader_t0 = Instant::now();
     let reader = op
         .reader_with(&file.path)
-        .gap(4 * 1024 * 1024)
+        .gap(16 * 1024 * 1024)
         .chunk(64 * 1024 * 1024)
         .concurrent(8)
         .await
