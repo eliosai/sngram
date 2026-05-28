@@ -1,8 +1,8 @@
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use opendal::Operator;
+use tracing::{debug, error, info, warn};
 
 use crate::counter::BigramCounter;
 use crate::mint::mint;
@@ -14,6 +14,8 @@ use crate::source::{
 pub type Milestone = (u64, &'static str);
 
 const HARD_RETRY_MAX: u32 = 5;
+const RETRY_BASE: Duration = Duration::from_secs(2);
+const RETRY_CAP: Duration = Duration::from_secs(60);
 
 #[derive(Default, Debug, Clone, Copy)]
 struct Stats {
@@ -47,21 +49,34 @@ pub async fn learn(
     let start = Instant::now();
     let mut first_count_at: Option<Instant> = None;
 
-    say(&format!("sngram learn -> {}", mint_dir.display()));
-    say(&format!(
-        "order: {}",
-        DATASETS.iter().map(|d| d.id).collect::<Vec<_>>().join(" -> ")
-    ));
+    info!(
+        target: "sngram::run",
+        mint_dir = %mint_dir.display(),
+        datasets = %DATASETS.iter().map(|d| d.id).collect::<Vec<_>>().join(" -> "),
+        n_milestones = milestones.len(),
+        "learn starting"
+    );
 
     for ds in DATASETS {
-        say(&format!("\n====== {} ({}) ======", ds.id, ds.repo));
+        info!(
+            target: "sngram::dataset",
+            dataset = ds.id,
+            repo = ds.repo,
+            field = ds.field,
+            prefix = ds.prefix,
+            n_langs = ds.langs.len(),
+            "entering dataset"
+        );
         let op = match hf_operator(ds.repo, Some(&token)) {
             Ok(op) => op,
             Err(e) => {
-                say(&format!(
-                    "!! WARN cannot build operator for {} ({e:#}); skipping whole dataset",
-                    ds.repo
-                ));
+                error!(
+                    target: "sngram::dataset",
+                    dataset = ds.id,
+                    repo = ds.repo,
+                    error = %format!("{e:#}"),
+                    "cannot build operator; skipping whole dataset"
+                );
                 overall.prefixes_failed += 1;
                 continue;
             }
@@ -73,34 +88,68 @@ pub async fn learn(
         };
         let mut ds_stats = Stats::default();
         for prefix in &prefixes {
-            say(&format!("-- {}/{}", ds.id, prefix.trim_end_matches('/')));
+            info!(target: "sngram::prefix", dataset = ds.id, prefix = %prefix, "listing");
+            let list_t0 = Instant::now();
             let (files, list_outcome) = list_with_retry(&op, prefix).await;
+            let list_ms = list_t0.elapsed().as_millis();
             match list_outcome {
-                ListOutcome::Ok => {}
+                ListOutcome::Ok => {
+                    info!(
+                        target: "sngram::prefix",
+                        dataset = ds.id,
+                        prefix = %prefix,
+                        n_files = files.len(),
+                        list_ms,
+                        "list complete"
+                    );
+                }
                 ListOutcome::Missing => {
-                    say(&format!("   .. prefix not found on HF: {prefix} (skipping)"));
+                    warn!(
+                        target: "sngram::prefix",
+                        dataset = ds.id,
+                        prefix = %prefix,
+                        "prefix not found on HF; skipping"
+                    );
                     ds_stats.prefixes_missing += 1;
                     continue;
                 }
                 ListOutcome::Failed => {
-                    say(&format!(
-                        "!! WARN list failed permanently for {prefix} after {HARD_RETRY_MAX} retries; skipping"
-                    ));
+                    error!(
+                        target: "sngram::prefix",
+                        dataset = ds.id,
+                        prefix = %prefix,
+                        max_retries = HARD_RETRY_MAX,
+                        "list failed permanently; skipping prefix"
+                    );
                     ds_stats.prefixes_failed += 1;
                     continue;
                 }
             }
             if files.is_empty() {
-                say("   (no parquet files in this prefix)");
+                debug!(target: "sngram::prefix", dataset = ds.id, prefix = %prefix, "empty prefix");
                 continue;
             }
-            say(&format!("   {} files", files.len()));
             for (i, f) in files.iter().enumerate() {
+                debug!(
+                    target: "sngram::file",
+                    dataset = ds.id,
+                    idx = i + 1,
+                    of = files.len(),
+                    path = %f.path,
+                    compressed_size = f.size,
+                    "starting file"
+                );
                 let t0 = Instant::now();
                 let bytes = match count_with_retry(&op, f, ds.field, &counter).await {
                     Ok(b) => b,
                     Err(e) => {
-                        say(&format!("!! skip {} ({e:#})", f.path));
+                        error!(
+                            target: "sngram::file",
+                            dataset = ds.id,
+                            path = %f.path,
+                            error = %format!("{e:#}"),
+                            "permanent failure, skipping file"
+                        );
                         ds_stats.files_skipped += 1;
                         continue;
                     }
@@ -113,80 +162,76 @@ pub async fn learn(
                     first_count_at = Some(t0);
                 }
                 let active_secs = first_count_at
-                    .map(|t| t.elapsed().as_secs_f64().max(1.0))
-                    .unwrap_or(1.0);
-                let avg_mbps = (cum as f64) / 1e6 / active_secs;
-                let inst_mbps = (bytes as f64) / 1e6 / file_dt.as_secs_f64().max(0.001);
+                    .map_or(1.0, |t| t.elapsed().as_secs_f64().max(1.0));
+                let avg_mbps = (bytes_to_f(cum)) / 1e6 / active_secs;
+                let inst_mbps = (bytes_to_f(bytes)) / 1e6 / file_dt.as_secs_f64().max(0.001);
                 let leaf = f.path.rsplit('/').next().unwrap_or(&f.path);
-                say(&format!(
-                    "   [{:>4}/{:<4}] +{:>7} KB  cum {:>7.2} GB  now {:>4.0} MB/s  avg {:>4.0} MB/s  {}",
-                    i + 1,
-                    files.len(),
-                    bytes / 1_000,
-                    (cum as f64) / 1e9,
-                    inst_mbps,
-                    avg_mbps,
-                    leaf,
-                ));
+                info!(
+                    target: "sngram::file",
+                    dataset = ds.id,
+                    idx = i + 1,
+                    of = files.len(),
+                    file = leaf,
+                    bytes_kb = bytes / 1_000,
+                    cum_gb = format!("{:.2}", bytes_to_f(cum) / 1e9),
+                    inst_mbps = format!("{inst_mbps:.0}"),
+                    avg_mbps = format!("{avg_mbps:.0}"),
+                    file_dt_s = format!("{:.1}", file_dt.as_secs_f64()),
+                    "file done"
+                );
                 while next < milestones.len() && cum >= milestones[next].0 {
-                    if let Err(e) = mint(&counter, &mint_dir, milestones[next].1) {
-                        say(&format!(
-                            "!! WARN mint failed for {} ({e:#}); continuing",
-                            milestones[next].1
-                        ));
+                    let label = milestones[next].1;
+                    info!(target: "sngram::mint", label, cum_gb = format!("{:.2}", bytes_to_f(cum) / 1e9), "milestone hit");
+                    match mint(&counter, &mint_dir, label) {
+                        Ok(path) => info!(target: "sngram::mint", label, path = %path.display(), "mint written"),
+                        Err(e) => error!(
+                            target: "sngram::mint",
+                            label,
+                            error = %format!("{e:#}"),
+                            "mint failed; continuing"
+                        ),
                     }
                     next += 1;
                 }
             }
         }
-        say(&format!(
-            "-- {} done: {} files counted, {} skipped, {} prefixes missing, {} prefix-level failures, {:.2} GB",
-            ds.id,
-            ds_stats.files_ok,
-            ds_stats.files_skipped,
-            ds_stats.prefixes_missing,
-            ds_stats.prefixes_failed,
-            (ds_stats.bytes as f64) / 1e9,
-        ));
+        info!(
+            target: "sngram::dataset",
+            dataset = ds.id,
+            files_ok = ds_stats.files_ok,
+            files_skipped = ds_stats.files_skipped,
+            prefixes_missing = ds_stats.prefixes_missing,
+            prefixes_failed = ds_stats.prefixes_failed,
+            bytes_gb = format!("{:.2}", bytes_to_f(ds_stats.bytes) / 1e9),
+            "dataset done"
+        );
         overall.add(ds_stats);
     }
-    if let Err(e) = mint(&counter, &mint_dir, "final") {
-        say(&format!("!! WARN final mint failed ({e:#})"));
+    match mint(&counter, &mint_dir, "final") {
+        Ok(path) => info!(target: "sngram::mint", path = %path.display(), "final mint written"),
+        Err(e) => error!(target: "sngram::mint", error = %format!("{e:#}"), "final mint failed"),
     }
     let wall = start.elapsed().as_secs();
-    let active = first_count_at
-        .map(|t| t.elapsed().as_secs())
-        .unwrap_or(wall);
-    let avg = if active > 0 { (cum as f64) / 1e6 / (active as f64) } else { 0.0 };
-    say(&format!(
-        "\n=== summary ===\ntotal: {:.2} GB  wall {} s  active {} s  avg {:.0} MB/s",
-        (cum as f64) / 1e9,
-        wall,
-        active,
-        avg,
-    ));
-    say(&format!(
-        "files: {} counted, {} skipped",
-        overall.files_ok, overall.files_skipped
-    ));
-    say(&format!(
-        "prefixes: {} missing on HF (acceptable), {} failed permanently (look into these)",
-        overall.prefixes_missing, overall.prefixes_failed
-    ));
+    let active = first_count_at.map_or(wall, |t| t.elapsed().as_secs());
+    let avg = if active > 0 { bytes_to_f(cum) / 1e6 / (active as f64) } else { 0.0 };
+    info!(
+        target: "sngram::summary",
+        total_gb = format!("{:.2}", bytes_to_f(cum) / 1e9),
+        wall_s = wall,
+        active_s = active,
+        avg_mbps = format!("{avg:.0}"),
+        files_ok = overall.files_ok,
+        files_skipped = overall.files_skipped,
+        prefixes_missing = overall.prefixes_missing,
+        prefixes_failed = overall.prefixes_failed,
+        "run summary"
+    );
     Ok(())
 }
 
-fn say(msg: &str) {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let secs = ts % 86400;
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    println!("[{h:02}:{m:02}:{s:02}] {msg}");
-    let _ = std::io::stdout().flush();
+#[allow(clippy::cast_precision_loss, reason = "stats display only")]
+fn bytes_to_f(b: u64) -> f64 {
+    b as f64
 }
 
 enum ListOutcome {
@@ -196,32 +241,49 @@ enum ListOutcome {
 }
 
 async fn list_with_retry(op: &Operator, prefix: &str) -> (Vec<ParquetFile>, ListOutcome) {
-    let mut delay = Duration::from_secs(2);
+    let mut delay = RETRY_BASE;
     let mut hard_attempts: u32 = 0;
     loop {
         match list_files(op, prefix).await {
             Ok(f) => return (f, ListOutcome::Ok),
             Err(e) if is_transient(&e) => {
-                say(&format!(
-                    "   .. list rate-limited on {prefix} ({e:#}); retry in {}s",
-                    delay.as_secs()
-                ));
+                warn!(
+                    target: "sngram::list",
+                    prefix = %prefix,
+                    delay_s = delay.as_secs(),
+                    error = %format!("{e:#}"),
+                    "transient list error; retrying"
+                );
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(60));
+                delay = (delay * 2).min(RETRY_CAP);
             }
-            Err(e) if is_not_found(&e) => return (Vec::new(), ListOutcome::Missing),
+            Err(e) if is_not_found(&e) => {
+                debug!(target: "sngram::list", prefix = %prefix, "not found");
+                return (Vec::new(), ListOutcome::Missing);
+            }
             Err(e) => {
                 hard_attempts += 1;
                 if hard_attempts >= HARD_RETRY_MAX {
-                    say(&format!("!! list error final on {prefix} after {hard_attempts} tries: {e:#}"));
+                    error!(
+                        target: "sngram::list",
+                        prefix = %prefix,
+                        attempts = hard_attempts,
+                        error = %format!("{e:#}"),
+                        "list permanently failed"
+                    );
                     return (Vec::new(), ListOutcome::Failed);
                 }
-                say(&format!(
-                    "   .. list error on {prefix} ({e:#}); try {hard_attempts}/{HARD_RETRY_MAX} in {}s",
-                    delay.as_secs()
-                ));
+                warn!(
+                    target: "sngram::list",
+                    prefix = %prefix,
+                    attempt = hard_attempts,
+                    max = HARD_RETRY_MAX,
+                    delay_s = delay.as_secs(),
+                    error = %format!("{e:#}"),
+                    "list hard error; retrying"
+                );
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(60));
+                delay = (delay * 2).min(RETRY_CAP);
             }
         }
     }
@@ -233,19 +295,21 @@ async fn count_with_retry(
     field: &str,
     counter: &BigramCounter,
 ) -> anyhow::Result<u64> {
-    let mut delay = Duration::from_secs(2);
+    let mut delay = RETRY_BASE;
     let mut hard_attempts: u32 = 0;
     loop {
         match count_file(op, file, field, counter).await {
             Ok(b) => return Ok(b),
             Err(e) if is_transient(&e) => {
-                say(&format!(
-                    "   .. rate-limited on {} ({e:#}); retry in {}s",
-                    file.path,
-                    delay.as_secs()
-                ));
+                warn!(
+                    target: "sngram::file",
+                    path = %file.path,
+                    delay_s = delay.as_secs(),
+                    error = %format!("{e:#}"),
+                    "transient file error (timeout / rate-limit / conn issue); retrying"
+                );
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(60));
+                delay = (delay * 2).min(RETRY_CAP);
             }
             Err(e) if is_not_found(&e) => return Err(e),
             Err(e) => {
@@ -253,13 +317,17 @@ async fn count_with_retry(
                 if hard_attempts >= HARD_RETRY_MAX {
                     return Err(e);
                 }
-                say(&format!(
-                    "   .. error on {} ({e:#}); try {hard_attempts}/{HARD_RETRY_MAX} in {}s",
-                    file.path,
-                    delay.as_secs()
-                ));
+                warn!(
+                    target: "sngram::file",
+                    path = %file.path,
+                    attempt = hard_attempts,
+                    max = HARD_RETRY_MAX,
+                    delay_s = delay.as_secs(),
+                    error = %format!("{e:#}"),
+                    "hard file error; retrying"
+                );
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(60));
+                delay = (delay * 2).min(RETRY_CAP);
             }
         }
     }

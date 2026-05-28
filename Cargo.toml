@@ -60,6 +60,11 @@ tempfile = "3.27"
 anyhow = "1.0"
 thiserror = "2.0"
 
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi"] }
+tracing-appender = "0.2"
+
 [workspace.lints.rust]
 unsafe_code = "warn"
 missing_docs = "warn"

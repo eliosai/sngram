@@ -1,6 +1,6 @@
 //! HF dataset definitions and one-file content streaming.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use arrow::array::{Array, BinaryArray, LargeBinaryArray, LargeStringArray, StringArray};
@@ -10,6 +10,7 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet_opendal::AsyncReader;
+use tracing::{debug, trace, warn};
 
 use crate::counter::{BigramCounter, LocalTally};
 
@@ -65,6 +66,7 @@ pub struct ParquetFile {
 }
 
 pub fn hf_operator(repo: &str, token: Option<&str>) -> anyhow::Result<Operator> {
+    debug!(target: "sngram::op", repo, has_token = token.is_some(), "building operator");
     let mut builder = Huggingface::default().repo_type("dataset").repo_id(repo);
     if let Some(t) = token {
         builder = builder.token(t);
@@ -79,13 +81,26 @@ pub fn hf_operator(repo: &str, token: Option<&str>) -> anyhow::Result<Operator> 
 }
 
 pub async fn list_files(op: &Operator, prefix: &str) -> anyhow::Result<Vec<ParquetFile>> {
+    debug!(target: "sngram::list", prefix, "starting recursive list");
+    let t0 = Instant::now();
     let entries = op.list_with(prefix).recursive(true).await.context("listing")?;
+    let raw_count = entries.len();
     let mut files: Vec<ParquetFile> = entries
         .into_iter()
         .filter(|e| e.path().ends_with(".parquet"))
         .map(|e| ParquetFile { path: e.path().to_owned(), size: e.metadata().content_length() })
         .collect();
     files.sort_by(|a, b| a.path.cmp(&b.path));
+    let total_compressed: u64 = files.iter().map(|f| f.size).sum();
+    debug!(
+        target: "sngram::list",
+        prefix,
+        raw_entries = raw_count,
+        parquet_files = files.len(),
+        total_compressed_bytes = total_compressed,
+        list_ms = t0.elapsed().as_millis() as u64,
+        "list complete"
+    );
     Ok(files)
 }
 
@@ -117,24 +132,64 @@ pub async fn count_file(
     field: &str,
     counter: &BigramCounter,
 ) -> anyhow::Result<u64> {
+    debug!(target: "sngram::stream", path = %file.path, size = file.size, "opening stream");
+    let open_t0 = Instant::now();
     let mut stream = tokio::time::timeout(OPEN_TIMEOUT, open_content_stream(op, file, field))
         .await
-        .map_err(|_| anyhow::anyhow!("timeout opening stream for {} (>{}s, treating as transient)", file.path, OPEN_TIMEOUT.as_secs()))??;
+        .map_err(|_| {
+            warn!(target: "sngram::stream", path = %file.path, timeout_s = OPEN_TIMEOUT.as_secs(), "open timed out (treating as transient)");
+            anyhow::anyhow!("timeout opening stream for {} (>{}s, treating as transient)", file.path, OPEN_TIMEOUT.as_secs())
+        })??;
+    debug!(target: "sngram::stream", path = %file.path, open_ms = open_t0.elapsed().as_millis() as u64, "stream open");
     let mut tally = LocalTally::new();
+    let mut rg_idx: usize = 0;
     loop {
+        let rg_t0 = Instant::now();
+        trace!(target: "sngram::rowgroup", path = %file.path, rg_idx, "fetching row group");
         let next = tokio::time::timeout(ROW_GROUP_TIMEOUT, stream.next_row_group())
             .await
-            .map_err(|_| anyhow::anyhow!("timeout fetching row group for {} (>{}s, treating as transient)", file.path, ROW_GROUP_TIMEOUT.as_secs()))?
+            .map_err(|_| {
+                warn!(target: "sngram::rowgroup", path = %file.path, rg_idx, timeout_s = ROW_GROUP_TIMEOUT.as_secs(), "row group fetch timed out (treating as transient)");
+                anyhow::anyhow!("timeout fetching row group for {} (>{}s, treating as transient)", file.path, ROW_GROUP_TIMEOUT.as_secs())
+            })?
             .context("fetching row group")?;
+        let fetch_ms = rg_t0.elapsed().as_millis() as u64;
         match next {
-            Some(rg) => decode_row_group(rg, &mut tally)?,
-            None => break,
+            Some(rg) => {
+                trace!(target: "sngram::rowgroup", path = %file.path, rg_idx, fetch_ms, "row group fetched, decoding");
+                let dec_t0 = Instant::now();
+                let before_bytes = tally.bytes();
+                decode_row_group(rg, &mut tally)?;
+                let added = tally.bytes() - before_bytes;
+                trace!(
+                    target: "sngram::rowgroup",
+                    path = %file.path,
+                    rg_idx,
+                    fetch_ms,
+                    decode_ms = dec_t0.elapsed().as_millis() as u64,
+                    bytes_added = added,
+                    "row group done"
+                );
+                rg_idx += 1;
+            }
+            None => {
+                trace!(target: "sngram::rowgroup", path = %file.path, total_rg = rg_idx, "EOF");
+                break;
+            }
         }
     }
     let bytes = tally.bytes();
     counter.merge(&tally);
     counter.inc_files(1);
     counter.add_downloaded(file.size);
+    debug!(
+        target: "sngram::stream",
+        path = %file.path,
+        row_groups = rg_idx,
+        text_bytes = bytes,
+        compressed_bytes = file.size,
+        "file complete"
+    );
     Ok(bytes)
 }
 
@@ -145,6 +200,7 @@ async fn open_content_stream(
     file: &ParquetFile,
     field: &str,
 ) -> anyhow::Result<FileStream> {
+    let reader_t0 = Instant::now();
     let reader = op
         .reader_with(&file.path)
         .gap(4 * 1024 * 1024)
@@ -152,10 +208,26 @@ async fn open_content_stream(
         .concurrent(4)
         .await
         .context("opening reader")?;
+    debug!(target: "sngram::stream", path = %file.path, reader_open_ms = reader_t0.elapsed().as_millis() as u64, "reader opened");
+    let meta_t0 = Instant::now();
     let builder = ParquetRecordBatchStreamBuilder::new(AsyncReader::new(reader, file.size))
         .await
         .context("reading parquet metadata")?;
+    let row_groups = builder.metadata().num_row_groups();
+    let schema_fields: Vec<&str> = builder.schema().fields().iter().map(|f| f.name().as_str()).collect();
     let field_idx = find_field(builder.schema(), field)?;
+    let resolved_field = schema_fields.get(field_idx).copied().unwrap_or("?");
+    debug!(
+        target: "sngram::stream",
+        path = %file.path,
+        meta_ms = meta_t0.elapsed().as_millis() as u64,
+        row_groups,
+        schema_fields = ?schema_fields,
+        requested_field = field,
+        resolved_field,
+        field_idx,
+        "metadata read"
+    );
     let mask = ProjectionMask::roots(
         builder.metadata().file_metadata().schema_descr(),
         [field_idx],

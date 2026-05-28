@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use tracing::info;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, fmt};
 
 use sngram_cli::{learn, paths};
 
@@ -58,11 +62,55 @@ fn learn_cmd(mint_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let token = require_hf_token()?;
     let mint_dir = mint_dir.unwrap_or_else(paths::default_mint_dir);
     paths::ensure_dir(&paths::data_dir())?;
+    paths::ensure_dir(&mint_dir)?;
+    let _log_guard = init_tracing()?;
+    info!(target: "sngram::run", mint_dir = %mint_dir.display(), "learn starting");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("building runtime")?;
     rt.block_on(learn::learn(token, mint_dir, MILESTONES.to_vec()))
+}
+
+fn init_tracing() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let log_dir = std::path::PathBuf::from("/tmp");
+    let file_name = format!("sngram-learn-{ts}.log");
+    let file_appender = tracing_appender::rolling::never(&log_dir, &file_name);
+    let (writer, guard) = tracing_appender::non_blocking(file_appender);
+
+    let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            "info,sngram_cli=debug,opendal=info,reqwest=info,hyper=info,parquet=info",
+        )
+    });
+
+    let stdout_layer = fmt::layer()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_level(true)
+        .with_ansi(true)
+        .with_writer(std::io::stdout);
+    let file_layer = fmt::layer()
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .with_level(true)
+        .with_ansi(false)
+        .with_writer(writer);
+
+    tracing_subscriber::registry()
+        .with(env)
+        .with(stdout_layer)
+        .with(file_layer)
+        .init();
+
+    eprintln!("=== LOG -> {}/{} ===", log_dir.display(), file_name);
+    info!(target: "sngram::run", log_file = %log_dir.join(&file_name).display(), epoch = ts, "tracing initialised");
+    Ok(guard)
 }
 
 fn require_hf_token() -> anyhow::Result<String> {
