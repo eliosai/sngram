@@ -2,7 +2,7 @@
     missing_docs,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::cast_possible_truncation,
+    clippy::cast_possible_truncation
 )]
 
 use std::sync::Arc;
@@ -65,21 +65,17 @@ fn bench_process_concurrent(c: &mut Criterion) {
         let data = source_code(size);
         let total = (size * threads) as u64;
         group.throughput(Throughput::Bytes(total));
-        group.bench_with_input(
-            BenchmarkId::new("threads", threads),
-            &data,
-            |b, d| {
-                let counter = Arc::new(Counter::new());
-                b.iter(|| {
-                    std::thread::scope(|s| {
-                        for _ in 0..threads {
-                            let c = &counter;
-                            s.spawn(|| c.process(d));
-                        }
-                    });
+        group.bench_with_input(BenchmarkId::new("threads", threads), &data, |b, d| {
+            let counter = Arc::new(Counter::new());
+            b.iter(|| {
+                std::thread::scope(|s| {
+                    for _ in 0..threads {
+                        let c = &counter;
+                        s.spawn(|| c.process(d));
+                    }
                 });
-            },
-        );
+            });
+        });
     }
     group.finish();
 }

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "Types for sparse n-gram weight tables"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["ngram", "weights", "index", "search"]
+categories = ["data-structures", "text-processing"]
+publish = true
 
 [dependencies]
 bytemuck = { workspace = true }

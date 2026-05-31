@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "CLI for learning sparse n-gram weight tables"
+publish = false
 
 [lib]
 name = "sngram_cli"

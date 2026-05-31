@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod tests {
-    use sngram_types::{Content, WeightTable, TABLE_BINARY_SIZE};
+    use sngram_types::{Content, TABLE_BINARY_SIZE, WeightTable};
 
     fn crc32_table() -> WeightTable {
         let mut buf = vec![0u8; TABLE_BINARY_SIZE];
@@ -101,16 +101,17 @@ mod tests {
     #[test]
     fn concurrent_indexing() {
         let table = std::sync::Arc::new(crc32_table());
-        let handles: Vec<_> = (0..8).map(|i| {
-            let t = table.clone();
-            std::thread::spawn(move || {
-                let data = format!("thread {i} content");
-                let content = Content::new(data.as_bytes());
-                sngram::index(&t, &content).hashes().count()
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let t = table.clone();
+                std::thread::spawn(move || {
+                    let data = format!("thread {i} content");
+                    let content = Content::new(data.as_bytes());
+                    sngram::index(&t, &content).hashes().count()
+                })
             })
-        }).collect();
-        let total: usize = handles.into_iter()
-            .map(|h| h.join().unwrap()).sum();
+            .collect();
+        let total: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
         assert!(total > 0);
     }
 }

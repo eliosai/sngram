@@ -5,39 +5,70 @@
 pub struct Content<'a>(&'a [u8]);
 
 const BINARY_SIGS: &[&[u8]] = &[
-    b"\x7fELF", b"MZ",
-    b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
-    b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
+    b"\x7fELF",
+    b"MZ",
+    b"\xfe\xed\xfa\xce",
+    b"\xfe\xed\xfa\xcf",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
     b"\xca\xfe\xba\xbe",
-    b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"BM",
-    b"\x00\x00\x01\x00", b"RIFF",
-    b"\x49\x49\x2a\x00", b"\x4d\x4d\x00\x2a",
-    b"PK\x03\x04", b"\x1f\x8b", b"BZh", b"\xfd7zXZ",
-    b"7z\xbc\xaf\x27\x1c", b"\x52\x61\x72\x21",
-    b"\x28\xb5\x2f\xfd", b"\x04\x22\x4d\x18",
-    b"%PDF", b"\xd0\xcf\x11\xe0",
+    b"\x89PNG",
+    b"\xff\xd8\xff",
+    b"GIF8",
+    b"BM",
+    b"\x00\x00\x01\x00",
+    b"RIFF",
+    b"\x49\x49\x2a\x00",
+    b"\x4d\x4d\x00\x2a",
+    b"PK\x03\x04",
+    b"\x1f\x8b",
+    b"BZh",
+    b"\xfd7zXZ",
+    b"7z\xbc\xaf\x27\x1c",
+    b"\x52\x61\x72\x21",
+    b"\x28\xb5\x2f\xfd",
+    b"\x04\x22\x4d\x18",
+    b"%PDF",
+    b"\xd0\xcf\x11\xe0",
     b"\x1a\x45\xdf\xa3",
     b"\x00\x00\x00\x1c\x66\x74\x79\x70",
-    b"fLaC", b"OggS", b"ID3", b"\xff\xfb", b"\xff\xf3",
-    b"SQLite format 3", b"\x00asm",
-    b"PAR1", b"ORC", b"ARROW1",
+    b"fLaC",
+    b"OggS",
+    b"ID3",
+    b"\xff\xfb",
+    b"\xff\xf3",
+    b"SQLite format 3",
+    b"\x00asm",
+    b"PAR1",
+    b"ORC",
+    b"ARROW1",
 ];
 
 impl<'a> Content<'a> {
     #[must_use]
-    pub const fn new(bytes: &'a [u8]) -> Self { Self(bytes) }
+    pub const fn new(bytes: &'a [u8]) -> Self {
+        Self(bytes)
+    }
 
     #[must_use]
-    pub const fn as_bytes(&self) -> &'a [u8] { self.0 }
+    pub const fn as_bytes(&self) -> &'a [u8] {
+        self.0
+    }
 
     #[must_use]
-    pub const fn len(&self) -> usize { self.0.len() }
+    pub const fn len(&self) -> usize {
+        self.0.len()
+    }
 
     #[must_use]
-    pub const fn is_empty(&self) -> bool { self.0.is_empty() }
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 
     #[must_use]
-    pub const fn exceeds(&self, max_bytes: usize) -> bool { self.0.len() > max_bytes }
+    pub const fn exceeds(&self, max_bytes: usize) -> bool {
+        self.0.len() > max_bytes
+    }
 
     #[must_use]
     pub fn has_binary_signature(&self) -> bool {

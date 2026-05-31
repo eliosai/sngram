@@ -3,7 +3,7 @@
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::indexing_slicing,
-    clippy::cast_possible_truncation,
+    clippy::cast_possible_truncation
 )]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "Sparse n-gram extraction for code search indexing"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["regex", "search", "ngram", "index", "code-search"]
+categories = ["text-processing", "algorithms", "data-structures"]
+publish = true
 
 [dependencies]
 sngram-types = { workspace = true }

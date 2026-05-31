@@ -3,7 +3,7 @@
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::indexing_slicing,
-    clippy::cast_possible_truncation,
+    clippy::cast_possible_truncation
 )]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -110,7 +110,9 @@ fn bench_weight_lookup(c: &mut Criterion) {
         b.iter(|| {
             let w = table.weight(i, j);
             j = j.wrapping_add(1);
-            if j == 0 { i = i.wrapping_add(1); }
+            if j == 0 {
+                i = i.wrapping_add(1);
+            }
             w
         });
     });

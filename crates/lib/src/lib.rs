@@ -32,8 +32,9 @@ mod pattern;
 
 pub use error::QueryError;
 pub use pattern::Pattern;
-
-use sngram_types::{Content, IndexGrams, QueryGrams, WeightTable};
+pub use sngram_types::{
+    Content, IndexGram, IndexGrams, QueryGram, QueryGrams, TableError, WeightTable,
+};
 
 /// Collect all sparse n-grams from content into a `Vec`.
 #[must_use]
@@ -82,7 +83,10 @@ mod tests {
     }
 
     fn index_set(t: &WeightTable, doc: &[u8]) -> std::collections::HashSet<Vec<u8>> {
-        index(t, &Content::new(doc)).iter().map(|g| g.as_bytes().to_vec()).collect()
+        index(t, &Content::new(doc))
+            .iter()
+            .map(|g| g.as_bytes().to_vec())
+            .collect()
     }
 
     // Weights that strictly decrease along the byte run 1,2,3,... so the index
@@ -124,8 +128,11 @@ mod tests {
     fn covering_grams_are_subset_of_index() {
         let t = table();
         let lits: &[&[u8]] = &[
-            b"MAX_FILE_SIZE", b"the quick brown fox", b"alpha_beta_gamma_delta",
-            b"0xDEADBEEFcafe", b"snake_case_identifier_name",
+            b"MAX_FILE_SIZE",
+            b"the quick brown fox",
+            b"alpha_beta_gamma_delta",
+            b"0xDEADBEEFcafe",
+            b"snake_case_identifier_name",
         ];
         let ctxs: &[(&[u8], &[u8])] = &[
             (b"", b""),
@@ -143,7 +150,10 @@ mod tests {
     fn covering_constrains_a_long_literal() {
         let t = table();
         let cov = crate::extract::covering(&t, &[b"MAX_FILE_SIZE".to_vec()]);
-        assert!(cov.iter().next().is_some(), "covering must produce grams for a long literal");
+        assert!(
+            cov.iter().next().is_some(),
+            "covering must produce grams for a long literal"
+        );
     }
 
     // INDEX path: a long strictly-decreasing weight run grows the scan stack
@@ -382,10 +392,12 @@ mod tests {
 
         for qg in &query_grams {
             let bytes = qg.as_bytes();
-            let found = literal
-                .windows(bytes.len())
-                .any(|w| w == bytes);
-            assert!(found, "{:?} not found in content", String::from_utf8_lossy(bytes));
+            let found = literal.windows(bytes.len()).any(|w| w == bytes);
+            assert!(
+                found,
+                "{:?} not found in content",
+                String::from_utf8_lossy(bytes)
+            );
         }
     }
 }

@@ -40,7 +40,10 @@ impl WeightTable {
             });
         }
 
-        Ok(Self { weights: parse_weights(data), version })
+        Ok(Self {
+            weights: parse_weights(data),
+            version,
+        })
     }
 
     #[must_use]
@@ -131,13 +134,19 @@ mod tests {
     fn rejects_wrong_magic() {
         let mut bytes = test_table_bytes();
         bytes[0] = b'X';
-        assert!(matches!(WeightTable::from_bytes(&bytes), Err(TableError::InvalidMagic)));
+        assert!(matches!(
+            WeightTable::from_bytes(&bytes),
+            Err(TableError::InvalidMagic)
+        ));
     }
 
     #[test]
     fn rejects_bad_checksum() {
         let mut bytes = test_table_bytes();
         bytes[20] ^= 0xFF;
-        assert!(matches!(WeightTable::from_bytes(&bytes), Err(TableError::Checksum { .. })));
+        assert!(matches!(
+            WeightTable::from_bytes(&bytes),
+            Err(TableError::Checksum { .. })
+        ));
     }
 }

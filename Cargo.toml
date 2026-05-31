@@ -1,11 +1,14 @@
 [workspace]
 resolver = "3"
-members = ["crates/types", "crates/lib", "crates/cli", "tests", "benches"]
+members = ["crates/types", "crates/lib", "crates/weights", "crates/cli", "tests", "benches"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Joshua Smotritsky"]
+license = "MIT"
+repository = "https://github.com/eliosai/sngram"
+rust-version = "1.85"
 
 [profile.release]
 opt-level = 3
@@ -15,8 +18,9 @@ strip = true
 
 [workspace.dependencies]
 # Internal
-sngram-types = { path = "crates/types" }
-sngram = { path = "crates/lib" }
+sngram-types = { version = "0.2.0", path = "crates/types" }
+sngram = { version = "0.2.0", path = "crates/lib" }
+sngram-weights = { version = "0.2.0", path = "crates/weights" }
 sngram-cli = { path = "crates/cli" }
 
 # Types / zero-copy

@@ -1,9 +1,9 @@
 //! Regex pattern parsing with prefix+suffix literal extraction.
 
-use regex_syntax::hir::literal::{ExtractKind, Extractor};
 use regex_syntax::hir::Hir;
+use regex_syntax::hir::literal::{ExtractKind, Extractor};
 
-use crate::error::{QueryError, MAX_PATTERN_LEN};
+use crate::error::{MAX_PATTERN_LEN, QueryError};
 
 const MIN_LITERAL_LEN: usize = 3;
 const NEST_LIMIT: u32 = 100;
@@ -22,12 +22,17 @@ impl Pattern {
     pub fn new(regex: &str) -> Result<Self, QueryError> {
         check_length(regex)?;
         let hir = parse(regex)?;
-        Ok(Self { source: regex.to_owned(), hir })
+        Ok(Self {
+            source: regex.to_owned(),
+            hir,
+        })
     }
 
     /// Original regex string.
     #[must_use]
-    pub fn as_str(&self) -> &str { &self.source }
+    pub fn as_str(&self) -> &str {
+        &self.source
+    }
 
     /// # Errors
     ///
@@ -41,7 +46,10 @@ impl Pattern {
 
 const fn check_length(regex: &str) -> Result<(), QueryError> {
     if regex.len() > MAX_PATTERN_LEN {
-        return Err(QueryError::PatternTooLong { len: regex.len(), max: MAX_PATTERN_LEN });
+        return Err(QueryError::PatternTooLong {
+            len: regex.len(),
+            max: MAX_PATTERN_LEN,
+        });
     }
     Ok(())
 }
@@ -64,7 +72,9 @@ fn extract_both(hir: &Hir) -> Result<Vec<Vec<u8>>, QueryError> {
     all.sort();
     all.dedup();
 
-    if all.is_empty() { return Err(QueryError::NoLiterals); }
+    if all.is_empty() {
+        return Err(QueryError::NoLiterals);
+    }
     Ok(all)
 }
 
@@ -83,5 +93,7 @@ fn validate_lengths(literals: &[Vec<u8>]) -> Result<(), QueryError> {
     if literals.iter().any(|l| l.len() >= MIN_LITERAL_LEN) {
         return Ok(());
     }
-    Err(QueryError::LiteralsTooShort { min_len: MIN_LITERAL_LEN })
+    Err(QueryError::LiteralsTooShort {
+        min_len: MIN_LITERAL_LEN,
+    })
 }

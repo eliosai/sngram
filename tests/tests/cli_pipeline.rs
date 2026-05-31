@@ -36,10 +36,16 @@ fn write_parquet(path: &Path, content: &[&str], junk: &[&str]) {
 }
 
 fn fs_op(root: &Path) -> Operator {
-    Operator::new(Fs::default().root(root.to_str().unwrap())).unwrap().finish()
+    Operator::new(Fs::default().root(root.to_str().unwrap()))
+        .unwrap()
+        .finish()
 }
 
-async fn list_with_sizes(op: &Operator, dir: &Path, prefix: &str) -> Vec<sngram_cli::source::ParquetFile> {
+async fn list_with_sizes(
+    op: &Operator,
+    dir: &Path,
+    prefix: &str,
+) -> Vec<sngram_cli::source::ParquetFile> {
     let mut files = list_files(op, prefix).await.unwrap();
     for f in &mut files {
         if f.size == 0 {
@@ -56,7 +62,9 @@ async fn count_file_reads_only_content_column() {
     let op = fs_op(dir.path());
     let files = list_with_sizes(&op, dir.path(), "").await;
     let counter = BigramCounter::new();
-    let bytes = count_file(&op, &files[0], "content", &counter).await.unwrap();
+    let bytes = count_file(&op, &files[0], "content", &counter)
+        .await
+        .unwrap();
     assert!(bytes > 0, "should report counted bytes");
     assert!(counter.count(b'a', b'b') > 0, "content column counted");
     assert_eq!(counter.count(b'Z', b'Z'), 0, "junk column NOT counted");
@@ -74,10 +82,16 @@ async fn count_file_does_not_straddle_row_boundary() {
     let op = fs_op(dir.path());
     let files = list_with_sizes(&op, dir.path(), "").await;
     let counter = BigramCounter::new();
-    count_file(&op, &files[0], "content", &counter).await.unwrap();
+    count_file(&op, &files[0], "content", &counter)
+        .await
+        .unwrap();
     assert!(counter.count(b'f', b'n') > 0);
     assert!(counter.count(b'4', b'2') > 0);
-    assert_eq!(counter.count(b';', b'l'), 0, "no bigram across row boundary");
+    assert_eq!(
+        counter.count(b';', b'l'),
+        0,
+        "no bigram across row boundary"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

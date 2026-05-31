@@ -8,7 +8,10 @@ const MIN_LEN: usize = 3;
 const MAX_LEN: usize = 100;
 const STACK_CAP: usize = 128;
 
-#[allow(clippy::indexing_slicing, reason = "scan emits start..end within content")]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "scan emits start..end within content"
+)]
 pub fn all<'a>(table: &WeightTable, content: &'a [u8]) -> IndexGrams<'a> {
     if content.len() < MIN_LEN {
         return IndexGrams::new(Vec::new());
@@ -53,14 +56,11 @@ pub fn covering(table: &WeightTable, literals: &[Vec<u8>]) -> QueryGrams {
 }
 
 #[inline]
-fn drain_emit(
-    stack: &mut FixedStack,
-    end: usize,
-    w: u32,
-    emit: &mut impl FnMut(usize, usize),
-) {
+fn drain_emit(stack: &mut FixedStack, end: usize, w: u32, emit: &mut impl FnMut(usize, usize)) {
     while let Some((start, sw)) = stack.peek() {
-        if sw >= w { break; }
+        if sw >= w {
+            break;
+        }
         stack.pop();
         try_emit(start, end, emit);
     }
@@ -90,7 +90,10 @@ struct FixedStack {
 impl FixedStack {
     #[inline]
     const fn new() -> Self {
-        Self { buf: [(0, 0); STACK_CAP], len: 0 }
+        Self {
+            buf: [(0, 0); STACK_CAP],
+            len: 0,
+        }
     }
 
     #[inline]
@@ -111,7 +114,11 @@ impl FixedStack {
 
     #[inline]
     const fn peek(&self) -> Option<(usize, u32)> {
-        if self.len > 0 { Some(self.buf[self.len - 1]) } else { None }
+        if self.len > 0 {
+            Some(self.buf[self.len - 1])
+        } else {
+            None
+        }
     }
 
     #[inline]
@@ -122,7 +129,10 @@ impl FixedStack {
     }
 }
 
-#[allow(clippy::indexing_slicing, reason = "cover emits start..end within literal")]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "cover emits start..end within literal"
+)]
 fn emit_covering(table: &WeightTable, literal: &[u8]) -> Vec<QueryGram> {
     let mut grams = Vec::new();
     cover(table, literal, |start, end| {
@@ -136,7 +146,10 @@ fn emit_covering(table: &WeightTable, literal: &[u8]) -> Vec<QueryGram> {
 /// Minimal covering n-grams (danlark1 `BuildCoveringNgrams`): the same hull as
 /// [`scan`] restricted to the minimal set, so `cover(L)` is always a subset of
 /// `scan(D)` for any `D` containing `L` — the guarantee against missed matches.
-#[allow(clippy::indexing_slicing, reason = "front read only while deque non-empty")]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "front read only while deque non-empty"
+)]
 fn cover(table: &WeightTable, s: &[u8], mut emit: impl FnMut(usize, usize)) {
     let mut stack: VecDeque<(u32, usize)> = VecDeque::new();
 
@@ -147,7 +160,9 @@ fn cover(table: &WeightTable, s: &[u8], mut emit: impl FnMut(usize, usize)) {
             stack.pop_front();
         }
         while let Some(&(top, pos)) = stack.back() {
-            if w <= top { break; }
+            if w <= top {
+                break;
+            }
             if stack[0].0 == top {
                 glue_plateau(&mut stack, pos, i + 2, &mut emit);
             }
@@ -172,7 +187,9 @@ fn glue_plateau(
 /// Pop the stack down to one entry, emitting the gram spanning each popped pair.
 fn drain(stack: &mut VecDeque<(u32, usize)>, emit: &mut impl FnMut(usize, usize)) {
     while stack.len() > 1 {
-        let Some((_, top)) = stack.pop_back() else { break; };
+        let Some((_, top)) = stack.pop_back() else {
+            break;
+        };
         if let Some(&(_, below)) = stack.back() {
             emit(below, top + 2);
         }

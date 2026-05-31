@@ -1,0 +1,37 @@
+[package]
+name = "sngram-weights"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Pre-trained sparse n-gram weight tables, embedded at compile time and selectable per training-data tier via Cargo features."
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["ngram", "weights", "regex", "search", "code-search"]
+categories = ["text-processing", "data-structures"]
+publish = true
+
+[dependencies]
+sngram-types = { workspace = true }
+
+[features]
+# Largest table embedded by default.
+default = ["10tb"]
+
+# One feature per size. Minted sizes embed their bin; not-yet-minted sizes
+# compile_error! when enabled.
+"1gb" = []
+"10gb" = []
+"50gb" = []
+"100gb" = []
+"1tb" = []
+"5tb" = []
+"10tb" = []
+"15tb" = []
+"25tb" = []
+"30tb" = []
+"40tb" = []
+"45tb" = []
+
+[lints]
+workspace = true
