@@ -20,8 +20,8 @@ ships the trained tables.
 
 ```toml
 [dependencies]
-sngram = "0.3"
-sngram-weights = "0.3"
+sngram = "0.4"
+sngram-weights = "0.4"
 ```
 
 ## Index and query
@@ -58,7 +58,7 @@ size with a `sngram-weights` Cargo feature; `weights()` returns the embedded
 table.
 
 ```toml
-sngram-weights = { version = "0.3", default-features = false, features = ["1tb"] }
+sngram-weights = { version = "0.4", default-features = false, features = ["15tb"] }
 ```
 
 ```rust
