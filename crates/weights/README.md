@@ -9,7 +9,7 @@ it, and more code makes sharper weights.
 
 ```toml
 [dependencies]
-sngram-weights = "0.2"
+sngram-weights = "0.3"
 ```
 
 ```rust
@@ -23,7 +23,7 @@ One Cargo feature per size selects the table. `weights()` returns whichever one
 you enabled.
 
 ```toml
-sngram-weights = { version = "0.2", default-features = false, features = ["1gb"] }
+sngram-weights = { version = "0.3", default-features = false, features = ["1gb"] }
 ```
 
 Minted sizes: `1gb`, `10gb`, `50gb`, `100gb`, `1tb`, `5tb`, `10tb`. The default
