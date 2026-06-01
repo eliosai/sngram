@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 crc32fast = { workspace = true }
+regex-lite = { workspace = true }
 
 [lints]
 workspace = true

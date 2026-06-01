@@ -2,10 +2,12 @@
 
 use std::collections::VecDeque;
 
-use sngram_types::{IndexGram, IndexGrams, QueryGram, QueryGrams, WeightTable};
+use sngram_types::{IndexGram, IndexGrams, WeightTable};
 
-const MIN_LEN: usize = 3;
-const MAX_LEN: usize = 100;
+/// Shortest gram emitted or matched; a sparse gram spans at least one bigram.
+pub const MIN_LEN: usize = 3;
+/// Longest gram emitted; bounds index entries and covering-set members.
+pub const MAX_LEN: usize = 100;
 const STACK_CAP: usize = 128;
 
 #[allow(
@@ -46,13 +48,19 @@ pub fn scan(table: &WeightTable, content: &[u8], mut emit: impl FnMut(usize, usi
     }
 }
 
-pub fn covering(table: &WeightTable, literals: &[Vec<u8>]) -> QueryGrams {
-    let grams = literals
-        .iter()
-        .filter(|lit| lit.len() >= MIN_LEN)
-        .flat_map(|lit| emit_covering(table, lit))
-        .collect();
-    QueryGrams::new(grams)
+/// Covering grams of a single literal, as raw bytes. The query analysis ANDs
+/// these per literal: a document containing `literal` contains all of them
+/// (`cover(L) ⊆ scan(D)` for any `D ⊇ L`), so none is a false negative.
+#[allow(clippy::indexing_slicing, reason = "cover emits start..end within literal")]
+#[must_use]
+pub fn cover_one(table: &WeightTable, literal: &[u8]) -> Vec<Vec<u8>> {
+    let mut grams = Vec::new();
+    cover(table, literal, |start, end| {
+        if (MIN_LEN..=MAX_LEN).contains(&(end - start)) {
+            grams.push(literal[start..end].to_vec());
+        }
+    });
+    grams
 }
 
 #[inline]
@@ -127,20 +135,6 @@ impl FixedStack {
             self.len -= 1;
         }
     }
-}
-
-#[allow(
-    clippy::indexing_slicing,
-    reason = "cover emits start..end within literal"
-)]
-fn emit_covering(table: &WeightTable, literal: &[u8]) -> Vec<QueryGram> {
-    let mut grams = Vec::new();
-    cover(table, literal, |start, end| {
-        if (MIN_LEN..=MAX_LEN).contains(&(end - start)) {
-            grams.push(QueryGram::new(literal[start..end].to_vec(), start));
-        }
-    });
-    grams
 }
 
 /// Minimal covering n-grams (danlark1 `BuildCoveringNgrams`): the same hull as

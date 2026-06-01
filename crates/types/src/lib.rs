@@ -8,5 +8,5 @@ mod table;
 
 pub use content::Content;
 pub use error::TableError;
-pub use gram::{IndexGram, IndexGrams, QueryGram, QueryGrams};
+pub use gram::{IndexGram, IndexGrams};
 pub use table::{TABLE_BINARY_SIZE, WeightTable};

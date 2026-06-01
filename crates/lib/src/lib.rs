@@ -26,15 +26,16 @@
 //!   to keep grams around or iterate them multiple times.
 //! - [`query`] — decomposes a regex into covering grams for lookup.
 
-mod error;
-mod extract;
-mod pattern;
+pub mod error;
+pub mod pattern;
+pub mod plan;
 
-pub use error::QueryError;
-pub use pattern::Pattern;
-pub use sngram_types::{
-    Content, IndexGram, IndexGrams, QueryGram, QueryGrams, TableError, WeightTable,
-};
+mod extract;
+
+use sngram_types::{Content, IndexGrams, WeightTable};
+
+use pattern::Pattern;
+use plan::QueryPlan;
 
 /// Collect all sparse n-grams from content into a `Vec`.
 #[must_use]
@@ -50,19 +51,19 @@ pub fn scan(table: &WeightTable, content: &Content<'_>, emit: impl FnMut(usize, 
     extract::scan(table, content.as_bytes(), emit);
 }
 
-/// Decompose a regex pattern into covering grams for index lookup.
+/// Decompose a regex pattern into a sparse-gram [`QueryPlan`] for index lookup.
 ///
-/// # Errors
-///
-/// Returns [`QueryError`] if the pattern has no extractable literals.
-pub fn query(table: &WeightTable, pattern: &Pattern) -> Result<QueryGrams, QueryError> {
-    let literals = pattern.extract_literals()?;
-    Ok(extract::covering(table, &literals))
+/// Infallible: a too-broad pattern yields [`QueryPlan::All`] and an impossible
+/// one yields [`QueryPlan::None`].
+#[must_use]
+pub fn query(table: &WeightTable, pattern: &Pattern) -> QueryPlan {
+    plan::query(table, pattern)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::QueryError;
     use sngram_types::TABLE_BINARY_SIZE;
 
     fn table() -> WeightTable {
@@ -114,11 +115,11 @@ mod tests {
         doc.extend_from_slice(lit);
         doc.extend_from_slice(suffix);
         let idx = index_set(t, &doc);
-        for g in &crate::extract::covering(t, &[lit.to_vec()]) {
+        for g in &crate::extract::cover_one(t, lit) {
             assert!(
-                idx.contains(g.as_bytes()),
+                idx.contains(g),
                 "FALSE NEGATIVE: gram {:?} of {:?} absent from index",
-                String::from_utf8_lossy(g.as_bytes()),
+                String::from_utf8_lossy(g),
                 String::from_utf8_lossy(lit),
             );
         }
@@ -149,9 +150,9 @@ mod tests {
     #[test]
     fn covering_constrains_a_long_literal() {
         let t = table();
-        let cov = crate::extract::covering(&t, &[b"MAX_FILE_SIZE".to_vec()]);
+        let cov = crate::extract::cover_one(&t, b"MAX_FILE_SIZE");
         assert!(
-            cov.iter().next().is_some(),
+            !cov.is_empty(),
             "covering must produce grams for a long literal"
         );
     }
@@ -165,13 +166,13 @@ mod tests {
         let doc: Vec<u8> = (1u8..=200).collect();
         let idx = index_set(&t, &doc);
         let deep = doc[140..175].to_vec();
-        let cov = crate::extract::covering(&t, &[deep]);
+        let cov = crate::extract::cover_one(&t, &deep);
         assert!(!cov.is_empty(), "covering must produce grams");
         for g in &cov {
             assert!(
-                idx.contains(g.as_bytes()),
+                idx.contains(g),
                 "FALSE NEGATIVE past stack cap: {:?} missing from index",
-                String::from_utf8_lossy(g.as_bytes()),
+                String::from_utf8_lossy(g),
             );
         }
     }
@@ -207,16 +208,16 @@ mod tests {
         let mut doc = vec![200u8];
         doc.extend(1u8..=130);
         let idx = index_set(&t, &doc);
-        let cov = crate::extract::covering(&t, &[doc.clone()]);
+        let cov = crate::extract::cover_one(&t, &doc);
         assert!(
-            cov.iter().any(|g| g.as_bytes().len() > 50),
+            cov.iter().any(|g| g.len() > 50),
             "test must exercise a long front-evicted gram",
         );
         for g in &cov {
             assert!(
-                idx.contains(g.as_bytes()),
+                idx.contains(g),
                 "FALSE NEGATIVE on long literal: gram of len {} missing from index",
-                g.as_bytes().len(),
+                g.len(),
             );
         }
     }
@@ -321,52 +322,30 @@ mod tests {
     fn literal_pattern_extracts_grams() {
         let t = table();
         let pat = Pattern::new("MAX_FILE_SIZE").unwrap();
-        let grams = query(&t, &pat).unwrap();
-        assert!(!grams.is_empty());
+        assert!(matches!(query(&t, &pat), QueryPlan::And { .. }));
     }
 
-    #[test]
-    fn wildcard_mid_extracts_prefix_and_suffix() {
-        let pat = Pattern::new(r"MAX_[A-Z]+_SIZE").unwrap();
-        let literals = pat.extract_literals().unwrap();
-        let has_prefix = literals.iter().any(|l| l.starts_with(b"MAX"));
-        let has_suffix = literals.iter().any(|l| l.ends_with(b"SIZE"));
-        assert!(has_prefix, "missing prefix literal");
-        assert!(has_suffix, "missing suffix literal");
-    }
+    // -- query: too broad yields All (infallible, like codesearch) --
 
     #[test]
-    fn dotstar_extracts_both_sides() {
-        let pat = Pattern::new(r"foo.*bar").unwrap();
-        let literals = pat.extract_literals().unwrap();
-        let has_foo = literals.iter().any(|l| l.starts_with(b"foo"));
-        let has_bar = literals.iter().any(|l| l.ends_with(b"bar"));
-        assert!(has_foo, "missing foo prefix");
-        assert!(has_bar, "missing bar suffix");
-    }
-
-    // -- query: error cases --
-
-    #[test]
-    fn pure_wildcard_returns_no_literals() {
+    fn pure_wildcard_is_all() {
         let pat = Pattern::new(".*").unwrap();
-        let err = query(&table(), &pat).unwrap_err();
-        assert!(matches!(err, QueryError::NoLiterals));
+        assert_eq!(query(&table(), &pat), QueryPlan::All);
     }
 
     #[test]
-    fn pure_class_returns_no_literals() {
+    fn pure_class_is_all() {
         let pat = Pattern::new(r"[a-z]+").unwrap();
-        let err = query(&table(), &pat).unwrap_err();
-        assert!(matches!(err, QueryError::NoLiterals));
+        assert_eq!(query(&table(), &pat), QueryPlan::All);
     }
 
     #[test]
-    fn short_literal_returns_too_short() {
+    fn short_literal_is_all() {
         let pat = Pattern::new("ab").unwrap();
-        let err = query(&table(), &pat).unwrap_err();
-        assert!(matches!(err, QueryError::LiteralsTooShort { .. }));
+        assert_eq!(query(&table(), &pat), QueryPlan::All);
     }
+
+    // -- pattern: parse errors --
 
     #[test]
     fn oversized_pattern_returns_too_long() {
@@ -381,23 +360,4 @@ mod tests {
         assert!(matches!(err, QueryError::InvalidRegex(_)));
     }
 
-    // -- query: covering is subset of index --
-
-    #[test]
-    fn covering_grams_are_substrings_of_content() {
-        let t = table();
-        let literal = b"MAX_FILE_SIZE";
-        let pat = Pattern::new("MAX_FILE_SIZE").unwrap();
-        let query_grams = query(&t, &pat).unwrap();
-
-        for qg in &query_grams {
-            let bytes = qg.as_bytes();
-            let found = literal.windows(bytes.len()).any(|w| w == bytes);
-            assert!(
-                found,
-                "{:?} not found in content",
-                String::from_utf8_lossy(bytes)
-            );
-        }
-    }
 }
