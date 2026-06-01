@@ -28,16 +28,20 @@ macro_rules! unminted {
     };
 }
 
-unminted!("15tb");
 unminted!("25tb");
 unminted!("30tb");
 unminted!("40tb");
 unminted!("45tb");
 
-#[cfg(feature = "10tb")]
+#[cfg(feature = "15tb")]
+const BYTES: &[u8] = include_bytes!("../bins/15tb_weights.bin");
+
+#[cfg(all(feature = "10tb", not(any(feature = "15tb"))))]
 const BYTES: &[u8] = include_bytes!("../bins/10tb_weights.bin");
-#[cfg(all(feature = "5tb", not(feature = "10tb")))]
+
+#[cfg(all(feature = "5tb", not(any(feature = "10tb", feature = "15tb"))))]
 const BYTES: &[u8] = include_bytes!("../bins/5tb_weights.bin");
+
 #[cfg(all(feature = "1tb", not(any(feature = "10tb", feature = "5tb"))))]
 const BYTES: &[u8] = include_bytes!("../bins/1tb_weights.bin");
 #[cfg(all(

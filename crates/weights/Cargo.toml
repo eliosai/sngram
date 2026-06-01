@@ -16,7 +16,7 @@ sngram-types = { workspace = true }
 
 [features]
 # Largest table embedded by default.
-default = ["10tb"]
+default = ["15tb"]
 
 # One feature per size. Minted sizes embed their bin; not-yet-minted sizes
 # compile_error! when enabled.
