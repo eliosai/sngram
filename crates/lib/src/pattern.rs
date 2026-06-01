@@ -1,11 +1,9 @@
-//! Regex pattern parsing with prefix+suffix literal extraction.
+//! Regex pattern parsing into a reusable HIR.
 
 use regex_syntax::hir::Hir;
-use regex_syntax::hir::literal::{ExtractKind, Extractor};
 
 use crate::error::{MAX_PATTERN_LEN, QueryError};
 
-const MIN_LITERAL_LEN: usize = 3;
 const NEST_LIMIT: u32 = 100;
 
 /// Validated regex pattern with pre-parsed HIR.
@@ -34,13 +32,9 @@ impl Pattern {
         &self.source
     }
 
-    /// # Errors
-    ///
-    /// Returns `QueryError` if no usable literals can be extracted.
-    pub(crate) fn extract_literals(&self) -> Result<Vec<Vec<u8>>, QueryError> {
-        let literals = extract_both(&self.hir)?;
-        validate_lengths(&literals)?;
-        Ok(literals)
+    /// The parsed HIR, the input to query analysis.
+    pub(crate) const fn hir(&self) -> &Hir {
+        &self.hir
     }
 }
 
@@ -60,40 +54,4 @@ fn parse(regex: &str) -> Result<Hir, QueryError> {
         .build()
         .parse(regex)
         .map_err(|e| QueryError::InvalidRegex(Box::new(e)))
-}
-
-fn extract_both(hir: &Hir) -> Result<Vec<Vec<u8>>, QueryError> {
-    let prefixes = Extractor::new().kind(ExtractKind::Prefix).extract(hir);
-    let suffixes = Extractor::new().kind(ExtractKind::Suffix).extract(hir);
-
-    let mut all = Vec::new();
-    collect_literals(&prefixes, &mut all);
-    collect_literals(&suffixes, &mut all);
-    all.sort();
-    all.dedup();
-
-    if all.is_empty() {
-        return Err(QueryError::NoLiterals);
-    }
-    Ok(all)
-}
-
-fn collect_literals(seq: &regex_syntax::hir::literal::Seq, out: &mut Vec<Vec<u8>>) {
-    if let Some(lits) = seq.literals() {
-        for lit in lits {
-            let bytes = lit.as_bytes();
-            if !bytes.is_empty() {
-                out.push(bytes.to_vec());
-            }
-        }
-    }
-}
-
-fn validate_lengths(literals: &[Vec<u8>]) -> Result<(), QueryError> {
-    if literals.iter().any(|l| l.len() >= MIN_LITERAL_LEN) {
-        return Ok(());
-    }
-    Err(QueryError::LiteralsTooShort {
-        min_len: MIN_LITERAL_LEN,
-    })
 }
