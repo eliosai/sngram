@@ -1,0 +1,56 @@
+crates/lib/src/lib.rs
+  s_d8ab3a4784817d::t_e4e7e131bfa8d4 367-395
+  s_d8ab3a4784817d::t_e3a283ceb9295d 28
+  s_d8ab3a4784817d::t_87ce4b3ea131e2 36-38
+README.md
+  s_d8ab3a4784817d::t_3df41eba62cf7f 53-57
+crates/lib/tests/streaming.rs
+  s_d8ab3a4784817d::t_f6e9940ba89d50 1-7,9-144
+  s_d8ab3a4784817d::t_a0a1db9e5f3544 8
+crates/lib/README.md
+  s_d8ab3a4784817d::t_80938d27f5a865 8-9
+  s_d8ab3a4784817d::t_c5538d84635d1f 71-93
+Cargo.toml
+  s_d8ab3a4784817d::t_a39a834a4a3979 21-23
+  s_d8ab3a4784817d::t_141b4210ba301c 6
+crates/lib/Cargo.toml
+  s_d8ab3a4784817d::t_3bbeb19e59a68a 14-17,23
+crates/types/README.md
+  s_d8ab3a4784817d::t_3b2c90bbc1bbd7 8
+crates/weights/README.md
+  s_d8ab3a4784817d::t_38dd819e95ea76 12
+  s_d8ab3a4784817d::t_34969d71ab7eea 29-30
+  s_d8ab3a4784817d::t_79c7c888ead5e6 26
+  s_d8ab3a4784817d::t_64c355634ba930 38-39
+benches/src/extract.rs
+  s_d8ab3a4784817d::t_fee662d353da0b 6-7
+  s_d8ab3a4784817d::t_0c485e7418b017 141-194,203-204
+crates/lib/src/extract.rs
+  s_d8ab3a4784817d::t_ea37897e8bf3fc 222
+  s_d8ab3a4784817d::t_feb8daaf5497f9 13
+  s_d8ab3a4784817d::t_0855e84591a65e 216,223-227
+  s_d8ab3a4784817d::t_297947ebbccff7 38
+  s_d8ab3a4784817d::t_71de0776728224 15
+  s_d8ab3a4784817d::t_3cb05117f32f6e 57-110,112-156
+  s_d8ab3a4784817d::t_a042c49683a017 111
+  s_d8ab3a4784817d::t_c820b25e447119 14,16-17
+crates/weights/src/lib.rs
+  s_d8ab3a4784817d::t_a484bda9ab6dc8 9
+  s_d8ab3a4784817d::t_39c29e6b7ed5f9 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "a534cb229a2823a88ead26e6f0bd6a87a68bd630",
+  "prompts": {},
+  "sessions": {
+    "s_d8ab3a4784817d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7b251abb-d4c5-4aff-9124-d792829d38cf",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "jsmey7 <joshua.smotritsky@gmail.com>"
+    }
+  }
+}
