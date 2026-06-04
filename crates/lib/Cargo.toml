@@ -11,11 +11,16 @@ keywords = ["regex", "search", "ngram", "index", "code-search"]
 categories = ["text-processing", "algorithms", "data-structures"]
 publish = true
 
+[features]
+# stream adds StreamScanner::index_reader, pulling only tokio's io traits, no runtime
+stream = ["dep:tokio"]
+
 [dependencies]
 sngram-types = { workspace = true }
 regex-syntax = { workspace = true }
 rustc-hash = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, optional = true, features = ["io-util"] }
 
 [dev-dependencies]
 crc32fast = { workspace = true }

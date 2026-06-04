@@ -6,10 +6,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! sngram-weights = { version = "0.2", default-features = false, features = ["10tb"] }
+//! sngram-weights = { version = "0.4", default-features = false, features = ["10tb"] }
 //! ```
 //!
-//! Minted sizes: `1gb`, `10gb`, `50gb`, `100gb`, `1tb`, `5tb`, `10tb`. Enabling
+//! Minted sizes: `1gb`, `10gb`, `50gb`, `100gb`, `1tb`, `5tb`, `10tb`, `15tb`. Enabling
 //! a size that has not been minted yet fails the build with a clear message,
 //! never a silent "unknown feature".
 

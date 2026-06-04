@@ -10,6 +10,11 @@ pub const MIN_LEN: usize = 3;
 pub const MAX_LEN: usize = 100;
 const STACK_CAP: usize = 128;
 
+/// streaming window: keeps recent bytes so an emitted gram stays contiguous, larger than the kept tail to amortize compaction
+const WINDOW_CAP: usize = 256;
+/// bytes kept on compaction, at least the longest gram so every still-emittable gram start stays in the window
+const WINDOW_KEEP: usize = 128;
+
 #[allow(
     clippy::indexing_slicing,
     reason = "scan emits start..end within content"
@@ -30,6 +35,7 @@ pub fn all<'a>(table: &WeightTable, content: &'a [u8]) -> IndexGrams<'a> {
 ///
 /// Use this instead of [`all`] when you don't need to collect grams —
 /// e.g. when hashing and inserting directly into an inverted index.
+#[inline]
 #[allow(clippy::indexing_slicing, reason = "bounds enforced by pair_count")]
 pub fn scan(table: &WeightTable, content: &[u8], mut emit: impl FnMut(usize, usize)) {
     if content.len() < MIN_LEN {
@@ -45,6 +51,106 @@ pub fn scan(table: &WeightTable, content: &[u8], mut emit: impl FnMut(usize, usi
         top_emit(&stack, end, &mut emit);
         stack.dedup(w);
         stack.push(i, w);
+    }
+}
+
+/// streaming sparse n-gram extraction that holds a bounded window, never the whole document
+pub struct StreamScanner<'t> {
+    table: &'t WeightTable,
+    window: [u8; WINDOW_CAP],
+    wlen: usize,
+    base: usize,
+    stack: FixedStack,
+}
+
+impl<'t> StreamScanner<'t> {
+    /// new scanner bound to a weight table, ready to receive byte chunks
+    #[must_use]
+    pub const fn new(table: &'t WeightTable) -> Self {
+        Self {
+            table,
+            window: [0; WINDOW_CAP],
+            wlen: 0,
+            base: 0,
+            stack: FixedStack::new(),
+        }
+    }
+
+    /// feed the next chunk, emitting each gram's bytes as it closes, identical to scan over the concatenation of all chunks
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "wlen stays <= WINDOW_CAP and a valid gram start is within MAX_LEN of end, kept in the window by WINDOW_KEEP"
+    )]
+    pub fn push(&mut self, chunk: &[u8], mut emit: impl FnMut(&[u8])) {
+        for &byte in chunk {
+            if self.wlen == WINDOW_CAP {
+                self.compact();
+            }
+            self.window[self.wlen] = byte;
+            self.wlen += 1;
+            if self.wlen < 2 {
+                continue;
+            }
+            let weight = self
+                .table
+                .weight(self.window[self.wlen - 2], self.window[self.wlen - 1]);
+            let pos = self.base + self.wlen - 2;
+            let end = self.base + self.wlen;
+            let base = self.base;
+            let window = &self.window;
+            let stack = &mut self.stack;
+            let mut sink = |start: usize, finish: usize| emit(&window[start - base..finish - base]);
+            drain_emit(stack, end, weight, &mut sink);
+            top_emit(stack, end, &mut sink);
+            stack.dedup(weight);
+            stack.push(pos, weight);
+        }
+    }
+
+    /// end the current document and reset for the next, emitting nothing since scan leaves no closed grams at end of input
+    pub const fn finish(&mut self) {
+        self.wlen = 0;
+        self.base = 0;
+        self.stack = FixedStack::new();
+    }
+
+    /// slide the still-emittable tail to the window front so more bytes fit, dropping only bytes too old to start a gram
+    fn compact(&mut self) {
+        const DROP: usize = WINDOW_CAP - WINDOW_KEEP;
+        self.window.copy_within(DROP.., 0);
+        self.wlen = WINDOW_KEEP;
+        self.base += DROP;
+    }
+}
+
+/// drive a scanner from an async buffered reader, reusing its buffer so nothing is allocated for reads
+#[cfg(feature = "stream")]
+impl StreamScanner<'_> {
+    /// stream a whole reader through the scanner, emitting each gram, returns a forwarded io error if the read fails
+    #[allow(
+        clippy::missing_errors_doc,
+        reason = "the only failure is a forwarded reader io error, named in the summary"
+    )]
+    pub async fn index_reader<R>(
+        &mut self,
+        mut reader: R,
+        mut emit: impl FnMut(&[u8]),
+    ) -> std::io::Result<()>
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+    {
+        use tokio::io::AsyncBufReadExt;
+        loop {
+            let chunk = reader.fill_buf().await?;
+            if chunk.is_empty() {
+                break;
+            }
+            let len = chunk.len();
+            self.push(chunk, &mut emit);
+            reader.consume(len);
+        }
+        self.finish();
+        Ok(())
     }
 }
 
@@ -106,13 +212,19 @@ impl FixedStack {
 
     #[inline]
     fn push(&mut self, pos: usize, weight: u32) {
-        // Full: oldest entry is too far back to yield a gram <= MAX_LEN; drop it.
         if self.len == STACK_CAP {
-            self.buf.copy_within(1.., 0);
-            self.len -= 1;
+            self.evict_oldest();
         }
         self.buf[self.len] = (pos, weight);
         self.len += 1;
+    }
+
+    /// drop the oldest entry when full, it is too far back to start a gram within the length limit
+    #[cold]
+    #[inline(never)]
+    fn evict_oldest(&mut self) {
+        self.buf.copy_within(1.., 0);
+        self.len -= 1;
     }
 
     #[inline]

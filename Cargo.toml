@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/types", "crates/lib", "crates/weights", "crates/cli", "tests", "benches"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 authors = ["Joshua Smotritsky"]
 license = "MIT"
@@ -18,9 +18,9 @@ strip = true
 
 [workspace.dependencies]
 # Internal
-sngram-types = { version = "0.4.1", path = "crates/types" }
-sngram = { version = "0.4.1", path = "crates/lib" }
-sngram-weights = { version = "0.4.1", path = "crates/weights" }
+sngram-types = { version = "0.4.2", path = "crates/types" }
+sngram = { version = "0.4.2", path = "crates/lib" }
+sngram-weights = { version = "0.4.2", path = "crates/weights" }
 sngram-cli = { path = "crates/cli" }
 
 # Types / zero-copy

@@ -9,7 +9,7 @@ it, and more code makes sharper weights.
 
 ```toml
 [dependencies]
-sngram-weights = "0.3"
+sngram-weights = "0.4"
 ```
 
 ```rust
@@ -23,11 +23,11 @@ One Cargo feature per size selects the table. `weights()` returns whichever one
 you enabled.
 
 ```toml
-sngram-weights = { version = "0.3", default-features = false, features = ["1gb"] }
+sngram-weights = { version = "0.4", default-features = false, features = ["1gb"] }
 ```
 
-Minted sizes: `1gb`, `10gb`, `50gb`, `100gb`, `1tb`, `5tb`, `10tb`. The default
-feature is `10tb`.
+Minted sizes: `1gb`, `10gb`, `50gb`, `100gb`, `1tb`, `5tb`, `10tb`, `15tb`. The
+default feature is `15tb`.
 
 ## Unminted sizes fail the build
 
@@ -35,8 +35,8 @@ Bigger sizes exist as features but are not trained yet. Enabling one is a
 compile error, not a silent "unknown feature":
 
 ```text
-error: sngram-weights: size `15tb` is not minted yet. Enable a minted size:
-       1gb, 10gb, 50gb, 100gb, 1tb, 5tb, 10tb.
+error: sngram-weights: size `25tb` is not minted yet. Enable a minted size:
+       1gb, 10gb, 50gb, 100gb, 1tb, 5tb, 10tb, 15tb.
 ```
 
 They turn into real tables as the learner mints them.

@@ -50,6 +50,11 @@ hold them. `query` folds a regex into a `QueryPlan` (`All`, `None`, or nested
 superset of what the regex matches, so a prefilter built from it never misses a
 match the index could find; the real regex verifies the candidates.
 
+`StreamScanner` indexes content fed in chunks, holding only a bounded window
+instead of the whole document, and emits exactly the grams `scan` would over the
+concatenation. Enable the `stream` feature for `StreamScanner::index_reader`,
+which drives it from any `tokio::io::AsyncBufRead`, reusing the reader's buffer.
+
 ## Weights
 
 A table is a 256x256 grid: one `u32` per byte pair, 65,536 entries, plus a

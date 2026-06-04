@@ -3,7 +3,8 @@
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::indexing_slicing,
-    clippy::cast_possible_truncation
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
 )]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -137,6 +138,60 @@ fn bench_scan_code(c: &mut Criterion) {
     group.finish();
 }
 
+// Chunk sizes a streaming reader hands the scanner; the 64 B feed stresses the
+// per-chunk boundary path, the larger ones approach the batch hot loop.
+const CHUNKS: &[usize] = &[64, 4096, 65536];
+
+fn stream_count(table: &WeightTable, data: &[u8], chunk: usize) -> u64 {
+    let mut count = 0u64;
+    let mut scanner = sngram::StreamScanner::new(table);
+    for part in data.chunks(chunk) {
+        scanner.push(part, |_| count += 1);
+    }
+    scanner.finish();
+    count
+}
+
+fn bench_scan_stream_code(c: &mut Criterion) {
+    let table = crc32_table();
+    let mut group = c.benchmark_group("scan_stream/code");
+
+    for &size in SIZES {
+        let data = source_code(size);
+        for &chunk in CHUNKS {
+            group.throughput(Throughput::Bytes(size as u64));
+            group.bench_with_input(
+                BenchmarkId::new(format!("chunk_{chunk}"), size),
+                &data,
+                |b, data| b.iter(|| stream_count(&table, data, chunk)),
+            );
+        }
+    }
+    group.finish();
+}
+
+// Reports emissions/byte and distinct-grams/byte for the indexer's per-task
+// memory and concurrency budget; prints once, registers no timed bench.
+fn report_density(_c: &mut Criterion) {
+    let table = crc32_table();
+    for &size in &[4096usize, 65536, 1_048_576] {
+        let data = source_code(size);
+        let content = Content::new(&data);
+        let mut emissions = 0u64;
+        let mut distinct = std::collections::HashSet::new();
+        sngram::scan(&table, &content, |start, end| {
+            emissions += 1;
+            distinct.insert(content.as_bytes()[start..end].to_vec());
+        });
+        eprintln!(
+            "density {size:>8}B: {:.3} emissions/byte, {:.3} distinct/byte, {} distinct",
+            emissions as f64 / size as f64,
+            distinct.len() as f64 / size as f64,
+            distinct.len(),
+        );
+    }
+}
+
 criterion_group!(
     benches,
     bench_index_code,
@@ -145,5 +200,7 @@ criterion_group!(
     bench_index_ascending,
     bench_weight_lookup,
     bench_scan_code,
+    bench_scan_stream_code,
+    report_density,
 );
 criterion_main!(benches);

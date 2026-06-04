@@ -25,12 +25,16 @@
 //! - [`index`] — collects grams into a `Vec`. Use when you need
 //!   to keep grams around or iterate them multiple times.
 //! - [`query`] — decomposes a regex into covering grams for lookup.
+//! - [`StreamScanner`] — streaming, zero-allocation: push byte chunks and emit grams as they close, holding only a bounded window
 
 pub mod error;
 pub mod pattern;
 pub mod plan;
 
 mod extract;
+
+#[doc(inline)]
+pub use extract::StreamScanner;
 
 use sngram_types::{Content, IndexGrams, WeightTable};
 
@@ -358,6 +362,35 @@ mod tests {
     fn invalid_regex_returns_error() {
         let err = Pattern::new("(unclosed").unwrap_err();
         assert!(matches!(err, QueryError::InvalidRegex(_)));
+    }
+
+    // -- streaming: the async driver agrees with batch scan --
+
+    #[cfg(feature = "stream")]
+    fn block_on<F: core::future::Future>(future: F) -> F::Output {
+        use core::task::{Context, Poll, Waker};
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut future = core::pin::pin!(future);
+        loop {
+            if let Poll::Ready(out) = future.as_mut().poll(&mut cx) {
+                return out;
+            }
+        }
+    }
+
+    #[cfg(feature = "stream")]
+    #[test]
+    fn stream_reader_matches_batch() {
+        let t = table();
+        let doc = b"pub async fn read(hash: Hash) -> Result<Bytes, Error> { todo!() }";
+        let mut from_reader = Vec::new();
+        let reader = tokio::io::BufReader::with_capacity(7, &doc[..]);
+        let mut scanner = StreamScanner::new(&t);
+        block_on(scanner.index_reader(reader, |g| from_reader.push(g.to_vec()))).unwrap();
+
+        let mut from_scan = Vec::new();
+        scan(&t, &Content::new(doc), |s, e| from_scan.push(doc[s..e].to_vec()));
+        assert_eq!(from_reader, from_scan);
     }
 
 }

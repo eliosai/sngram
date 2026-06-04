@@ -5,8 +5,8 @@ Sparse n-gram extraction and regex query planning for code search. Stateless,
 
 ```toml
 [dependencies]
-sngram = "0.3"
-sngram-weights = "0.3"
+sngram = "0.4"
+sngram-weights = "0.4"
 ```
 
 ## How it works
@@ -68,6 +68,29 @@ column, an `And` bag is `grams @> ARRAY[..]` and an `Or` bag is
 | `scan` | You hash grams once into an index. About 6x faster than `index` at 1 MB. |
 | `index` | You keep grams or iterate them more than once. |
 | `query` | You have a regex and need its gram query plan. |
+| `StreamScanner` | You index content from a reader without buffering it whole; same grams as `scan`, bounded memory. |
+
+### Streaming
+
+`StreamScanner` extracts from a document fed in chunks, holding only a bounded
+window, so you can index large content straight from a reader without buffering
+it whole. It emits exactly the grams `scan` would over the concatenation.
+
+```rust
+use sngram::StreamScanner;
+
+let mut scanner = StreamScanner::new(table);
+scanner.push(b"fn max_file", |_gram| { /* hash into your index */ });
+scanner.push(b"_size() {}", |_gram| { /* ... */ });
+scanner.finish();
+```
+
+Enable the `stream` feature for `StreamScanner::index_reader`, which drives the
+scanner from any `tokio::io::AsyncBufRead`, reusing the reader's own buffer:
+
+```toml
+sngram = { version = "0.4", features = ["stream"] }
+```
 
 `Content`, `WeightTable`, and the gram types live in `sngram-types`. Get a
 trained table from `sngram-weights`, or load your own with

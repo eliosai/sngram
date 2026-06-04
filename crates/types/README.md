@@ -5,7 +5,7 @@ Core types for sparse n-gram weight tables, shared by `sngram` and
 
 ```toml
 [dependencies]
-sngram-types = "0.3"
+sngram-types = "0.4"
 ```
 
 - `WeightTable`: a 256x256 grid of byte-pair weights, loaded from a validated
