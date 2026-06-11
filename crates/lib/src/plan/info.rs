@@ -8,6 +8,8 @@
 use super::query::Query;
 use super::strings::StringSet;
 
+use crate::gram::Gram;
+
 /// What analysis knows about one subexpression.
 #[derive(Debug, Clone)]
 pub struct RegexpInfo {
@@ -73,7 +75,7 @@ impl RegexpInfo {
     pub fn empty_string() -> Self {
         Self {
             can_empty: true,
-            exact: Some(StringSet::of(Vec::new())),
+            exact: Some(StringSet::of(Gram::empty())),
             prefix: StringSet::new(),
             suffix: StringSet::new(),
             match_: Query::all(),
@@ -87,7 +89,7 @@ impl RegexpInfo {
         }
         Self {
             can_empty: false,
-            exact: Some(StringSet::of(bytes.to_vec())),
+            exact: Some(StringSet::of(Gram::from(bytes))),
             prefix: StringSet::new(),
             suffix: StringSet::new(),
             match_: Query::all(),
@@ -98,5 +100,5 @@ impl RegexpInfo {
 /// A set holding only the empty string, the identity for prefix/suffix cross
 /// products (`"" + s == s`).
 fn empty_member() -> StringSet {
-    StringSet::of(Vec::new())
+    StringSet::of(Gram::empty())
 }

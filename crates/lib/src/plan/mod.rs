@@ -15,6 +15,7 @@ use core::fmt;
 
 use sngram_types::WeightTable;
 
+use crate::gram::Gram;
 use crate::pattern::Pattern;
 use analyze::Analyzer;
 use query::{Op, Query};
@@ -28,8 +29,9 @@ use query::{Op, Query};
 /// [`Self::Or`] node carries a bag of grams alongside its sub-plans, so the
 /// grams translate to a single array operation. With a postgres `int4[]`
 /// column of gram hashes, an `And` bag is `grams @> ARRAY[..]` (all present)
-/// and an `Or` bag is `grams && ARRAY[..]` (any present). Grams are raw bytes;
-/// the caller hashes them for its index.
+/// and an `Or` bag is `grams && ARRAY[..]` (any present). Each [`Gram`]'s
+/// 64-bit key comes from [`Gram::hash`], matching the keys [`crate::scan`]
+/// emits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryPlan {
     /// No constraint: the index cannot narrow this query.
@@ -39,14 +41,14 @@ pub enum QueryPlan {
     /// All of `grams` are present and every sub-plan holds.
     And {
         /// Grams that must all be present.
-        grams: Vec<Vec<u8>>,
+        grams: Vec<Gram>,
         /// Sub-plans that must all hold.
         sub: Vec<Self>,
     },
     /// At least one of `grams` is present, or some sub-plan holds.
     Or {
         /// Grams of which at least one must be present.
-        grams: Vec<Vec<u8>>,
+        grams: Vec<Gram>,
         /// Sub-plans of which at least one must hold.
         sub: Vec<Self>,
     },
@@ -82,7 +84,7 @@ impl fmt::Display for QueryPlan {
 /// `paren`, wrap each multi-token operand in parentheses.
 fn write_join(
     f: &mut fmt::Formatter<'_>,
-    grams: &[Vec<u8>],
+    grams: &[Gram],
     sub: &[QueryPlan],
     sep: &str,
     paren: bool,
@@ -90,7 +92,7 @@ fn write_join(
     let mut first = true;
     for gram in grams {
         delimit(f, &mut first, sep)?;
-        write!(f, "{:?}", String::from_utf8_lossy(gram))?;
+        write!(f, "{:?}", String::from_utf8_lossy(gram.as_bytes()))?;
     }
     for plan in sub {
         delimit(f, &mut first, sep)?;
@@ -178,7 +180,7 @@ mod tests {
         }
     }
 
-    fn shape_join(grams: &[Vec<u8>], sub: &[QueryPlan], bag: &str, sep: &str) -> String {
+    fn shape_join(grams: &[super::Gram], sub: &[QueryPlan], bag: &str, sep: &str) -> String {
         let mut parts = Vec::new();
         if !grams.is_empty() {
             parts.push(bag.to_string());

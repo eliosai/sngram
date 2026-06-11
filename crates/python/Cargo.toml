@@ -1,0 +1,24 @@
+[package]
+name = "sngram-python"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Python bindings for sngram: sparse n-gram extraction, query planning, and weight-table training"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+sngram = { workspace = true, features = ["learn"] }
+sngram-types = { workspace = true }
+
+pyo3 = { version = "0.28", features = ["abi3-py310"] }
+arrow-array = { version = "59", features = ["ffi"] }
+arrow-schema = "59"
+
+[lints]
+workspace = true

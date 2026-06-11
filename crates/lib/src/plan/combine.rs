@@ -8,6 +8,7 @@
 use std::mem;
 
 use crate::extract::{self, MIN_LEN};
+use crate::gram::Gram;
 
 use super::analyze::{Analyzer, BOUNDARY_CTX, MAX_EXACT, MAX_SET};
 use super::info::RegexpInfo;
@@ -193,8 +194,8 @@ fn spill_exact(info: &mut RegexpInfo, exact: &StringSet) {
             info.suffix.push(s.clone());
         } else {
             let k = BOUNDARY_CTX.min(s.len());
-            info.prefix.push(s[..k].to_vec());
-            info.suffix.push(s[s.len() - k..].to_vec());
+            info.prefix.push(Gram::from(&s[..k]));
+            info.suffix.push(Gram::from(&s[s.len() - k..]));
         }
     }
 }
@@ -221,9 +222,9 @@ fn truncate_to(t: &mut StringSet, order: Order, keep: usize) {
         if s.len() <= keep {
             t.push(s);
         } else if order == Order::Prefix {
-            t.push(s[..keep].to_vec());
+            t.push(Gram::from(&s[..keep]));
         } else {
-            t.push(s[s.len() - keep..].to_vec());
+            t.push(Gram::from(&s[s.len() - keep..]));
         }
     }
 }
@@ -232,11 +233,11 @@ fn truncate_to(t: &mut StringSet, order: Order, keep: usize) {
 /// is a possible prefix, `abc` adds nothing.
 fn dedup_redundant(t: &mut StringSet, order: Order) {
     let items = mem::take(t).into_vec();
-    let mut kept: Vec<Vec<u8>> = Vec::new();
+    let mut kept: Vec<Gram> = Vec::new();
     for s in items {
         let covered = kept.last().is_some_and(|p| match order {
-            Order::Prefix => s.starts_with(p),
-            Order::Suffix => s.ends_with(p),
+            Order::Prefix => s.starts_with(p.as_bytes()),
+            Order::Suffix => s.ends_with(p.as_bytes()),
         });
         if !covered {
             kept.push(s);

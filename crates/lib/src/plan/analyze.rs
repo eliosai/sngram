@@ -9,6 +9,8 @@ use regex_syntax::hir::{Class, Hir, HirKind, Repetition};
 
 use sngram_types::WeightTable;
 
+use crate::gram::Gram;
+
 use super::info::RegexpInfo;
 use super::strings::{Order, StringSet};
 
@@ -163,7 +165,7 @@ fn class_set(cls: &Class) -> ClassSet {
     }
 }
 
-fn enumerate(ranges: &[(u32, u32)], encode: fn(u32) -> Option<Vec<u8>>) -> ClassSet {
+fn enumerate(ranges: &[(u32, u32)], encode: fn(u32) -> Option<Gram>) -> ClassSet {
     let count: u64 = ranges
         .iter()
         .map(|&(lo, hi)| u64::from(hi - lo) + 1)
@@ -189,11 +191,11 @@ fn enumerate(ranges: &[(u32, u32)], encode: fn(u32) -> Option<Vec<u8>>) -> Class
     ClassSet::Exact(set)
 }
 
-fn encode_char(c: u32) -> Option<Vec<u8>> {
+fn encode_char(c: u32) -> Option<Gram> {
     let mut buf = [0u8; 4];
-    char::from_u32(c).map(|ch| ch.encode_utf8(&mut buf).as_bytes().to_vec())
+    char::from_u32(c).map(|ch| Gram::from(ch.encode_utf8(&mut buf).as_bytes()))
 }
 
-fn encode_byte(c: u32) -> Option<Vec<u8>> {
-    u8::try_from(c).ok().map(|b| vec![b])
+fn encode_byte(c: u32) -> Option<Gram> {
+    u8::try_from(c).ok().map(|b| Gram::from(&[b][..]))
 }

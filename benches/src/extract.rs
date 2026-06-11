@@ -7,6 +7,8 @@
     clippy::cast_precision_loss
 )]
 
+use std::hint::black_box;
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use sngram_types::{Content, WeightTable};
 
@@ -43,66 +45,6 @@ fn prose(size: usize) -> Vec<u8> {
 const SIZES: &[usize] = &[64, 256, 1024, 4096, 16384, 65536, 262_144, 1_048_576];
 const SMALL: &[usize] = &[256, 4096, 65536];
 
-fn bench_index_code(c: &mut Criterion) {
-    let table = crc32_table();
-    let mut group = c.benchmark_group("index/code");
-
-    for &size in SIZES {
-        let data = source_code(size);
-        let content = Content::new(&data);
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
-            b.iter(|| sngram::index(&table, c));
-        });
-    }
-    group.finish();
-}
-
-fn bench_index_prose(c: &mut Criterion) {
-    let table = crc32_table();
-    let mut group = c.benchmark_group("index/prose");
-
-    for &size in SIZES {
-        let data = prose(size);
-        let content = Content::new(&data);
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
-            b.iter(|| sngram::index(&table, c));
-        });
-    }
-    group.finish();
-}
-
-fn bench_index_uniform(c: &mut Criterion) {
-    let table = crc32_table();
-    let mut group = c.benchmark_group("index/uniform");
-
-    for &size in SMALL {
-        let data = vec![b'a'; size];
-        let content = Content::new(&data);
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
-            b.iter(|| sngram::index(&table, c));
-        });
-    }
-    group.finish();
-}
-
-fn bench_index_ascending(c: &mut Criterion) {
-    let table = crc32_table();
-    let mut group = c.benchmark_group("index/ascending");
-
-    for &size in SMALL {
-        let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
-        let content = Content::new(&data);
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
-            b.iter(|| sngram::index(&table, c));
-        });
-    }
-    group.finish();
-}
-
 fn bench_weight_lookup(c: &mut Criterion) {
     let table = crc32_table();
     c.bench_function("weight_lookup", |b| {
@@ -130,8 +72,100 @@ fn bench_scan_code(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
             b.iter(|| {
                 let mut count = 0u64;
-                sngram::scan(&table, c, |_, _| count += 1);
+                sngram::scan(&table, c, |_, _, _| count += 1);
                 count
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_scan_prose(c: &mut Criterion) {
+    let table = crc32_table();
+    let mut group = c.benchmark_group("scan/prose");
+
+    for &size in SMALL {
+        let data = prose(size);
+        let content = Content::new(&data);
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
+            b.iter(|| {
+                let mut count = 0u64;
+                sngram::scan(&table, c, |_, _, _| count += 1);
+                count
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_scan_uniform(c: &mut Criterion) {
+    let table = crc32_table();
+    let mut group = c.benchmark_group("scan/uniform");
+
+    for &size in SMALL {
+        let data = vec![b'a'; size];
+        let content = Content::new(&data);
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
+            b.iter(|| {
+                let mut count = 0u64;
+                sngram::scan(&table, c, |_, _, _| count += 1);
+                count
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_scan_ascending(c: &mut Criterion) {
+    let table = crc32_table();
+    let mut group = c.benchmark_group("scan/ascending");
+
+    for &size in SMALL {
+        let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        let content = Content::new(&data);
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
+            b.iter(|| {
+                let mut count = 0u64;
+                sngram::scan(&table, c, |_, _, _| count += 1);
+                count
+            });
+        });
+    }
+    group.finish();
+}
+
+// The workload every real consumer runs: content in, 64-bit index keys out.
+// `rehash` is the pre-0.5 shape (hash each emitted gram's bytes from scratch);
+// `fused` consumes the rolling hash the scan already computed.
+fn bench_pipeline(c: &mut Criterion) {
+    use std::hash::{Hash, Hasher};
+
+    let table = crc32_table();
+    let mut group = c.benchmark_group("pipeline/code");
+
+    for &size in &[65_536usize, 1_048_576] {
+        let data = source_code(size);
+        let content = Content::new(&data);
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_with_input(BenchmarkId::new("rehash", size), &content, |b, c| {
+            b.iter(|| {
+                let mut acc = 0u64;
+                sngram::scan(&table, c, |s, e, _| {
+                    let mut hasher = rustc_hash::FxHasher::default();
+                    data[s..e].hash(&mut hasher);
+                    acc ^= hasher.finish();
+                });
+                black_box(acc)
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("fused", size), &content, |b, c| {
+            b.iter(|| {
+                let mut acc = 0u64;
+                sngram::scan(&table, c, |_, _, h| acc ^= h);
+                black_box(acc)
             });
         });
     }
@@ -146,7 +180,7 @@ fn stream_count(table: &WeightTable, data: &[u8], chunk: usize) -> u64 {
     let mut count = 0u64;
     let mut scanner = sngram::StreamScanner::new(table);
     for part in data.chunks(chunk) {
-        scanner.push(part, |_| count += 1);
+        scanner.push(part, |_, _| count += 1);
     }
     scanner.finish();
     count
@@ -179,9 +213,9 @@ fn report_density(_c: &mut Criterion) {
         let content = Content::new(&data);
         let mut emissions = 0u64;
         let mut distinct = std::collections::HashSet::new();
-        sngram::scan(&table, &content, |start, end| {
+        sngram::scan(&table, &content, |_, _, h| {
             emissions += 1;
-            distinct.insert(content.as_bytes()[start..end].to_vec());
+            distinct.insert(h);
         });
         eprintln!(
             "density {size:>8}B: {:.3} emissions/byte, {:.3} distinct/byte, {} distinct",
@@ -194,12 +228,12 @@ fn report_density(_c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_index_code,
-    bench_index_prose,
-    bench_index_uniform,
-    bench_index_ascending,
-    bench_weight_lookup,
     bench_scan_code,
+    bench_scan_prose,
+    bench_scan_uniform,
+    bench_scan_ascending,
+    bench_weight_lookup,
+    bench_pipeline,
     bench_scan_stream_code,
     report_density,
 );

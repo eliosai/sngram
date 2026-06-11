@@ -14,13 +14,16 @@ publish = true
 [features]
 # stream adds StreamScanner::index_reader, pulling only tokio's io traits, no runtime
 stream = ["dep:tokio"]
+# learn adds the bigram counters used to train weight tables; off by default
+# because it is useless without a training pipeline driving it
+learn = ["dep:crc32fast"]
 
 [dependencies]
 sngram-types = { workspace = true }
 regex-syntax = { workspace = true }
-rustc-hash = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["io-util"] }
+crc32fast = { workspace = true, optional = true }
 
 [dev-dependencies]
 crc32fast = { workspace = true }

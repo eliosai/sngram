@@ -12,7 +12,7 @@ pub const TABLE_BINARY_SIZE: usize = HEADER_SIZE + WEIGHTS_COUNT * 4;
 /// 256x256 character-pair weight table.
 #[derive(Debug, Clone)]
 pub struct WeightTable {
-    weights: Vec<u32>,
+    weights: Box<[u32; WEIGHTS_COUNT]>,
     version: u32,
 }
 
@@ -56,6 +56,16 @@ impl WeightTable {
     pub fn weight(&self, c1: u8, c2: u8) -> u32 {
         self.weights[usize::from(c1) << 8 | usize::from(c2)]
     }
+
+    /// Full 256x256 weight matrix as a fixed-size array reference.
+    ///
+    /// Indexing with `(c1 << 8) | c2` (max 65535) is provably in-bounds for a
+    /// `&[u32; 65536]`, so the optimizer drops the bounds check that a slice
+    /// index would keep — this is the hot-loop accessor.
+    #[must_use]
+    pub fn matrix(&self) -> &[u32; WEIGHTS_COUNT] {
+        &self.weights
+    }
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, TableError> {
@@ -67,13 +77,20 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, TableError> {
 }
 
 #[allow(clippy::indexing_slicing, reason = "data.len() == WEIGHTS_COUNT * 4")]
-fn parse_weights(data: &[u8]) -> Vec<u32> {
-    (0..WEIGHTS_COUNT)
-        .map(|i| {
-            let off = i * 4;
-            u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
-        })
-        .collect()
+#[allow(
+    clippy::expect_used,
+    reason = "the vec has exactly WEIGHTS_COUNT elements; conversion cannot fail"
+)]
+fn parse_weights(data: &[u8]) -> Box<[u32; WEIGHTS_COUNT]> {
+    let mut weights: Box<[u32; WEIGHTS_COUNT]> = vec![0u32; WEIGHTS_COUNT]
+        .into_boxed_slice()
+        .try_into()
+        .expect("WEIGHTS_COUNT elements");
+    for (i, w) in weights.iter_mut().enumerate() {
+        let off = i * 4;
+        *w = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+    }
+    weights
 }
 
 #[cfg(test)]

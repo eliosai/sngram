@@ -1,4 +1,13 @@
-//! Lock-free bigram counter for concurrent weight table learning.
+//! Bigram counting for weight-table learning.
+//!
+//! Feed text through a [`LocalTally`] (single-threaded, plain `u32` counts),
+//! merge tallies into a shared [`BigramCounter`] (lock-free, written
+//! concurrently by all workers), then serialize the learned table with
+//! [`BigramCounter::to_table_bytes`]. The output parses with
+//! [`sngram_types::WeightTable::from_bytes`].
+//!
+//! Counting is per-value: no bigram may straddle two inputs, so the learned
+//! table is a function of the data alone, not of batch geometry.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -19,9 +28,9 @@ pub struct BigramCounter {
     files_processed: AtomicU64,
 }
 
-/// Per-row-group accumulator using plain `u32` counts (no atomics).
+/// Per-batch accumulator using plain `u32` counts (no atomics).
 ///
-/// Merged into the shared [`BigramCounter`] once per row group, keeping the
+/// Merged into the shared [`BigramCounter`] once per batch, keeping the
 /// hot counting loop free of atomic contention.
 pub struct LocalTally {
     counts: Box<[u32; PAIR_COUNT]>,
@@ -30,10 +39,13 @@ pub struct LocalTally {
 }
 
 impl Default for LocalTally {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LocalTally {
+    /// Fresh tally with all counts zero.
     #[must_use]
     #[allow(clippy::expect_used, clippy::missing_panics_doc,
         reason = "Vec has exactly PAIR_COUNT elements; cannot fail")]
@@ -45,23 +57,39 @@ impl LocalTally {
         Self { counts, pairs: 0, bytes: 0 }
     }
 
+    /// Count every overlapping byte pair in one value's bytes.
+    ///
+    /// The rolling index (carry the previous byte, shift-or the next) measures
+    /// ~11–22% faster than a `windows(2)` loop: one load per byte instead of a
+    /// two-byte slice view. K-way split accumulators were measured a NET LOSS
+    /// here — the bottleneck is histogram load latency, not the increment
+    /// dependency — so this stays a single table.
     #[allow(clippy::indexing_slicing, reason = "u8<<8|u8 < 65536")]
     pub fn count_buffer(&mut self, buf: &[u8]) {
         self.bytes += buf.len() as u64;
-        if buf.len() < 2 { return; }
-        for pair in buf.windows(2) {
-            let idx = usize::from(pair[0]) << 8 | usize::from(pair[1]);
-            self.counts[idx] += 1;
+        let [first, rest @ ..] = buf else { return };
+        if rest.is_empty() {
+            return;
+        }
+        let counts = &mut *self.counts;
+        let mut hi = usize::from(*first) << 8;
+        for &b in rest {
+            let lo = usize::from(b);
+            counts[hi | lo] += 1;
+            hi = lo << 8;
         }
         self.pairs += (buf.len() - 1) as u64;
     }
 
+    /// Total bytes counted so far.
     #[must_use]
-    pub const fn bytes(&self) -> u64 { self.bytes }
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
 
     /// Merge another tally's counts into this one — used when decoding
-    /// row groups in a background task and folding the result back into
-    /// the file-level tally to preserve exactly-once semantics.
+    /// batches in a background task and folding the result back into
+    /// a parent tally to preserve exactly-once semantics.
     #[allow(clippy::indexing_slicing, reason = "PAIR_COUNT loop")]
     pub fn add_from(&mut self, other: &Self) {
         for i in 0..PAIR_COUNT {
@@ -73,10 +101,13 @@ impl LocalTally {
 }
 
 impl Default for BigramCounter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BigramCounter {
+    /// Fresh counter with all counts zero.
     #[must_use]
     #[allow(clippy::expect_used, clippy::missing_panics_doc,
         reason = "exactly PAIR_COUNT elements collected; cannot fail")]
@@ -96,6 +127,7 @@ impl BigramCounter {
         }
     }
 
+    /// Fold a tally's counts and totals into the shared counter.
     #[allow(clippy::indexing_slicing, reason = "PAIR_COUNT iteration")]
     pub fn merge(&self, tally: &LocalTally) {
         for (idx, &n) in tally.counts.iter().enumerate() {
@@ -107,40 +139,48 @@ impl BigramCounter {
         self.bytes_processed.fetch_add(tally.bytes, Ordering::Relaxed);
     }
 
+    /// Count one value's bytes directly (convenience over a one-shot tally).
     pub fn process(&self, content: &[u8]) {
         let mut tally = LocalTally::new();
         tally.count_buffer(content);
         self.merge(&tally);
     }
 
+    /// Record `n` completed files.
     pub fn inc_files(&self, n: u64) {
         self.files_processed.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Record `n` compressed bytes downloaded.
     pub fn add_downloaded(&self, n: u64) {
         self.downloaded_bytes.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Compressed bytes downloaded so far.
     #[must_use]
     pub fn downloaded_bytes(&self) -> u64 {
         self.downloaded_bytes.load(Ordering::Relaxed)
     }
 
+    /// Byte pairs counted so far.
     #[must_use]
     pub fn pairs_processed(&self) -> u64 {
         self.pairs_processed.load(Ordering::Relaxed)
     }
 
+    /// Decompressed text bytes counted so far.
     #[must_use]
     pub fn bytes_processed(&self) -> u64 {
         self.bytes_processed.load(Ordering::Relaxed)
     }
 
+    /// Files completed so far.
     #[must_use]
     pub fn files_processed(&self) -> u64 {
         self.files_processed.load(Ordering::Relaxed)
     }
 
+    /// Current count for one byte pair.
     #[must_use]
     #[allow(clippy::indexing_slicing, reason = "u8<<8|u8 < 65536")]
     pub fn count(&self, c1: u8, c2: u8) -> u64 {
@@ -154,24 +194,31 @@ impl BigramCounter {
         self.counts.iter().map(|c| c.load(Ordering::Relaxed)).collect()
     }
 
+    /// Add `n` to one byte pair's count — for checkpoint restore.
     #[allow(clippy::indexing_slicing, reason = "u8<<8|u8 < 65536")]
     pub fn add(&self, c1: u8, c2: u8, n: u64) {
         let idx = usize::from(c1) << 8 | usize::from(c2);
         self.counts[idx].fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Add `n` to the pair total — for checkpoint restore.
     pub fn add_pairs(&self, n: u64) {
         self.pairs_processed.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Add `n` to the byte total — for checkpoint restore.
     pub fn add_bytes(&self, n: u64) {
         self.bytes_processed.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Add `n` to the file total — for checkpoint restore.
     pub fn add_files(&self, n: u64) {
         self.files_processed.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Serialize the learned weight table (weight = `total_pairs / count`,
+    /// `u32::MAX` for unseen pairs) in the `SPNG` binary format that
+    /// [`sngram_types::WeightTable::from_bytes`] loads.
     #[must_use]
     #[allow(clippy::indexing_slicing, reason = "fixed-size buffer")]
     pub fn to_table_bytes(&self) -> Vec<u8> {
@@ -277,7 +324,9 @@ mod tests {
         one.process(b"aa");
 
         let split = BigramCounter::new();
-        for _ in 0..3 { split.process(b"aa"); }
+        for _ in 0..3 {
+            split.process(b"aa");
+        }
 
         assert_eq!(one.count(b'a', b'a'), split.count(b'a', b'a'));
         assert_eq!(one.count(b'a', b'a'), 3);
@@ -317,7 +366,9 @@ mod tests {
     #[test]
     fn frequent_pairs_get_lower_weight() {
         let c = BigramCounter::new();
-        for _ in 0..100 { c.process(b"the quick brown fox"); }
+        for _ in 0..100 {
+            c.process(b"the quick brown fox");
+        }
         c.process(b"zqzq");
         let table = WeightTable::from_bytes(&c.to_table_bytes()).unwrap();
         let common = table.weight(b't', b'h');
@@ -348,7 +399,9 @@ mod tests {
         }
 
         let c = BigramCounter::new();
-        for row in corpus { c.process(row); }
+        for row in corpus {
+            c.process(row);
+        }
         assert_eq!(c.pairs_processed(), total, "pair total must match reference");
 
         let table = WeightTable::from_bytes(&c.to_table_bytes()).unwrap();
@@ -376,11 +429,15 @@ mod tests {
     #[test]
     fn concurrent_merge_is_deterministic() {
         let c = std::sync::Arc::new(BigramCounter::new());
-        let handles: Vec<_> = (0..8).map(|_| {
-            let c = c.clone();
-            std::thread::spawn(move || c.merge(&tally_ab(1000)))
-        }).collect();
-        for h in handles { h.join().unwrap(); }
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let c = c.clone();
+                std::thread::spawn(move || c.merge(&tally_ab(1000)))
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
         assert_eq!(c.count(b'a', b'b'), 8000);
     }
 

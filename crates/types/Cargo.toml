@@ -12,9 +12,7 @@ categories = ["data-structures", "text-processing"]
 publish = true
 
 [dependencies]
-bytemuck = { workspace = true }
 crc32fast = { workspace = true }
-rustc-hash = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -20,38 +20,45 @@
 //!
 //! # Choosing an API
 //!
-//! - [`scan`] — zero-allocation callback. Use when you hash and
-//!   insert grams directly into an inverted index (6x faster at 1 MB).
-//! - [`index`] — collects grams into a `Vec`. Use when you need
-//!   to keep grams around or iterate them multiple times.
-//! - [`query`] — decomposes a regex into covering grams for lookup.
-//! - [`StreamScanner`] — streaming, zero-allocation: push byte chunks and emit grams as they close, holding only a bounded window
+//! - [`scan`] — zero-allocation callback over a whole in-memory slice; each
+//!   emission carries the gram's span and its 64-bit rolling hash, so hashing
+//!   into an inverted index costs nothing extra.
+//! - [`StreamScanner`] — the same extraction over chunked input with bounded
+//!   memory; emits each gram's bytes and hash as it closes.
+//! - [`query`] — decomposes a regex into covering grams for index lookup.
+//! - `learn` module (feature `learn`) — bigram counters for training fresh weight tables
 
 pub mod error;
+#[cfg(feature = "learn")]
+pub mod learn;
 pub mod pattern;
 pub mod plan;
 
 mod extract;
+mod gram;
+mod hashing;
 
 #[doc(inline)]
 pub use extract::StreamScanner;
+pub use error::QueryError;
+pub use gram::Gram;
+pub use pattern::Pattern;
+pub use plan::QueryPlan;
 
-use sngram_types::{Content, IndexGrams, WeightTable};
+use sngram_types::{Content, WeightTable};
 
-use pattern::Pattern;
-use plan::QueryPlan;
-
-/// Collect all sparse n-grams from content into a `Vec`.
-#[must_use]
-pub fn index<'a>(table: &WeightTable, content: &Content<'a>) -> IndexGrams<'a> {
-    extract::all(table, content.as_bytes())
-}
-
-/// Zero-allocation scan. Calls `emit(start, end)` per gram.
+/// Zero-allocation scan. Calls `emit(start, end, hash)` per gram.
 ///
-/// Preferred over [`index`] when grams are consumed once (e.g.
-/// hashing into an inverted index). 6x faster at 1 MB input.
-pub fn scan(table: &WeightTable, content: &Content<'_>, emit: impl FnMut(usize, usize)) {
+/// The hash is a 64-bit rolling polynomial over the gram's bytes, computed in
+/// O(1) per gram from prefix hashes maintained during the scan; hashing the
+/// same bytes through `Gram::hash` yields the identical value, keeping index
+/// keys and query keys consistent.
+///
+/// # Panics
+///
+/// Panics if `content` is 4 GiB or larger; feed inputs that large through
+/// [`StreamScanner`] instead.
+pub fn scan(table: &WeightTable, content: &Content<'_>, emit: impl FnMut(usize, usize, u64)) {
     extract::scan(table, content.as_bytes(), emit);
 }
 
@@ -88,10 +95,17 @@ mod tests {
     }
 
     fn index_set(t: &WeightTable, doc: &[u8]) -> std::collections::HashSet<Vec<u8>> {
-        index(t, &Content::new(doc))
-            .iter()
-            .map(|g| g.as_bytes().to_vec())
-            .collect()
+        let mut set = std::collections::HashSet::new();
+        scan(t, &Content::new(doc), |s, e, _| {
+            set.insert(doc[s..e].to_vec());
+        });
+        set
+    }
+
+    fn gram_count(t: &WeightTable, doc: &[u8]) -> usize {
+        let mut n = 0usize;
+        scan(t, &Content::new(doc), |_, _, _| n += 1);
+        n
     }
 
     // Weights that strictly decrease along the byte run 1,2,3,... so the index
@@ -121,7 +135,7 @@ mod tests {
         let idx = index_set(t, &doc);
         for g in &crate::extract::cover_one(t, lit) {
             assert!(
-                idx.contains(g),
+                idx.contains(g.as_bytes()),
                 "FALSE NEGATIVE: gram {:?} of {:?} absent from index",
                 String::from_utf8_lossy(g),
                 String::from_utf8_lossy(lit),
@@ -174,7 +188,7 @@ mod tests {
         assert!(!cov.is_empty(), "covering must produce grams");
         for g in &cov {
             assert!(
-                idx.contains(g),
+                idx.contains(g.as_bytes()),
                 "FALSE NEGATIVE past stack cap: {:?} missing from index",
                 String::from_utf8_lossy(g),
             );
@@ -219,51 +233,46 @@ mod tests {
         );
         for g in &cov {
             assert!(
-                idx.contains(g),
+                idx.contains(g.as_bytes()),
                 "FALSE NEGATIVE on long literal: gram of len {} missing from index",
                 g.len(),
             );
         }
     }
 
-    // -- index: edge cases --
+    // -- scan: edge cases --
 
     #[test]
     fn empty_content_returns_empty() {
-        let grams = index(&table(), &Content::new(b""));
-        assert!(grams.is_empty());
+        assert_eq!(gram_count(&table(), b""), 0);
     }
 
     #[test]
     fn one_byte_returns_empty() {
-        let grams = index(&table(), &Content::new(b"x"));
-        assert!(grams.is_empty());
+        assert_eq!(gram_count(&table(), b"x"), 0);
     }
 
     #[test]
     fn two_bytes_returns_empty() {
-        let grams = index(&table(), &Content::new(b"ab"));
-        assert!(grams.is_empty());
+        assert_eq!(gram_count(&table(), b"ab"), 0);
     }
 
     #[test]
     fn three_bytes_produces_grams() {
-        let grams = index(&table(), &Content::new(b"abc"));
-        assert!(!grams.is_empty());
+        assert!(gram_count(&table(), b"abc") > 0);
     }
 
-    // -- index: invariant --
+    // -- scan: invariant --
 
     #[test]
     fn all_grams_have_borders_greater_than_internals() {
         let t = table();
         let content = b"fn main() { let x = foo_bar(42); }";
-        let grams = index(&t, &Content::new(content));
 
-        for gram in &grams {
-            let bytes = gram.as_bytes();
+        scan(&t, &Content::new(content), |s, e, _| {
+            let bytes = &content[s..e];
             if bytes.len() <= 3 {
-                continue;
+                return;
             }
             let left = t.weight(bytes[0], bytes[1]);
             let last = bytes.len() - 1;
@@ -277,23 +286,21 @@ mod tests {
                     String::from_utf8_lossy(bytes),
                 );
             }
-        }
+        });
     }
 
-    // -- index: coverage patterns --
+    // -- scan: coverage patterns --
 
     #[test]
     fn uniform_content_produces_grams() {
         let data = vec![b'a'; 100];
-        let grams = index(&table(), &Content::new(&data));
-        assert!(!grams.is_empty());
+        assert!(gram_count(&table(), &data) > 0);
     }
 
     #[test]
     fn real_source_code_produces_grams() {
         let src = b"use std::collections::HashMap;\nfn main() {\n}";
-        let grams = index(&table(), &Content::new(src));
-        assert!(grams.len() > 1);
+        assert!(gram_count(&table(), src) > 1);
     }
 
     #[test]
@@ -303,20 +310,26 @@ mod tests {
         let src = b"fn main() { let x = foo_bar(42); println!(\"{x}\"); }\n";
         for &size in &[64, 256, 1024, 4096, 16384, 65536] {
             let data: Vec<u8> = (0..size).map(|i| src[i % src.len()]).collect();
-            let grams = index(&t, &Content::new(&data));
-            let ratio = grams.len() as f64 / size as f64;
-            eprintln!("{size:>6}B -> {:>6} grams ({ratio:.2}/byte)", grams.len());
+            let n = gram_count(&t, &data);
+            let ratio = n as f64 / size as f64;
+            eprintln!("{size:>6}B -> {n:>6} grams ({ratio:.2}/byte)");
         }
     }
 
-    // -- index: hashes are deterministic --
+    // -- scan: emitted hashes are deterministic --
 
     #[test]
     fn hashes_are_deterministic() {
         let t = table();
         let content = Content::new(b"hello world");
-        let h1: Vec<u64> = index(&t, &content).hashes().collect();
-        let h2: Vec<u64> = index(&t, &content).hashes().collect();
+        let collect = || {
+            let mut hs = Vec::new();
+            scan(&t, &content, |_, _, h| hs.push(h));
+            hs
+        };
+        let h1 = collect();
+        let h2 = collect();
+        assert!(!h1.is_empty());
         assert_eq!(h1, h2);
     }
 
@@ -386,10 +399,12 @@ mod tests {
         let mut from_reader = Vec::new();
         let reader = tokio::io::BufReader::with_capacity(7, &doc[..]);
         let mut scanner = StreamScanner::new(&t);
-        block_on(scanner.index_reader(reader, |g| from_reader.push(g.to_vec()))).unwrap();
+        block_on(scanner.index_reader(reader, |g, h| from_reader.push((g.to_vec(), h)))).unwrap();
 
         let mut from_scan = Vec::new();
-        scan(&t, &Content::new(doc), |s, e| from_scan.push(doc[s..e].to_vec()));
+        scan(&t, &Content::new(doc), |s, e, h| {
+            from_scan.push((doc[s..e].to_vec(), h));
+        });
         assert_eq!(from_reader, from_scan);
     }
 

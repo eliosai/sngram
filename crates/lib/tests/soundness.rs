@@ -13,9 +13,7 @@
 
 use std::collections::HashSet;
 
-use sngram::pattern::Pattern;
-use sngram::plan::QueryPlan;
-use sngram::{index, query};
+use sngram::{Pattern, QueryPlan, query, scan};
 use sngram_types::{Content, TABLE_BINARY_SIZE, WeightTable};
 
 /// A deterministic weight table: each byte pair hashed to a varied weight, so
@@ -42,19 +40,22 @@ fn satisfies(plan: &QueryPlan, grams: &HashSet<Vec<u8>>) -> bool {
         QueryPlan::All => true,
         QueryPlan::None => false,
         QueryPlan::And { grams: g, sub } => {
-            g.iter().all(|x| grams.contains(x)) && sub.iter().all(|s| satisfies(s, grams))
+            g.iter().all(|x| grams.contains(x.as_bytes()))
+                && sub.iter().all(|s| satisfies(s, grams))
         }
         QueryPlan::Or { grams: g, sub } => {
-            g.iter().any(|x| grams.contains(x)) || sub.iter().any(|s| satisfies(s, grams))
+            g.iter().any(|x| grams.contains(x.as_bytes()))
+                || sub.iter().any(|s| satisfies(s, grams))
         }
     }
 }
 
 fn index_grams(t: &WeightTable, doc: &[u8]) -> HashSet<Vec<u8>> {
-    index(t, &Content::new(doc))
-        .iter()
-        .map(|g| g.as_bytes().to_vec())
-        .collect()
+    let mut grams = HashSet::new();
+    scan(t, &Content::new(doc), |s, e, _| {
+        grams.insert(doc[s..e].to_vec());
+    });
+    grams
 }
 
 /// Assert no document the oracle matches is rejected by the plan.

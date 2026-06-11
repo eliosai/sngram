@@ -5,73 +5,86 @@
     clippy::cast_possible_truncation
 )]
 
+//! Benchmarks the real training ingest path: `LocalTally::count_buffer` is the
+//! per-byte hot loop every training byte passes through, and `merge` is the
+//! once-per-batch fold into the shared counter.
+
+use std::hint::black_box;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-
-const PAIR_COUNT: usize = 256 * 256;
-
-struct Counter {
-    counts: Box<[AtomicU64; PAIR_COUNT]>,
-}
-
-impl Counter {
-    fn new() -> Self {
-        let counts: Box<[AtomicU64; PAIR_COUNT]> = (0..PAIR_COUNT)
-            .map(|_| AtomicU64::new(0))
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-            .try_into()
-            .unwrap();
-        Self { counts }
-    }
-
-    #[inline]
-    fn process(&self, content: &[u8]) {
-        for pair in content.windows(2) {
-            let idx = usize::from(pair[0]) << 8 | usize::from(pair[1]);
-            self.counts[idx].fetch_add(1, Ordering::Relaxed);
-        }
-    }
-}
+use sngram::learn::{BigramCounter, LocalTally};
 
 fn source_code(size: usize) -> Vec<u8> {
     let src = b"fn main() { let x = foo_bar(42); println!(\"{x}\"); }\n";
     (0..size).map(|i| src[i % src.len()]).collect()
 }
 
-const SIZES: &[usize] = &[256, 1024, 4096, 16384, 65536, 262_144, 1_048_576];
+/// Realistic mixed corpus: code-like text salted with pseudo-random bytes so
+/// the histogram working set is wider than pure source.
+fn mixed(size: usize) -> Vec<u8> {
+    let src = source_code(size);
+    let mut state = 0x9E37_79B9_u32;
+    src.iter()
+        .map(|&b| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            if state % 5 == 0 { (state >> 24) as u8 } else { b }
+        })
+        .collect()
+}
 
-fn bench_process_single(c: &mut Criterion) {
-    let counter = Counter::new();
-    let mut group = c.benchmark_group("counter/single");
+const SIZES: &[usize] = &[4096, 65536, 1_048_576, 16 * 1_048_576];
+
+fn bench_count_buffer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("counter/count_buffer");
 
     for &size in SIZES {
-        let data = source_code(size);
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, d| {
-            b.iter(|| counter.process(d));
-        });
+        for (name, data) in [("code", source_code(size)), ("mixed", mixed(size))] {
+            group.throughput(Throughput::Bytes(size as u64));
+            group.bench_with_input(
+                BenchmarkId::new(name, size),
+                &data,
+                |b, d| {
+                    let mut tally = LocalTally::new();
+                    b.iter(|| {
+                        tally.count_buffer(black_box(d));
+                        black_box(tally.bytes())
+                    });
+                },
+            );
+        }
     }
     group.finish();
 }
 
-fn bench_process_concurrent(c: &mut Criterion) {
+fn bench_merge(c: &mut Criterion) {
+    let mut tally = LocalTally::new();
+    tally.count_buffer(&source_code(1_048_576));
+    let counter = BigramCounter::new();
+    c.bench_function("counter/merge", |b| {
+        b.iter(|| counter.merge(black_box(&tally)));
+    });
+}
+
+fn bench_concurrent_merge(c: &mut Criterion) {
     let mut group = c.benchmark_group("counter/concurrent");
 
-    for threads in [1, 2, 4, 8] {
-        let size = 65536;
+    for threads in [1usize, 2, 4, 8] {
+        let size = 1_048_576;
         let data = source_code(size);
         let total = (size * threads) as u64;
         group.throughput(Throughput::Bytes(total));
         group.bench_with_input(BenchmarkId::new("threads", threads), &data, |b, d| {
-            let counter = Arc::new(Counter::new());
+            let counter = Arc::new(BigramCounter::new());
             b.iter(|| {
                 std::thread::scope(|s| {
                     for _ in 0..threads {
                         let c = &counter;
-                        s.spawn(|| c.process(d));
+                        s.spawn(move || {
+                            let mut tally = LocalTally::new();
+                            tally.count_buffer(d);
+                            c.merge(&tally);
+                        });
                     }
                 });
             });
@@ -80,5 +93,10 @@ fn bench_process_concurrent(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_process_single, bench_process_concurrent);
+criterion_group!(
+    benches,
+    bench_count_buffer,
+    bench_merge,
+    bench_concurrent_merge
+);
 criterion_main!(benches);

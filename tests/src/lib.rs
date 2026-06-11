@@ -29,7 +29,7 @@ mod tests {
         match plan {
             QueryPlan::All | QueryPlan::None => {}
             QueryPlan::And { grams, sub } | QueryPlan::Or { grams, sub } => {
-                out.extend(grams.iter().cloned());
+                out.extend(grams.iter().map(|g| g.as_bytes().to_vec()));
                 for s in sub {
                     collect_grams(s, out);
                 }
@@ -37,12 +37,18 @@ mod tests {
         }
     }
 
+    fn scan_grams(table: &WeightTable, doc: &[u8]) -> Vec<(Vec<u8>, u64)> {
+        let mut out = Vec::new();
+        sngram::scan(table, &Content::new(doc), |s, e, h| {
+            out.push((doc[s..e].to_vec(), h));
+        });
+        out
+    }
+
     #[test]
-    fn index_produces_grams_for_literal() {
+    fn scan_produces_grams_for_literal() {
         let table = weight_table();
-        let content = Content::new(b"MAX_FILE_SIZE");
-        let grams = sngram::index(&table, &content);
-        assert!(!grams.is_empty());
+        assert!(!scan_grams(&table, b"MAX_FILE_SIZE").is_empty());
     }
 
     #[test]
@@ -71,15 +77,15 @@ mod tests {
     }
 
     #[test]
-    fn scan_count_matches_index_count() {
+    fn scan_emits_one_hash_per_gram() {
         let table = weight_table();
-        let content = Content::new(b"use std::collections::HashMap;");
+        let doc = b"use std::collections::HashMap;";
 
-        let index_count = sngram::index(&table, &content).hashes().count();
+        let grams = scan_grams(&table, doc);
         let mut scan_count = 0usize;
-        sngram::scan(&table, &content, |_, _| scan_count += 1);
+        sngram::scan(&table, &Content::new(doc), |_, _, _| scan_count += 1);
 
-        assert_eq!(index_count, scan_count);
+        assert_eq!(grams.len(), scan_count);
     }
 
     #[test]
@@ -99,9 +105,9 @@ mod tests {
     #[test]
     fn deterministic_across_runs() {
         let table = weight_table();
-        let content = Content::new(b"hello world");
-        let h1: Vec<u64> = sngram::index(&table, &content).hashes().collect();
-        let h2: Vec<u64> = sngram::index(&table, &content).hashes().collect();
+        let h1 = scan_grams(&table, b"hello world");
+        let h2 = scan_grams(&table, b"hello world");
+        assert!(!h1.is_empty());
         assert_eq!(h1, h2);
     }
 
@@ -122,7 +128,9 @@ mod tests {
                 std::thread::spawn(move || {
                     let data = format!("thread {i} content");
                     let content = Content::new(data.as_bytes());
-                    sngram::index(&t, &content).hashes().count()
+                    let mut n = 0usize;
+                    sngram::scan(&t, &content, |_, _, _| n += 1);
+                    n
                 })
             })
             .collect();

@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/types", "crates/lib", "crates/weights", "crates/cli", "tests", "benches"]
+members = ["crates/types", "crates/lib", "crates/weights", "crates/python", "tests", "benches"]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 authors = ["Joshua Smotritsky"]
 license = "MIT"
@@ -18,57 +18,23 @@ strip = true
 
 [workspace.dependencies]
 # Internal
-sngram-types = { version = "0.4.2", path = "crates/types" }
-sngram = { version = "0.4.2", path = "crates/lib" }
-sngram-weights = { version = "0.4.2", path = "crates/weights" }
-sngram-cli = { path = "crates/cli" }
+sngram-types = { version = "0.5.0", path = "crates/types" }
+sngram = { version = "0.5.0", path = "crates/lib" }
+sngram-weights = { version = "0.5.0", path = "crates/weights" }
 
 # Types / zero-copy
-bytemuck = { version = "1.25", features = ["derive"] }
 crc32fast = "1.5"
 
 # Regex parsing
 regex-syntax = "0.8"
 regex-lite = "0.1"
 
-# Hashing
-rustc-hash = "2.1"
 
 # Async
 tokio = { version = "1.52", default-features = false }
-futures = "0.3"
-
-# HF streaming
-opendal = { version = "0.56", default-features = false }
-parquet_opendal = "0.8"
-parquet = { version = "58", default-features = false }
-arrow = { version = "58", default-features = false }
-
-# Checkpoint
-redb = "4.1"
-
-# System
-sysinfo = "0.35"
-
-# CLI
-clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
-
-# Progress
-indicatif = "0.18"
-
-# Signals
-signal-hook = "0.4"
 
 # Utilities
-directories = "6.0"
-tempfile = "3.27"
-anyhow = "1.0"
 thiserror = "2.0"
-
-# Observability
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi"] }
-tracing-appender = "0.2"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

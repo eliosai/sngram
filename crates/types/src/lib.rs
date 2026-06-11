@@ -3,10 +3,8 @@
 
 mod content;
 mod error;
-mod gram;
 mod table;
 
 pub use content::Content;
 pub use error::TableError;
-pub use gram::{IndexGram, IndexGrams};
 pub use table::{TABLE_BINARY_SIZE, WeightTable};

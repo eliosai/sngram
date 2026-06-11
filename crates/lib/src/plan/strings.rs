@@ -14,9 +14,11 @@ pub enum Order {
     Suffix,
 }
 
+use crate::gram::Gram;
+
 /// A set of byte strings. Always present; absence is modelled with `Option`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StringSet(Vec<Vec<u8>>);
+pub struct StringSet(Vec<Gram>);
 
 impl StringSet {
     /// The empty set.
@@ -27,12 +29,12 @@ impl StringSet {
 
     /// A set holding the single string `s`.
     #[must_use]
-    pub fn of(s: Vec<u8>) -> Self {
+    pub fn of(s: Gram) -> Self {
         Self(vec![s])
     }
 
     /// Append `s` without re-sorting; call [`Self::clean`] before querying.
-    pub fn push(&mut self, s: Vec<u8>) {
+    pub fn push(&mut self, s: Gram) {
         self.0.push(s);
     }
 
@@ -50,33 +52,33 @@ impl StringSet {
 
     /// The strings, in their current order.
     #[must_use]
-    pub fn as_slice(&self) -> &[Vec<u8>] {
+    pub fn as_slice(&self) -> &[Gram] {
         &self.0
     }
 
     /// Take ownership of the backing strings.
     #[must_use]
-    pub fn into_vec(self) -> Vec<Vec<u8>> {
+    pub fn into_vec(self) -> Vec<Gram> {
         self.0
     }
 
     /// Length of the shortest string, or 0 when empty.
     #[must_use]
     pub fn min_len(&self) -> usize {
-        self.0.iter().map(Vec::len).min().unwrap_or(0)
+        self.0.iter().map(|g| g.len()).min().unwrap_or(0)
     }
 
     /// Length of the longest string, or 0 when empty.
     #[must_use]
     pub fn max_len(&self) -> usize {
-        self.0.iter().map(Vec::len).max().unwrap_or(0)
+        self.0.iter().map(|g| g.len()).max().unwrap_or(0)
     }
 
     /// Sort by `order` and remove duplicates, in place.
     pub fn clean(&mut self, order: Order) {
         match order {
             Order::Prefix => self.0.sort_unstable(),
-            Order::Suffix => self.0.sort_unstable_by(|a, b| cmp_suffix(a, b)),
+            Order::Suffix => self.0.sort_unstable_by(|a, b| cmp_suffix(a.as_bytes(), b.as_bytes())),
         }
         self.0.dedup();
     }
@@ -96,10 +98,7 @@ impl StringSet {
         let mut out = Vec::with_capacity(self.0.len() * other.0.len());
         for a in &self.0 {
             for b in &other.0 {
-                let mut s = Vec::with_capacity(a.len() + b.len());
-                s.extend_from_slice(a);
-                s.extend_from_slice(b);
-                out.push(s);
+                out.push(Gram::concat(a.as_bytes(), b.as_bytes()));
             }
         }
         let mut set = Self(out);
@@ -149,7 +148,7 @@ mod tests {
     fn set(items: &[&[u8]]) -> StringSet {
         let mut s = StringSet::new();
         for it in items {
-            s.push(it.to_vec());
+            s.push(Gram::from(*it));
         }
         s
     }

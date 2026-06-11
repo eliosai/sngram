@@ -57,17 +57,19 @@ fn increasing_table() -> WeightTable {
     finish(buf)
 }
 
-fn batch(table: &WeightTable, doc: &[u8]) -> Vec<Vec<u8>> {
+fn batch(table: &WeightTable, doc: &[u8]) -> Vec<(Vec<u8>, u64)> {
     let mut out = Vec::new();
-    sngram::scan(table, &Content::new(doc), |start, end| out.push(doc[start..end].to_vec()));
+    sngram::scan(table, &Content::new(doc), |start, end, hash| {
+        out.push((doc[start..end].to_vec(), hash));
+    });
     out
 }
 
-fn streamed(table: &WeightTable, doc: &[u8], chunk: usize) -> Vec<Vec<u8>> {
+fn streamed(table: &WeightTable, doc: &[u8], chunk: usize) -> Vec<(Vec<u8>, u64)> {
     let mut out = Vec::new();
     let mut scanner = StreamScanner::new(table);
     for part in doc.chunks(chunk) {
-        scanner.push(part, |gram| out.push(gram.to_vec()));
+        scanner.push(part, |gram, hash| out.push((gram.to_vec(), hash)));
     }
     scanner.finish();
     out

@@ -1,8 +1,20 @@
 //! Sparse n-gram extraction via monotonic stack (convex hull).
+//!
+//! The hot loop is branch-bound, so the implementation is shaped around three
+//! measured wins (each verified byte-identical against a frozen reference in
+//! `tests/differential.rs`): the weight lookup goes through
+//! [`WeightTable::matrix`] so its bounds check vanishes, stack entries pack
+//! into one `u64` (position | weight), and the stack top lives in registers —
+//! the no-pop fast path never touches the stack array. The measured traps are
+//! documented too: branchless dedup, emit batching, and block-staged lookups
+//! all REGRESSED 10–35%; don't reintroduce them without new numbers.
 
 use std::collections::VecDeque;
 
-use sngram_types::{IndexGram, IndexGrams, WeightTable};
+use sngram_types::WeightTable;
+
+use crate::gram::Gram;
+use crate::hashing;
 
 /// Shortest gram emitted or matched; a sparse gram spans at least one bigram.
 pub const MIN_LEN: usize = 3;
@@ -10,108 +22,239 @@ pub const MIN_LEN: usize = 3;
 pub const MAX_LEN: usize = 100;
 const STACK_CAP: usize = 128;
 
-/// streaming window: keeps recent bytes so an emitted gram stays contiguous, larger than the kept tail to amortize compaction
-const WINDOW_CAP: usize = 256;
+/// prefix-hash ring: holds `H[p]` for the last `RING` positions; an emittable
+/// gram start is at most `MAX_LEN` behind the current position, well inside
+const RING: usize = 128;
+const RING_MASK: usize = RING - 1;
+
+/// streaming window: keeps recent bytes so an emitted gram stays contiguous; sized so compaction (a `WINDOW_KEEP`-byte memmove every `WINDOW_CAP - WINDOW_KEEP` bytes) amortizes to ~nothing while a fresh scanner's zero-init stays cheap for tiny documents (1 KiB measured equal to 4 KiB at steady state, +12% on 64 B docs)
+const WINDOW_CAP: usize = 1024;
 /// bytes kept on compaction, at least the longest gram so every still-emittable gram start stays in the window
 const WINDOW_KEEP: usize = 128;
 
+/// Zero-allocation extraction. Calls `emit(start, end, hash)` for each gram.
+///
+/// The hash is a 64-bit rolling polynomial over the gram's bytes, computed in
+/// O(1) per gram from prefix hashes — identical to `Gram::hash` of the same
+/// bytes, so index keys and query keys agree.
+///
+/// # Panics
+///
+/// Panics if `content` is 4 GiB or larger (positions are packed into 32 bits;
+/// feed inputs that large through `StreamScanner` instead).
+#[inline]
 #[allow(
     clippy::indexing_slicing,
-    reason = "scan emits start..end within content"
+    reason = "matrix index is u8<<8|u8 < 65536; stack and ring indices are masked or < len <= STACK_CAP"
 )]
-pub fn all<'a>(table: &WeightTable, content: &'a [u8]) -> IndexGrams<'a> {
-    if content.len() < MIN_LEN {
-        return IndexGrams::new(Vec::new());
-    }
-    let n = content.len() - 1;
-    let mut grams = Vec::with_capacity(n * 2);
-    scan(table, content, |start, end| {
-        grams.push(IndexGram::new(&content[start..end], start));
-    });
-    IndexGrams::new(grams)
-}
-
-/// Zero-allocation extraction. Calls `emit` for each gram's (start, end).
-///
-/// Use this instead of [`all`] when you don't need to collect grams —
-/// e.g. when hashing and inserting directly into an inverted index.
-#[inline]
-#[allow(clippy::indexing_slicing, reason = "bounds enforced by pair_count")]
-pub fn scan(table: &WeightTable, content: &[u8], mut emit: impl FnMut(usize, usize)) {
+#[allow(
+    clippy::too_many_lines,
+    reason = "the hot loop is kept as one linear automaton; splitting it costs measured throughput"
+)]
+pub fn scan(table: &WeightTable, content: &[u8], mut emit: impl FnMut(usize, usize, u64)) {
     if content.len() < MIN_LEN {
         return;
     }
-    let n = content.len() - 1;
-    let mut stack = FixedStack::new();
+    assert!(
+        u32::try_from(content.len()).is_ok(),
+        "scan supports content up to 4 GiB; use StreamScanner beyond that"
+    );
+    let matrix = table.matrix();
+    let mut buf = [0u64; STACK_CAP];
+    let mut len = 0usize;
+    // write-through register cache of buf[len-1], valid iff len > 0
+    let mut tpos = 0usize;
+    let mut tw = 0u32;
+    // rolling prefix hash: h is H[i+1] inside the loop, ring holds recent H[p]
+    let mut ring = [0u64; RING];
+    let mut h = u64::from(content[0]);
+    ring[0] = h;
 
-    for i in 0..n {
-        let w = table.weight(content[i], content[i + 1]);
+    for (i, (&c1, &c2)) in content.iter().zip(&content[1..]).enumerate() {
+        h = hashing::step(h, c2);
+        ring[(i + 1) & RING_MASK] = h;
+        let w = matrix[(usize::from(c1) << 8) | usize::from(c2)];
         let end = i + 2;
-        drain_emit(&mut stack, end, w, &mut emit);
-        top_emit(&stack, end, &mut emit);
-        stack.dedup(w);
-        stack.push(i, w);
+        while len > 0 {
+            if tw >= w {
+                // the surviving top spans a hull gram ending here
+                emit_hashed(&ring, h, tpos, end, &mut emit);
+                // dedup: an equal-weight top collapses into the new entry; the
+                // cache needs no refresh — the push below rewrites it
+                len -= usize::from(tw == w);
+                break;
+            }
+            // drain: strictly lighter top closes its gram and pops
+            len -= 1;
+            emit_hashed(&ring, h, tpos, end, &mut emit);
+            if len == 0 {
+                break;
+            }
+            let e = buf[len - 1];
+            tpos = unpack_pos(e);
+            tw = unpack_weight(e);
+        }
+        if len >= STACK_CAP {
+            // evict oldest: too far back to start a gram within MAX_LEN
+            buf.copy_within(1.., 0);
+            len -= 1;
+        }
+        buf[len] = pack(i, w);
+        len += 1;
+        tpos = i;
+        tw = w;
     }
+}
+
+/// emit a length-valid gram with its O(1) rolling hash; `h_end` is `H[end-1]`
+#[inline]
+#[allow(clippy::indexing_slicing, reason = "ring index masked to RING")]
+fn emit_hashed(
+    ring: &[u64; RING],
+    h_end: u64,
+    start: usize,
+    end: usize,
+    emit: &mut impl FnMut(usize, usize, u64),
+) {
+    let len = end - start;
+    if (MIN_LEN..=MAX_LEN).contains(&len) {
+        let h_before = if start == 0 { 0 } else { ring[(start - 1) & RING_MASK] };
+        emit(start, end, hashing::from_prefixes(h_end, h_before, len));
+    }
+}
+
+#[inline]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "scan asserts content < 4 GiB, so pos fits u32"
+)]
+const fn pack(pos: usize, weight: u32) -> u64 {
+    ((pos as u64) << 32) | weight as u64
+}
+
+#[inline]
+#[allow(clippy::cast_possible_truncation, reason = "high 32 bits extracted")]
+const fn unpack_pos(entry: u64) -> usize {
+    (entry >> 32) as usize
+}
+
+#[inline]
+#[allow(clippy::cast_possible_truncation, reason = "low 32 bits extracted")]
+const fn unpack_weight(entry: u64) -> u32 {
+    entry as u32
 }
 
 /// streaming sparse n-gram extraction that holds a bounded window, never the whole document
 pub struct StreamScanner<'t> {
-    table: &'t WeightTable,
+    matrix: &'t [u32; 65536],
     window: [u8; WINDOW_CAP],
     wlen: usize,
     base: usize,
-    stack: FixedStack,
+    /// monotonic stack of (absolute position, weight); positions are unbounded
+    /// in a stream, so entries stay unpacked
+    stack: [(usize, u32); STACK_CAP],
+    slen: usize,
+    /// rolling prefix hash of everything pushed since the last `finish`
+    hash: u64,
+    /// recent prefix-hash values `H[p]`, indexed by absolute position masked
+    ring: [u64; RING],
 }
 
 impl<'t> StreamScanner<'t> {
     /// new scanner bound to a weight table, ready to receive byte chunks
     #[must_use]
-    pub const fn new(table: &'t WeightTable) -> Self {
+    pub fn new(table: &'t WeightTable) -> Self {
         Self {
-            table,
+            matrix: table.matrix(),
             window: [0; WINDOW_CAP],
             wlen: 0,
             base: 0,
-            stack: FixedStack::new(),
+            stack: [(0, 0); STACK_CAP],
+            slen: 0,
+            hash: 0,
+            ring: [0; RING],
         }
     }
 
-    /// feed the next chunk, emitting each gram's bytes as it closes, identical to scan over the concatenation of all chunks
+    /// feed the next chunk, emitting each gram's bytes and rolling hash as it
+    /// closes, identical to [`scan`](crate::scan) over the concatenation of all chunks
     #[allow(
         clippy::indexing_slicing,
-        reason = "wlen stays <= WINDOW_CAP and a valid gram start is within MAX_LEN of end, kept in the window by WINDOW_KEEP"
+        reason = "wlen stays <= WINDOW_CAP, stack indices < slen <= STACK_CAP, ring indices masked, and a valid gram start is within MAX_LEN of end, kept in the window by WINDOW_KEEP"
     )]
-    pub fn push(&mut self, chunk: &[u8], mut emit: impl FnMut(&[u8])) {
-        for &byte in chunk {
+    #[allow(
+        clippy::excessive_nesting,
+        clippy::too_many_lines,
+        reason = "the hot loop is kept as one linear automaton; splitting it costs measured throughput"
+    )]
+    pub fn push(&mut self, chunk: &[u8], mut emit: impl FnMut(&[u8], u64)) {
+        // register caches of stack[slen-1] and the prefix hash
+        let (mut tpos, mut tw) = if self.slen > 0 {
+            self.stack[self.slen - 1]
+        } else {
+            (0, 0)
+        };
+        let mut h = self.hash;
+        let mut rest = chunk;
+        while !rest.is_empty() {
             if self.wlen == WINDOW_CAP {
                 self.compact();
             }
-            self.window[self.wlen] = byte;
-            self.wlen += 1;
-            if self.wlen < 2 {
-                continue;
+            // bulk-copy as much of the chunk as fits, then run the automaton
+            // over the copied span in a tight loop: no per-byte window-full
+            // branch, no per-byte store
+            let take = rest.len().min(WINDOW_CAP - self.wlen);
+            let filled = self.wlen;
+            self.window[filled..filled + take].copy_from_slice(&rest[..take]);
+            self.wlen += take;
+            rest = &rest[take..];
+
+            if filled == 0 && take > 0 {
+                // first byte of the document seeds the prefix hash
+                h = u64::from(self.window[0]);
+                self.ring[0] = h;
             }
-            let weight = self
-                .table
-                .weight(self.window[self.wlen - 2], self.window[self.wlen - 1]);
-            let pos = self.base + self.wlen - 2;
-            let end = self.base + self.wlen;
-            let base = self.base;
-            let window = &self.window;
-            let stack = &mut self.stack;
-            let mut sink = |start: usize, finish: usize| emit(&window[start - base..finish - base]);
-            drain_emit(stack, end, weight, &mut sink);
-            top_emit(stack, end, &mut sink);
-            stack.dedup(weight);
-            stack.push(pos, weight);
+            // j indexes the second byte of each newly completed pair
+            for j in filled.max(1)..filled + take {
+                h = hashing::step(h, self.window[j]);
+                self.ring[(self.base + j) & RING_MASK] = h;
+                let w = self.matrix
+                    [(usize::from(self.window[j - 1]) << 8) | usize::from(self.window[j])];
+                let pos = self.base + j - 1;
+                let end = self.base + j + 1;
+                while self.slen > 0 {
+                    if tw >= w {
+                        emit_window(&self.window, &self.ring, self.base, h, tpos, end, &mut emit);
+                        self.slen -= usize::from(tw == w);
+                        break;
+                    }
+                    self.slen -= 1;
+                    emit_window(&self.window, &self.ring, self.base, h, tpos, end, &mut emit);
+                    if self.slen == 0 {
+                        break;
+                    }
+                    (tpos, tw) = self.stack[self.slen - 1];
+                }
+                if self.slen >= STACK_CAP {
+                    // evict oldest: too far back to start a gram within MAX_LEN
+                    self.stack.copy_within(1.., 0);
+                    self.slen -= 1;
+                }
+                self.stack[self.slen] = (pos, w);
+                self.slen += 1;
+                tpos = pos;
+                tw = w;
+            }
         }
+        self.hash = h;
     }
 
     /// end the current document and reset for the next, emitting nothing since scan leaves no closed grams at end of input
     pub const fn finish(&mut self) {
         self.wlen = 0;
         self.base = 0;
-        self.stack = FixedStack::new();
+        self.slen = 0;
+        self.hash = 0;
     }
 
     /// slide the still-emittable tail to the window front so more bytes fit, dropping only bytes too old to start a gram
@@ -120,6 +263,37 @@ impl<'t> StreamScanner<'t> {
         self.window.copy_within(DROP.., 0);
         self.wlen = WINDOW_KEEP;
         self.base += DROP;
+    }
+}
+
+/// emit the gram bytes and rolling hash for an absolute (start, end) span if
+/// its length is valid; starts older than `MAX_LEN` fail the length check
+/// before any window arithmetic, so `start - base` never underflows
+#[inline]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "a length-valid start is within MAX_LEN of end, kept in the window by WINDOW_KEEP; ring indices masked"
+)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "hot-path free function over disjoint scanner fields; a struct would force whole-self borrows"
+)]
+fn emit_window(
+    window: &[u8; WINDOW_CAP],
+    ring: &[u64; RING],
+    base: usize,
+    h_end: u64,
+    start: usize,
+    end: usize,
+    emit: &mut impl FnMut(&[u8], u64),
+) {
+    let len = end - start;
+    if (MIN_LEN..=MAX_LEN).contains(&len) {
+        let h_before = if start == 0 { 0 } else { ring[(start - 1) & RING_MASK] };
+        emit(
+            &window[start - base..end - base],
+            hashing::from_prefixes(h_end, h_before, len),
+        );
     }
 }
 
@@ -134,7 +308,7 @@ impl StreamScanner<'_> {
     pub async fn index_reader<R>(
         &mut self,
         mut reader: R,
-        mut emit: impl FnMut(&[u8]),
+        mut emit: impl FnMut(&[u8], u64),
     ) -> std::io::Result<()>
     where
         R: tokio::io::AsyncBufRead + Unpin,
@@ -159,94 +333,14 @@ impl StreamScanner<'_> {
 /// (`cover(L) ⊆ scan(D)` for any `D ⊇ L`), so none is a false negative.
 #[allow(clippy::indexing_slicing, reason = "cover emits start..end within literal")]
 #[must_use]
-pub fn cover_one(table: &WeightTable, literal: &[u8]) -> Vec<Vec<u8>> {
+pub fn cover_one(table: &WeightTable, literal: &[u8]) -> Vec<Gram> {
     let mut grams = Vec::new();
     cover(table, literal, |start, end| {
         if (MIN_LEN..=MAX_LEN).contains(&(end - start)) {
-            grams.push(literal[start..end].to_vec());
+            grams.push(Gram::from(&literal[start..end]));
         }
     });
     grams
-}
-
-#[inline]
-fn drain_emit(stack: &mut FixedStack, end: usize, w: u32, emit: &mut impl FnMut(usize, usize)) {
-    while let Some((start, sw)) = stack.peek() {
-        if sw >= w {
-            break;
-        }
-        stack.pop();
-        try_emit(start, end, emit);
-    }
-}
-
-#[inline]
-fn top_emit(stack: &FixedStack, end: usize, emit: &mut impl FnMut(usize, usize)) {
-    if let Some((start, _)) = stack.peek() {
-        try_emit(start, end, emit);
-    }
-}
-
-#[inline]
-fn try_emit(start: usize, end: usize, emit: &mut impl FnMut(usize, usize)) {
-    let len = end - start;
-    if (MIN_LEN..=MAX_LEN).contains(&len) {
-        emit(start, end);
-    }
-}
-
-struct FixedStack {
-    buf: [(usize, u32); STACK_CAP],
-    len: usize,
-}
-
-#[allow(clippy::indexing_slicing, reason = "indices stay < len <= STACK_CAP")]
-impl FixedStack {
-    #[inline]
-    const fn new() -> Self {
-        Self {
-            buf: [(0, 0); STACK_CAP],
-            len: 0,
-        }
-    }
-
-    #[inline]
-    fn push(&mut self, pos: usize, weight: u32) {
-        if self.len == STACK_CAP {
-            self.evict_oldest();
-        }
-        self.buf[self.len] = (pos, weight);
-        self.len += 1;
-    }
-
-    /// drop the oldest entry when full, it is too far back to start a gram within the length limit
-    #[cold]
-    #[inline(never)]
-    fn evict_oldest(&mut self) {
-        self.buf.copy_within(1.., 0);
-        self.len -= 1;
-    }
-
-    #[inline]
-    const fn pop(&mut self) {
-        self.len = self.len.saturating_sub(1);
-    }
-
-    #[inline]
-    const fn peek(&self) -> Option<(usize, u32)> {
-        if self.len > 0 {
-            Some(self.buf[self.len - 1])
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    const fn dedup(&mut self, w: u32) {
-        while self.len > 0 && self.buf[self.len - 1].1 == w {
-            self.len -= 1;
-        }
-    }
 }
 
 /// Minimal covering n-grams (danlark1 `BuildCoveringNgrams`): the same hull as
