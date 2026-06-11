@@ -457,7 +457,7 @@ def test_revision_pinning_rewrites_hf_globs(tmp_path: Path, monkeypatch):
     src = Source(
         "github-code",
         "codeparrot/github-code",
-        "code",
+        "content",
         data_files="hf://datasets/codeparrot/github-code/data/*.parquet",
     )
     captured = {}

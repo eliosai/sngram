@@ -428,11 +428,12 @@ class Trainer:
                 self.counter.merge(tally)
                 self.counter.add_files(1)
                 self.state.mark_done(task.source.id, task.n_shards, task.shard, task.revision)
+            shard_bytes = ws.shard_bytes  # _drop_in_flight zeroes it
             self._drop_in_flight(ws)
             self.events.log(
                 "shard",
                 shard=sid,
-                bytes=ws.shard_bytes,
+                bytes=shard_bytes,
                 secs=round(time.monotonic() - ws.started, 1),
             )
             return
