@@ -330,7 +330,7 @@ def test_dashboard_renders_through_a_live_run(tmp_path: Path):
 
 def test_event_log_rotation_and_thread_safety(tmp_path: Path):
     path = tmp_path / "events.jsonl"
-    log = EventLog(path, max_bytes=20_000)
+    log = EventLog(path, segment_bytes=20_000)
 
     def spam(tid: int):
         for i in range(500):
@@ -343,12 +343,16 @@ def test_event_log_rotation_and_thread_safety(tmp_path: Path):
         t.join()
     log.close()
 
-    rotated = path.with_suffix(".jsonl.1")
-    assert rotated.exists(), "rotation must have happened"
-    assert path.stat().st_size <= 25_000
-    for f in (path, rotated):
-        for line in f.read_text().splitlines():
+    segments = EventLog.segment_paths(path)
+    assert len(segments) > 1, "rotation must have split the log into segments"
+    total = 0
+    for seg in segments:
+        assert seg.stat().st_size <= 20_000 + 512, "each segment stays small"
+        lines = seg.read_text().splitlines()
+        for line in lines:
             json.loads(line)  # every line is intact JSON despite 8 writers
+        total += len(lines)
+    assert total == 8 * 500, "no event dropped across the split"
 
 
 def test_legacy_v1_checkpoint_still_loads(tmp_path: Path):
@@ -447,6 +451,60 @@ def test_concurrent_merge_and_snapshot_never_crashes():
         t.join()
     assert counter.pairs_processed == n_threads * per_thread * (len(doc) - 1)
     assert counter.count(ord("t"), ord("h")) == n_threads * per_thread  # one "th"
+
+
+def test_load_source_resolves_parquet_file_list(tmp_path: Path, monkeypatch):
+    """datasets does the resolution (config/revision/glob); we take the concrete
+    file list and read it ourselves, so shard index == file index."""
+    import datasets
+
+    trainer = make_trainer(tmp_path, [])
+    trainer.state.revisions["bigcode/the-stack"] = "deadbeef"
+    fake_files = [
+        "hf://datasets/bigcode/the-stack@deadbeef/data/000.parquet",
+        "hf://datasets/bigcode/the-stack@deadbeef/data/001.parquet",
+    ]
+
+    class FakeEx:
+        kwargs = {"files": fake_files}
+
+    class FakeDS:
+        _ex_iterable = FakeEx()
+
+    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **k: FakeDS())
+    src = Source("the-stack", "bigcode/the-stack", "content")
+    assert trainer._load_source(src) == fake_files
+    assert trainer._source_shards(src) == 2
+    trainer.events.close()
+
+
+def test_shard_read_uses_non_retaining_cache(tmp_path: Path, monkeypatch):
+    """The OOM fix: each shard's parquet opens with a cache that does NOT retain
+    read bytes (measured: default grew RSS +4.6 GB per 3.9 GB read) and pyarrow
+    pre_buffer disabled, so per-worker memory is bounded by one row group, not
+    the multi-GB shard."""
+    import io
+    import pyarrow.parquet as pq
+
+    trainer = make_trainer(tmp_path, [])
+    captured: dict = {}
+
+    class FakeFS:
+        def open(self, url, mode="rb", **kw):
+            captured.update(kw)
+            captured["url"] = url
+            return io.BytesIO(b"")
+
+    trainer._fs = FakeFS()
+    monkeypatch.setattr(
+        pq, "ParquetFile",
+        lambda fh, **kw: captured.__setitem__("pre_buffer", kw.get("pre_buffer")),
+    )
+    trainer._open_parquet("hf://datasets/x/y@sha/a.parquet")
+
+    assert captured["cache_type"] == "none", "must not retain read bytes"
+    assert captured["pre_buffer"] is False, "no eager whole-file buffering"
+    trainer.events.close()
 
 
 def test_revision_pinning_rewrites_hf_globs(tmp_path: Path, monkeypatch):

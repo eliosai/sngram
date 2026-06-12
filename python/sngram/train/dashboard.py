@@ -15,6 +15,8 @@ from .pipeline import Trainer, rss_bytes
 
 
 def render(t: Trainer):
+    # headline = everything counted so far (durable + in-flight). It advances
+    # every batch, so the number visibly moves and stays in step with the ETA.
     header = Text()
     header.append(f"  {fmt_bytes(t.total_bytes())}", style="bold green")
     header.append(f" / {fmt_bytes(t.target)}")

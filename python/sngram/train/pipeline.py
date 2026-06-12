@@ -31,6 +31,14 @@ from .units import fmt_bytes, mint_label
 MAX_HARD_ATTEMPTS = 3
 QUEUE_DEPTH_PER_WORKER = 4
 BATCH_ROWS = 256
+# We read each shard's parquet file DIRECTLY (not through datasets' streaming
+# iterator), because datasets retains every decompressed byte it reads — RSS
+# grew ~1:1 with each multi-GB shard (measured +4.6 GB per 3.9 GB; ×16 workers
+# => OOM). A direct read with a non-retaining fsspec cache (`cache_type=none`)
+# and `pre_buffer=False` holds only the current row group, so per-worker memory
+# is bounded by the row-group size and stays flat over a 50 TB run.
+SHARD_CACHE_TYPE = "none"
+SHARD_BLOCK_SIZE = 8 * 1024 * 1024
 STALL_AFTER_S = 180.0
 RETRY_BASE_S = 2.0
 RETRY_CAP_S = 60.0
@@ -89,6 +97,34 @@ def rss_bytes() -> int:
             return int(fh.read().split()[1]) * 4096
     except OSError:
         return 0
+
+
+def _release_arrow_pool() -> None:
+    """Return pyarrow's freed-but-retained buffers to the OS (best effort)."""
+    try:
+        import pyarrow as pa
+
+        pa.default_memory_pool().release_unused()
+    except Exception:  # noqa: BLE001 - purely advisory; never break a shard
+        pass
+
+
+def _resolved_files(ds) -> list[str]:
+    """The ordered parquet file URLs behind a streaming `datasets` dataset.
+
+    `datasets` resolves config/split/revision/glob into a concrete file list
+    and hangs it on the Arrow examples iterable; we read those files directly
+    (with bounded memory) instead of using its retaining streaming iterator.
+    """
+    ex = getattr(ds, "_ex_iterable", None)
+    files = getattr(ex, "kwargs", {}).get("files") if ex is not None else None
+    if not files:
+        raise RuntimeError(
+            "could not resolve parquet file list from the dataset "
+            f"({type(ex).__name__ if ex is not None else 'no _ex_iterable'}); "
+            "the datasets internal layout may have changed"
+        )
+    return list(files)
 
 
 @dataclass
@@ -159,10 +195,11 @@ class Trainer:
         self.queue: queue.Queue[ShardTask] = queue.Queue(
             maxsize=QUEUE_DEPTH_PER_WORKER * workers
         )
-        # one resolved IterableDataset per source, shared by planner + workers:
-        # re-resolving metadata per shard would hammer the hub for nothing
-        self._ds_cache: dict[str, object] = {}
+        # one resolved parquet-file-URL list per source, shared by planner +
+        # workers: re-resolving metadata per shard would hammer the hub
+        self._ds_cache: dict[str, list[str]] = {}
         self._ds_lock = threading.Lock()
+        self._fs = None  # lazily-built HfFileSystem, shared by all workers
         self.worker_state = [WorkerState() for _ in range(workers)]
         self.stop = threading.Event()
         self.planner_done = threading.Event()
@@ -176,6 +213,10 @@ class Trainer:
         self._merge_lock = threading.Lock()
         self.started_at = time.monotonic()
         self._rate_window: list[tuple[float, int]] = []
+        # checkpoint status, surfaced in the dashboard header (not the event tail)
+        self.last_checkpoint_at: float | None = None
+        self.checkpoints_written = 0
+        self.disk_free = 0
 
     # ------------------------------------------------------------- totals
 
@@ -284,8 +325,16 @@ class Trainer:
         )[1].split("/")[0] + "/" + source.data_files.split("hf://datasets/")[1].split("/")[1]
         return self._repo_revision(repo)
 
-    def _load_source(self, source: Source):
-        """Resolve a source once, at its pinned revision, and cache it."""
+    def _load_source(self, source: Source) -> list[str]:
+        """Resolve a source to its ordered list of parquet file URLs, pinned at
+        its revision, and cache it.
+
+        We let `datasets` do the hard resolution (config → split → revision →
+        file glob) but then read the files ourselves (see `_run_shard`), so we
+        extract the resolved, revision-stamped URL list rather than keeping the
+        streaming dataset. The list order is the shard order — stable across
+        restarts because the revision is pinned — so shard index == file index.
+        """
         with self._ds_lock:
             cached = self._ds_cache.get(source.id)
         if cached is not None:
@@ -301,30 +350,47 @@ class Trainer:
                 org, repo_name, tail = rest.split("/", 2)
                 files = f"{head}hf://datasets/{org}/{repo_name}@{rev}/{tail}"
             ds = load_dataset(
-                "parquet",
-                data_files=files,
-                split="train",
-                streaming=True,
-                token=self.token,
+                "parquet", data_files=files, split="train",
+                streaming=True, token=self.token,
             )
         else:
             ds = load_dataset(
-                source.repo,
-                name=source.config,
-                split="train",
-                streaming=True,
-                token=self.token,
-                revision=rev,
+                source.repo, name=source.config, split="train",
+                streaming=True, token=self.token, revision=rev,
             )
+        urls = _resolved_files(ds)
         with self._ds_lock:
-            self._ds_cache[source.id] = ds
-        return ds
+            self._ds_cache[source.id] = urls
+        return urls
 
     def _source_shards(self, source: Source) -> int:
-        ds = self._load_source(source)
-        n = getattr(ds, "num_shards", None) or getattr(ds, "n_shards")
+        n = len(self._load_source(source))
         self.events.log("source", source=source.id, shards=n)
         return int(n)
+
+    def _open_parquet(self, url: str):
+        """Open one shard's parquet for bounded-memory streaming.
+
+        Returns (ParquetFile, file_handle|None). Remote (hf://) files open
+        through a shared HfFileSystem with a non-retaining cache; local paths
+        (test fixtures) open directly. `pre_buffer=False` keeps pyarrow from
+        eagerly coalescing the whole file into memory.
+        """
+        import pyarrow.parquet as pq
+
+        if "://" in url:
+            if self._fs is None:
+                with self._ds_lock:
+                    if self._fs is None:
+                        from huggingface_hub import HfFileSystem
+
+                        self._fs = HfFileSystem(token=self.token)
+            fh = self._fs.open(
+                url, mode="rb",
+                cache_type=SHARD_CACHE_TYPE, block_size=SHARD_BLOCK_SIZE,
+            )
+            return pq.ParquetFile(fh, pre_buffer=False), fh
+        return pq.ParquetFile(url, pre_buffer=False), None
 
     def _bump(self, name: str) -> None:
         with self._lock:
@@ -373,25 +439,38 @@ class Trainer:
             ws.last_progress = ws.started
             tally = sngram.LocalTally()
             try:
-                ds = self._load_source(task.source)
-                with self._ds_lock:
-                    # transform-building on the shared dataset is functional
-                    # but not documented thread-safe; it is cheap, so serialize
-                    shard = (
-                        ds.shard(num_shards=task.n_shards, index=task.shard)
-                        .select_columns([task.source.text_field])
-                        .with_format("arrow")
-                    )
-                for batch in shard.iter(batch_size=BATCH_ROWS):
-                    if self.stop.is_set():
-                        # abandoned: nothing merged, shard not marked done
-                        self._drop_in_flight(ws)
-                        return
-                    n = tally.count_arrow(batch)
-                    ws.shard_bytes += n
-                    ws.last_progress = time.monotonic()
-                    with self._lock:
-                        self.in_flight_bytes += n
+                url = self._load_source(task.source)[task.shard]
+                pf, fh = self._open_parquet(url)
+                try:
+                    # pyarrow silently yields empty batches for a missing column
+                    # rather than raising — so a misnamed text field would count
+                    # zero bytes in silence. Fail loudly instead.
+                    field = task.source.text_field
+                    names = pf.schema_arrow.names
+                    if field not in names:
+                        raise ValueError(
+                            f"column [{field!r}] not in the dataset. "
+                            f"columns in the dataset: {names}."
+                        )
+                    # pre_buffer=False + non-retaining cache => only the current
+                    # row group is resident, so memory stays bounded no matter
+                    # how large the shard. Project to the text column alone.
+                    for batch in pf.iter_batches(batch_size=BATCH_ROWS, columns=[field]):
+                        if self.stop.is_set():
+                            # abandoned: nothing merged, shard not marked done
+                            self._drop_in_flight(ws)
+                            return
+                        n = tally.count_arrow(batch)
+                        ws.shard_bytes += n
+                        ws.last_progress = time.monotonic()
+                        with self._lock:
+                            self.in_flight_bytes += n
+                finally:
+                    if fh is not None:
+                        fh.close()
+                    # hand the shard's row-group buffers back to the OS so RSS
+                    # resets between shards instead of creeping over a long run
+                    _release_arrow_pool()
             except Exception as e:  # noqa: BLE001 - classified below, never fatal
                 self._drop_in_flight(ws)
                 self._bump("errors")
@@ -538,6 +617,11 @@ class Trainer:
         with self._merge_lock:
             checkpoint.save(self._ckpt_dir, self.counter, self.state)
         free = shutil.disk_usage(self.mint_dir).free if self.mint_dir.exists() else 0
+        # status lives in the header (live); the JSONL keeps the full beat as
+        # debug material — it's split into small segments, not throttled
+        self.last_checkpoint_at = time.monotonic()
+        self.checkpoints_written += 1
+        self.disk_free = free
         self.events.log(
             "checkpoint", bytes=self.durable_bytes(), rss=rss_bytes(), disk_free=free
         )
@@ -559,9 +643,11 @@ class Trainer:
                 ws.stalled = False
 
     def _rate_sample(self) -> None:
+        # a 60s window: long enough to smooth the lumps of multi-GB shards
+        # merging, so the ETA doesn't jitter with every completion
         now = time.monotonic()
         self._rate_window.append((now, self.total_bytes()))
-        while self._rate_window and now - self._rate_window[0][0] > 30.0:
+        while self._rate_window and now - self._rate_window[0][0] > 60.0:
             self._rate_window.pop(0)
 
     def rate_now(self) -> float:
@@ -575,12 +661,20 @@ class Trainer:
         return self.total_bytes() / elapsed
 
     def eta_next_mint(self) -> str:
+        # measured against total_bytes (everything counted, incl. in-flight) —
+        # the same quantity the headline shows. total_bytes advances every batch
+        # so the ETA tracks the visible bar and trends down smoothly, instead of
+        # freezing on durable (which only jumps when a whole shard merges).
         if not self.thresholds:
             return "—"
-        remaining = self.thresholds[0] - self.durable_bytes()
+        remaining = self.thresholds[0] - self.total_bytes()
+        if remaining <= 0:
+            # bar is past the threshold; the mint fires once the in-flight
+            # shards merge and durable catches up — moments away
+            return "soon"
         rate = self.rate_now() or self.rate_avg()
         if rate <= 0:
-            return "∞"
+            return "—"
         secs = remaining / rate
         if secs > 86_400:
             return f"{secs / 86_400:.1f} d"

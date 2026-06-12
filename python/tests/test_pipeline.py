@@ -174,3 +174,47 @@ def test_shard_error_path_classifies_and_survives(tmp_path: Path):
     shard_errors = [e for e in (trainer.events.tail or []) if e.get("stage") == "shard"]
     assert shard_errors, "the shard failure must be logged, not swallowed"
     assert all("multiple values" not in str(e) for e in shard_errors)
+
+
+# --- ETA must track bytes actually counted, never the lagging durable --------
+# Regression: with multi-GB shards, `durable` (merged bytes) only advances when
+# a whole shard completes — it freezes for minutes. The headline bar and the
+# ETA must follow `total_bytes` (counted, incl. in-flight), which moves every
+# batch, so the number visibly progresses and the ETA trends down with it. The
+# mint still fires on durable (exactly-once); the ETA shows "soon" in the brief
+# window after the bar passes the threshold but before the shards merge.
+
+from types import SimpleNamespace
+
+
+def _eta(total: int, *, now: float = 100 * 10**6, avg: float = 10 * 10**6,
+         durable: int = 0) -> str:
+    fake = SimpleNamespace(
+        thresholds=[100 * 10**9],
+        total_bytes=lambda: total,
+        # deliberately frozen/lagging: the ETA must NOT depend on it
+        durable_bytes=lambda: durable,
+        rate_now=lambda: now,
+        rate_avg=lambda: avg,
+    )
+    return Trainer.eta_next_mint(fake)
+
+
+def test_eta_tracks_bytes_counted_not_frozen_durable():
+    # durable stuck at 5 GB, but 40 GB has streamed -> 60 GB to go @100MB/s = 10 min
+    assert _eta(40 * 10**9, durable=5 * 10**9) == "10 min"
+
+
+def test_eta_shrinks_as_bytes_are_counted():
+    assert _eta(10 * 10**9) == "15 min"   # 90 GB to go
+    assert _eta(85 * 10**9) == "2 min"    # 15 GB to go
+
+
+def test_eta_soon_once_threshold_reached():
+    # bar has passed the threshold; mint fires when in-flight shards merge
+    assert _eta(100 * 10**9 + 1) == "soon"
+
+
+def test_eta_falls_back_to_avg_rate():
+    # no recent-window rate yet -> use the cumulative average, never crash
+    assert _eta(90 * 10**9, now=0.0) == "17 min"  # 10 GB / 10 MB/s ~ 1000 s
