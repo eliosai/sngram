@@ -86,6 +86,24 @@ def test_mint_thresholds_hit_in_order(tmp_path: Path):
     assert "final" in trainer.state.mints_done
 
 
+def test_mints_log_kl_convergence_signal(tmp_path: Path):
+    # multiple mints: the first has no predecessor (kl None), later mints carry
+    # a finite KL from the previous mint's distribution
+    rows = ["x" * 1000] * 100  # 100 KB per shard file
+    fam = local_family(tmp_path, "alpha", rows, files=4)
+    trainer = run_trainer(
+        tmp_path, [fam], target=parse_size("300KB"), mint_every=parse_size("100KB")
+    )
+    mints = [e for e in (trainer.events.tail or []) if e.get("kind") == "mint"]
+    assert len(mints) >= 2
+    assert mints[0]["kl_from_prev"] is None
+    assert all(
+        isinstance(m["kl_from_prev"], (int, float)) and m["kl_from_prev"] >= 0
+        for m in mints[1:]
+    )
+    assert trainer.last_kl is not None and trainer.last_kl >= 0
+
+
 def test_resume_skips_completed_shards(tmp_path: Path):
     rows = ["hello world"] * 50
     fam = local_family(tmp_path, "alpha", rows, files=5)
@@ -99,6 +117,25 @@ def test_resume_skips_completed_shards(tmp_path: Path):
     assert second.counter.files_processed == 5  # restored, not re-counted
 
 
+def test_resume_restores_blend_feedback(tmp_path: Path):
+    # the weighted planner's per-family feedback and the KL baseline must come
+    # back on resume, not start from amnesia
+    rows = ["x" * 1000] * 100
+    fam = local_family(tmp_path, "alpha", rows, files=4)
+    first = run_trainer(
+        tmp_path, [fam], target=parse_size("300KB"), mint_every=parse_size("100KB")
+    )
+    assert first.state.family_bytes.get("alpha", 0) > 0
+    assert first.state.last_mint_counts is not None
+
+    second = run_trainer(
+        tmp_path, [fam], target=parse_size("300KB"), mint_every=parse_size("100KB"),
+        resume=True,
+    )
+    assert second.state.family_bytes.get("alpha", 0) == first.state.family_bytes["alpha"]
+    assert second.state.last_mint_counts == first.state.last_mint_counts
+
+
 def test_failed_source_does_not_kill_run(tmp_path: Path):
     good = local_family(tmp_path, "alpha", ["abc"] * 10)
     bad = Family(
@@ -108,6 +145,35 @@ def test_failed_source_does_not_kill_run(tmp_path: Path):
     trainer = run_trainer(tmp_path, [good, bad])
     assert trainer.durable_bytes() > 0
     assert trainer.errors >= 1
+
+
+def test_log_failure_after_merge_does_not_double_count_shard_as_failed(tmp_path: Path):
+    # a completed shard whose trailing event-log write fails (e.g. disk full)
+    # is already committed; it must NOT also be marked failed (which would skew
+    # the planner's in-flight accounting). Each task is accounted exactly once.
+    fam = local_family(tmp_path, "alpha", ["hello world"] * 5, files=1)
+    trainer = Trainer(
+        families=[fam],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    real_log = trainer.events.log
+
+    def boom(kind, **kw):
+        if kind == "shard":  # the post-merge completion log
+            raise OSError("disk full")
+        return real_log(kind, **kw)
+
+    trainer.events.log = boom
+    asyncio.run(trainer.run())
+
+    assert trainer.counter.files_processed == 1            # the shard DID complete
+    assert trainer._family_failed.get("alpha", 0) == 0     # and was not also failed
 
 
 def test_limit_stops_early(tmp_path: Path):
@@ -133,6 +199,27 @@ def test_bootstrap_mint_schedule(tmp_path: Path):
     labels = [mint_label(t) for t in trainer.thresholds[:6]]
     assert labels == ["100gb", "500gb", "1tb", "5tb", "10tb", "15tb"]
     assert mint_label(trainer.thresholds[-1]) == "50tb"
+    trainer.events.close()
+
+
+def test_mint_schedule_every_tb_after_bootstrap(tmp_path: Path):
+    # the production schedule: 100GB, 500GB, then a table every 1 TB to 10 TB
+    fam = local_family(tmp_path, "alpha", ["x"], files=1)
+    trainer = Trainer(
+        families=[fam],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("10TB"),
+        mint_every=parse_size("1TB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    labels = [mint_label(t) for t in trainer.thresholds]
+    assert labels == [
+        "100gb", "500gb",
+        "1tb", "2tb", "3tb", "4tb", "5tb", "6tb", "7tb", "8tb", "9tb", "10tb",
+    ]
     trainer.events.close()
 
 

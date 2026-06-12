@@ -13,10 +13,13 @@ from __future__ import annotations
 import base64
 import json
 import os
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import sngram
+
+_PAIR_COUNT = 256 * 256
 
 
 @dataclass
@@ -28,6 +31,14 @@ class RunState:
     mints_done: list[str] = field(default_factory=list)
     # repo -> pinned commit sha, fixed for the whole run (and its restarts)
     revisions: dict[str, str] = field(default_factory=dict)
+    # weighted-planner feedback: durable bytes + completed shards per family,
+    # so a resumed run keeps balancing the blend against the WHOLE run, not just
+    # the post-resume increment
+    family_bytes: dict[str, int] = field(default_factory=dict)
+    family_done: dict[str, int] = field(default_factory=dict)
+    # the previous mint's count vector, so the first post-resume mint can still
+    # report KL(mint_n || mint_{n-1}) — the convergence/early-stop signal
+    last_mint_counts: list[int] | None = None
 
     def is_done(
         self, source_id: str, n_shards: int, shard: int, revision: str | None
@@ -81,6 +92,15 @@ def save(directory: Path, counter: sngram.BigramCounter, state: RunState) -> Non
         },
         "mints_done": list(state.mints_done),
         "revisions": dict(state.revisions),
+        "family_bytes": dict(state.family_bytes),
+        "family_done": dict(state.family_done),
+        "last_mint_counts_b64": (
+            base64.b64encode(
+                struct.pack(f"<{_PAIR_COUNT}Q", *state.last_mint_counts)
+            ).decode()
+            if state.last_mint_counts is not None
+            else None
+        ),
     }
     tmp = directory / "state.json.tmp"
     tmp.write_text(json.dumps(payload))
@@ -116,5 +136,12 @@ def load(directory: Path, counter: sngram.BigramCounter) -> RunState | None:
         },
         mints_done=list(payload["mints_done"]),
         revisions=dict(payload.get("revisions", {})),
+        family_bytes=dict(payload.get("family_bytes", {})),
+        family_done=dict(payload.get("family_done", {})),
+        last_mint_counts=(
+            list(struct.unpack(f"<{_PAIR_COUNT}Q", base64.b64decode(lmc)))
+            if (lmc := payload.get("last_mint_counts_b64"))
+            else None
+        ),
     )
     return _attach_sets(state)

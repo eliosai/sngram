@@ -25,6 +25,10 @@ def render(t: Trainer):
     next_label = mint_label(t.thresholds[0]) if t.thresholds else "done"
     header.append(f"   next mint {next_label} in {t.eta_next_mint()}", style="magenta")
     header.append(f"   mints {len(t.state.mints_done)}")
+    if t.last_kl is not None:
+        # KL from the previous mint: shrinking toward 0 means the table has
+        # converged and the run can stop early
+        header.append(f"   kl {t.last_kl:.4f}", style="cyan")
     header.append(f"   shards {t.counter.files_processed}")
     header.append(f"   rss {fmt_bytes(rss_bytes())}", style="dim")
     if t.errors:

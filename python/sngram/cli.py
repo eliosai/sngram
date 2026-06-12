@@ -19,9 +19,9 @@ app = typer.Typer(
 @app.command()
 def train(
     mint_dir: Path = typer.Option(Path("./bins"), help="Where minted .bin tables land."),
-    target: str = typer.Option("50TB", help="Total text to count."),
+    target: str = typer.Option("10TB", help="Total text to count."),
     mint_every: str = typer.Option(
-        "5TB", help="Steady mint cadence (100GB/500GB/1TB bootstrap mints come first)."
+        "1TB", help="Steady mint cadence (100GB/500GB bootstrap mints come first)."
     ),
     workers: Optional[int] = typer.Option(
         None, help="Streaming/counting workers; default: one per physical core (4..16)."
@@ -180,6 +180,71 @@ def bench_ingest(
         typer.echo(f"pipeline x{workers} (streamed): {fmt_rate(rate)} total")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _show_pair(c1: int, c2: int) -> str:
+    return "".join(chr(c) if 32 <= c < 127 else f"\\x{c:02x}" for c in (c1, c2))
+
+
+@app.command("fs-histogram")
+def fs_histogram(
+    roots: list[Path] = typer.Argument(..., help="Directories/files to histogram."),
+    cap: Optional[str] = typer.Option(None, help="Stop after this many text bytes (e.g. 2GB)."),
+    top: int = typer.Option(25, help="How many top byte-pairs / extensions to show."),
+) -> None:
+    """Measure the byte-pair distribution of a real filesystem (text files only,
+    binaries skipped) — the empirical target a search table should match."""
+    from .train import fsvalidate
+    from .train.units import fmt_bytes, parse_size
+
+    counts, stats = fsvalidate.filesystem_histogram(
+        [str(r) for r in roots], cap=parse_size(cap) if cap else None
+    )
+    pairs = sum(counts) or 1
+    typer.echo(
+        f"text files: {stats.files}  skipped binary: {stats.skipped_binary}  "
+        f"text bytes: {fmt_bytes(stats.total_bytes)}"
+    )
+    order = sorted(range(len(counts)), key=lambda i: counts[i], reverse=True)
+    typer.echo(f"top {top} byte-pairs:")
+    for i in order[:top]:
+        typer.echo(f"  {_show_pair(i >> 8, i & 0xFF):8s} {counts[i] / pairs * 100:5.2f}%")
+    typer.echo(f"top {top} extensions by bytes:")
+    tb = stats.total_bytes or 1
+    for ext, n in sorted(stats.ext_bytes.items(), key=lambda kv: kv[1], reverse=True)[:top]:
+        typer.echo(f"  {ext:14s} {n / tb * 100:5.2f}%")
+
+
+@app.command("fs-validate")
+def fs_validate(
+    table_path: Path = typer.Argument(..., help="A minted .bin weight table."),
+    roots: list[Path] = typer.Argument(..., help="Directories/files to validate against."),
+    cap: Optional[str] = typer.Option(None, help="Stop after this many text bytes (e.g. 2GB)."),
+    top: int = typer.Option(15, help="How many over/under-weighted pairs to show."),
+) -> None:
+    """Score a minted table against a real filesystem: KL-divergence plus the
+    byte-pairs the corpus most under- and over-represents versus the disk."""
+    import sngram
+
+    from .train import fsvalidate
+    from .train.units import fmt_bytes, parse_size
+
+    table = sngram.WeightTable.from_path(table_path)
+    counts, stats = fsvalidate.filesystem_histogram(
+        [str(r) for r in roots], cap=parse_size(cap) if cap else None
+    )
+    report = fsvalidate.validate(counts, table, top=top)
+    typer.echo(
+        f"validated against {stats.files} text files "
+        f"({fmt_bytes(stats.total_bytes)}, {stats.skipped_binary} binaries skipped)"
+    )
+    typer.echo(f"KL(filesystem || table) = {report.kl:.4f} nats  (0 = perfect match)")
+    typer.echo(f"top {top} pairs the corpus UNDER-represents (raise these sources):")
+    for (c1, c2), pf, qf, _score in report.under_weighted:
+        typer.echo(f"  {_show_pair(c1, c2):8s} fs {pf * 100:5.2f}%  table {qf * 100:5.2f}%")
+    typer.echo(f"top {top} pairs the corpus OVER-represents (lower these sources):")
+    for (c1, c2), pf, qf, _score in report.over_weighted:
+        typer.echo(f"  {_show_pair(c1, c2):8s} fs {pf * 100:5.2f}%  table {qf * 100:5.2f}%")
 
 
 def main() -> None:

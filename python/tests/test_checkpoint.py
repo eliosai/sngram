@@ -53,6 +53,27 @@ def test_snapshot_restore_round_trip(tmp_path: Path):
     assert restored_counter.to_table_bytes() == original.to_table_bytes()
 
 
+def test_blend_feedback_survives_checkpoint(tmp_path: Path):
+    # the weighted planner's per-family byte/shard feedback and the KL baseline
+    # must persist, or a resumed run rebalances the blend from amnesia and loses
+    # the convergence signal
+    c = make_counter([b"abc"])
+    state = checkpoint.RunState()
+    state.family_bytes = {"code-github-2025": 3_000, "multilingual": 1_000}
+    state.family_done = {"code-github-2025": 30, "multilingual": 10}
+    state.last_mint_counts = [0] * (256 * 256)
+    state.last_mint_counts[(ord("a") << 8) | ord("b")] = 42
+
+    checkpoint.save(tmp_path, c, state)
+    restored = checkpoint.load(tmp_path, sngram.BigramCounter())
+
+    assert restored.family_bytes == {"code-github-2025": 3_000, "multilingual": 1_000}
+    assert restored.family_done == {"code-github-2025": 30, "multilingual": 10}
+    assert restored.last_mint_counts is not None
+    assert len(restored.last_mint_counts) == 256 * 256
+    assert restored.last_mint_counts[(ord("a") << 8) | ord("b")] == 42
+
+
 def test_load_missing_returns_none(tmp_path: Path):
     assert checkpoint.load(tmp_path, sngram.BigramCounter()) is None
 

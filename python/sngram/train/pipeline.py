@@ -23,7 +23,7 @@ from pathlib import Path
 
 import sngram
 
-from . import checkpoint
+from . import checkpoint, metrics
 from .config import Family, Source, hf_token
 from .events import EventLog
 from .units import fmt_bytes, mint_label
@@ -42,7 +42,8 @@ SHARD_BLOCK_SIZE = 8 * 1024 * 1024
 STALL_AFTER_S = 180.0
 RETRY_BASE_S = 2.0
 RETRY_CAP_S = 60.0
-# early mints before the steady every-5TB cadence
+# early bootstrap mints (those below mint_every) before the steady cadence; with
+# the default mint_every=1TB the schedule is 100gb, 500gb, then every 1TB
 BOOTSTRAP_MINTS = [100 * 10**9, 500 * 10**9, 10**12]
 
 _TRANSIENT_MARKERS = (
@@ -91,6 +92,78 @@ def default_workers() -> int:
     return max(4, min(16, logical // 2))
 
 
+def normalized_weights(families: list[Family]) -> dict[str, float]:
+    """Each family's target share of counted bytes, normalized to sum to 1."""
+    total = sum(f.weight for f in families) or 1.0
+    return {f.id: f.weight / total for f in families}
+
+
+def estimated_family_bytes(
+    counted: dict[str, int],
+    completed: dict[str, int],
+    dispatched: dict[str, int],
+    failed: dict[str, int] | None = None,
+) -> dict[str, float]:
+    """Counted bytes per family plus an estimate of in-flight bytes (shards
+    dispatched but neither counted nor failed), so the planner balances on what
+    it has *committed and still expects to land*, not just what has *finished*.
+
+    Without the in-flight term, the bounded queue is dead time: the planner would
+    dispatch a whole queue of one family before any of it counted, then
+    over-correct — the blend drifts over short windows (e.g. the first mint).
+    Estimating in-flight with each family's observed mean shard size (a global
+    mean until a family has a completion) closes that loop.
+
+    `failed` (terminally failed shards — 404/gated/hard) must be subtracted:
+    a dispatched shard that will never complete contributes no bytes, so leaving
+    it in the in-flight count would make a dead source look like it is holding
+    its share forever and silently skew the blend on a long, lossy run.
+    """
+    failed = failed or {}
+    total_counted = sum(counted.values())
+    total_done = sum(completed.values())
+    global_mean = (total_counted / total_done) if total_done > 0 else 1.0
+    est: dict[str, float] = {}
+    for fid in dispatched:
+        done = completed.get(fid, 0)
+        mean = (counted.get(fid, 0) / done) if done > 0 else global_mean
+        in_flight = max(dispatched.get(fid, 0) - done - failed.get(fid, 0), 0)
+        est[fid] = counted.get(fid, 0) + mean * in_flight
+    return est
+
+
+def resume_dispatched(family_done: dict[str, int], order: list[str]) -> dict[str, int]:
+    """Seed the planner's per-family dispatched counter from the restored
+    completed-shard counts.
+
+    `estimated_family_bytes` measures in-flight as `dispatched - completed`. On a
+    fresh run both start at 0. On RESUME, `completed` is restored (e.g. 500) but
+    `dispatched` is process-local — if it started at 0, `dispatched - completed`
+    would clamp to 0 for the first `completed` dispatches, silently killing the
+    in-flight correction for the whole post-resume run. Seeding `dispatched` to
+    `completed` makes the difference measure post-resume in-flight from the start.
+    """
+    return {fid: family_done.get(fid, 0) for fid in order}
+
+
+def pick_family(
+    live: list[str], weights: dict[str, float], byte_estimate: dict[str, float]
+) -> str:
+    """The live family furthest below its target share of the (estimated) blend.
+
+    Deficit = target_share - actual_share. Picking the max-deficit family each
+    step drives the realized blend toward the weights while every family still
+    has data. With nothing committed yet, seed from the highest-weight family.
+    """
+    total = sum(byte_estimate.values())
+    if total <= 0:
+        return max(live, key=lambda fid: weights.get(fid, 0.0))
+    return max(
+        live,
+        key=lambda fid: weights.get(fid, 0.0) - byte_estimate.get(fid, 0.0) / total,
+    )
+
+
 def rss_bytes() -> int:
     try:
         with open("/proc/self/statm") as fh:
@@ -135,6 +208,10 @@ class ShardTask:
     revision: str | None
     attempts: int = 0
     retries: int = 0
+    # True once the shard has been terminally accounted (completed or failed),
+    # so the worker's catch-all can't double-count a shard whose only error was
+    # a trailing advisory log write after it already committed
+    accounted: bool = False
 
 
 @dataclass
@@ -205,7 +282,15 @@ class Trainer:
         self.planner_done = threading.Event()
         self.in_flight_bytes = 0
         self.failed_shards = 0
+        # terminally-failed shards per family (session-local, like the planner's
+        # dispatched counter): subtracted from in-flight so a dead source can't
+        # look like it is holding its blend share
+        self._family_failed: dict[str, int] = {}
         self.errors = 0
+        # per-family blend feedback (bytes + completed shards) lives on
+        # self.state so it survives resume; it is mutated only under the merge
+        # lock, alongside the counter merge and mark_done, so a checkpoint sees
+        # a consistent cut
         self._lock = threading.Lock()
         # serializes counter merges + mark_done against checkpoint snapshots
         # and mints, so every snapshot/mint is a consistent cut: the counter
@@ -217,6 +302,9 @@ class Trainer:
         self.last_checkpoint_at: float | None = None
         self.checkpoints_written = 0
         self.disk_free = 0
+        # convergence signal: KL from the previous mint (whose count vector lives
+        # on self.state, so it survives resume). Once KL stops shrinking, stop.
+        self.last_kl: float | None = None
 
     # ------------------------------------------------------------- totals
 
@@ -235,24 +323,51 @@ class Trainer:
     # ------------------------------------------------------------- planner
 
     def _plan(self) -> None:
-        """Round-robin the families, lazily expanding each into shard tasks."""
+        """Weighted blend: feed the queue from whichever family is furthest below
+        its target share of counted bytes, so every mint reflects the intended
+        mix instead of the raw dataset sizes. A family whose shards are exhausted
+        drops out and the rest keep the blend (finite code sets taper after they
+        run dry; the steady mints hold the target ratio). One task per family is
+        prefetched so a picked family never blocks the loop on its generator.
+
+        Cold start caveat: until each family has a completed shard, in-flight is
+        estimated with a global mean shard size, so the very first (100GB) mint's
+        blend can be skewed by differing per-family shard sizes; it self-corrects
+        as per-family means populate, well before the 1TB mint.
+        """
         try:
+            weights = normalized_weights(self.families)
             gens = {f.id: self._family_tasks(f) for f in self.families}
             order = [f.id for f in self.families]
-            while order and not self.stop.is_set():
-                for fid in list(order):
-                    gen = gens[fid]
-                    task = next(gen, None)
-                    if task is None:
-                        order.remove(fid)
-                        self.events.log("family_done", family=fid)
+            ahead = {fid: next(gens[fid], None) for fid in order}
+            # seed from restored completed counts so the in-flight estimate is
+            # live immediately after a resume (not clamped to 0 — see the fn)
+            dispatched = resume_dispatched(self.state.family_done, order)
+            for fid in order:
+                if ahead[fid] is None:
+                    self.events.log("family_done", family=fid)
+            while not self.stop.is_set():
+                live = [fid for fid in order if ahead.get(fid) is not None]
+                if not live:
+                    break
+                with self._merge_lock:
+                    counted = dict(self.state.family_bytes)
+                    completed = dict(self.state.family_done)
+                with self._lock:
+                    failed = dict(self._family_failed)
+                est = estimated_family_bytes(counted, completed, dispatched, failed)
+                fid = pick_family(live, weights, est)
+                task = ahead[fid]
+                ahead[fid] = next(gens[fid], None)  # refill the prefetch slot
+                if ahead[fid] is None:
+                    self.events.log("family_done", family=fid)
+                dispatched[fid] += 1  # count it now so the next pick sees in-flight
+                while not self.stop.is_set():
+                    try:
+                        self.queue.put(task, timeout=1.0)
+                        break
+                    except queue.Full:
                         continue
-                    while not self.stop.is_set():
-                        try:
-                            self.queue.put(task, timeout=1.0)
-                            break
-                        except queue.Full:
-                            continue
         except Exception as e:  # noqa: BLE001 - planner death must be loud, not silent
             self._bump("errors")
             self.events.log("error", stage="planner", error=err_text(e))
@@ -396,6 +511,12 @@ class Trainer:
         with self._lock:
             setattr(self, name, getattr(self, name) + 1)
 
+    def _mark_family_failed(self, family: str) -> None:
+        # a terminally-failed shard never lands its bytes; record it so the
+        # planner's in-flight estimate stops counting it (see estimated_family_bytes)
+        with self._lock:
+            self._family_failed[family] = self._family_failed.get(family, 0) + 1
+
     # ------------------------------------------------------------- workers
 
     def _worker(self, wid: int) -> None:
@@ -415,6 +536,8 @@ class Trainer:
                 self._run_shard(ws, task)
             except Exception as e:  # noqa: BLE001 - a worker must never die silently
                 self._bump("errors")
+                if not task.accounted:  # don't double-count an already-committed shard
+                    self._mark_family_failed(task.source.family)
                 self.events.log("error", stage="worker", worker=wid, error=err_text(e))
             finally:
                 self.queue.task_done()
@@ -477,6 +600,8 @@ class Trainer:
                 kind = classify_error(e)
                 if kind == "missing":
                     self._bump("failed_shards")
+                    self._mark_family_failed(task.source.family)
+                    task.accounted = True
                     self.events.log(
                         "error", stage="shard", shard=sid, error_kind=kind, error=err_text(e)
                     )
@@ -485,6 +610,8 @@ class Trainer:
                     task.attempts += 1
                     if task.attempts >= MAX_HARD_ATTEMPTS:
                         self._bump("failed_shards")
+                        self._mark_family_failed(task.source.family)
+                        task.accounted = True
                         self.events.log(
                             "error", stage="shard", shard=sid, error_kind=kind, error=err_text(e)
                         )
@@ -501,14 +628,19 @@ class Trainer:
                 delay = min(delay * 2, RETRY_CAP_S)
                 continue
 
+            shard_bytes = ws.shard_bytes  # _drop_in_flight zeroes it
             # exactly-once: merge only after the whole shard streamed cleanly,
-            # under the merge lock so checkpoints/mints see a consistent cut
+            # under the merge lock so checkpoints/mints see a consistent cut —
+            # counter, mark_done, and the per-family blend feedback move together
             with self._merge_lock:
                 self.counter.merge(tally)
                 self.counter.add_files(1)
                 self.state.mark_done(task.source.id, task.n_shards, task.shard, task.revision)
-            shard_bytes = ws.shard_bytes  # _drop_in_flight zeroes it
+                fam = task.source.family
+                self.state.family_bytes[fam] = self.state.family_bytes.get(fam, 0) + shard_bytes
+                self.state.family_done[fam] = self.state.family_done.get(fam, 0) + 1
             self._drop_in_flight(ws)
+            task.accounted = True  # committed; a failing log below must not undo this
             self.events.log(
                 "shard",
                 shard=sid,
@@ -601,16 +733,26 @@ class Trainer:
         path = self.mint_dir / f"{label}_weights.bin"
         self.mint_dir.mkdir(parents=True, exist_ok=True)
         with self._merge_lock:
-            # under the merge lock the table is a consistent (total, counts)
-            # pair; a mint during a half-applied merge would silently skew it
+            # under the merge lock the table and its count snapshot are a
+            # consistent (total, counts) cut; a mint during a half-applied
+            # merge would silently skew both
             table = self.counter.to_table_bytes()
+            counts = metrics.counts_from_snapshot(self.counter.snapshot())
         tmp = path.with_suffix(".bin.tmp")
         tmp.write_bytes(table)
         os.replace(tmp, path)
         self.state.mints_done.append(label)
+        # KL from the previous mint's distribution: the convergence signal. The
+        # baseline lives on self.state, so it survives resume.
+        kl = None
+        if self.state.last_mint_counts is not None:
+            kl = metrics.kl_divergence(counts, self.state.last_mint_counts)
+            self.last_kl = kl
+        self.state.last_mint_counts = counts
         self.events.log(
             "mint", label=label, path=str(path), bytes=self.durable_bytes(),
             pairs=self.counter.pairs_processed,
+            kl_from_prev=round(kl, 6) if kl is not None else None,
         )
 
     def _checkpoint(self) -> None:
