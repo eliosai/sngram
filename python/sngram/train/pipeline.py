@@ -182,6 +182,34 @@ def _release_arrow_pool() -> None:
         pass
 
 
+def _attach_read_heartbeat(fh, ws: WorkerState) -> None:
+    """Bump `ws.last_progress` on every read of `fh`.
+
+    A worker decodes one parquet row group at a time; fetching a large row
+    group's column chunk over the network can take longer than STALL_AFTER_S
+    *before the first batch decodes*, during which `last_progress` (which the
+    per-batch loop updates) would otherwise go stale and the watchdog would
+    flag a hung connection — and the dashboard would redden a worker that is in
+    fact downloading at full tilt. Bumping the clock on each underlying read
+    keeps an actively-streaming worker alive; a genuinely dead connection still
+    trips the watchdog because no reads land for STALL_AFTER_S.
+
+    Best effort: if the handle forbids reassigning `read` (e.g. a C-level file),
+    the worker simply falls back to per-batch heartbeats.
+    """
+    try:
+        orig_read = fh.read
+
+        def _read(*args, **kwargs):
+            data = orig_read(*args, **kwargs)
+            ws.last_progress = time.monotonic()
+            return data
+
+        fh.read = _read
+    except (AttributeError, TypeError):  # immutable handle: degrade gracefully
+        pass
+
+
 def _resolved_files(ds) -> list[str]:
     """The ordered parquet file URLs behind a streaming `datasets` dataset.
 
@@ -483,13 +511,15 @@ class Trainer:
         self.events.log("source", source=source.id, shards=n)
         return int(n)
 
-    def _open_parquet(self, url: str):
-        """Open one shard's parquet for bounded-memory streaming.
+    def _open_parquet(self, url: str, ws: WorkerState | None = None):
+        """Open one shard's parquet for bounded-memory, row-group-at-a-time streaming.
 
         Returns (ParquetFile, file_handle|None). Remote (hf://) files open
         through a shared HfFileSystem with a non-retaining cache; local paths
         (test fixtures) open directly. `pre_buffer=False` keeps pyarrow from
-        eagerly coalescing the whole file into memory.
+        eagerly coalescing the whole file into memory. When `ws` is given every
+        underlying network read bumps that worker's progress clock, so a long
+        row-group fetch is not mistaken for a stall (see `_attach_read_heartbeat`).
         """
         import pyarrow.parquet as pq
 
@@ -504,6 +534,8 @@ class Trainer:
                 url, mode="rb",
                 cache_type=SHARD_CACHE_TYPE, block_size=SHARD_BLOCK_SIZE,
             )
+            if ws is not None:
+                _attach_read_heartbeat(fh, ws)
             return pq.ParquetFile(fh, pre_buffer=False), fh
         return pq.ParquetFile(url, pre_buffer=False), None
 
@@ -545,25 +577,36 @@ class Trainer:
                 ws.stalled = False
 
     def _run_shard(self, ws: WorkerState, task: ShardTask) -> None:
-        """Stream one shard to completion, with rate-limit-aware retries.
+        """Stream one shard (one parquet file) to completion a row group at a
+        time, with rate-limit-aware retries.
 
-        Transient failures (429s, timeouts, connection resets, 5xx) retry
-        forever with exponential backoff — a rate-limit storm slows the run,
-        it never loses shards. Missing data skips; anything else gets
-        MAX_HARD_ATTEMPTS. Every attempt starts a fresh tally, so the counter
-        only ever sees a shard exactly once.
+        Each row group is counted into a throwaway sub-tally and folded into the
+        file's tally only once it has streamed cleanly; the file commits to the
+        shared counter exactly once, after every row group has landed. So a
+        transient failure (429s, timeouts, connection resets, 5xx) re-reads only
+        the in-progress row group — not the whole multi-GB file — and retries
+        forever with exponential backoff: a rate-limit storm slows the run, it
+        never loses shards or re-counts committed row groups. Missing data skips;
+        anything else gets MAX_HARD_ATTEMPTS.
+
+        `next_rg` advances past every committed row group so a retry resumes
+        where it failed; `uncommitted` is the in-flight byte tally of the row
+        group currently in progress, dropped on failure while the already-folded
+        row groups stay in flight to merge when the retry finishes the file.
         """
         sid = f"{task.source.id}#{task.shard}"
         delay = RETRY_BASE_S
+        file_tally = sngram.LocalTally()
+        next_rg = 0
+        uncommitted = 0
+        ws.task = sid
+        ws.shard_bytes = 0
+        ws.started = time.monotonic()
+        ws.last_progress = ws.started
         while not self.stop.is_set():
-            ws.task = sid
-            ws.shard_bytes = 0
-            ws.started = time.monotonic()
-            ws.last_progress = ws.started
-            tally = sngram.LocalTally()
             try:
                 url = self._load_source(task.source)[task.shard]
-                pf, fh = self._open_parquet(url)
+                pf, fh = self._open_parquet(url, ws)
                 try:
                     # pyarrow silently yields empty batches for a missing column
                     # rather than raising — so a misnamed text field would count
@@ -575,46 +618,55 @@ class Trainer:
                             f"column [{field!r}] not in the dataset. "
                             f"columns in the dataset: {names}."
                         )
-                    # pre_buffer=False + non-retaining cache => only the current
-                    # row group is resident, so memory stays bounded no matter
-                    # how large the shard. Project to the text column alone.
-                    for batch in pf.iter_batches(batch_size=BATCH_ROWS, columns=[field]):
+                    # pre_buffer=False + non-retaining cache + one row group per
+                    # iter_batches call => only the current row group is resident,
+                    # so memory stays bounded no matter how large the shard.
+                    for rg in range(next_rg, pf.num_row_groups):
                         if self.stop.is_set():
-                            # abandoned: nothing merged, shard not marked done
-                            self._drop_in_flight(ws)
+                            self._drop_in_flight(ws)  # abandoned: nothing merged
                             return
-                        n = tally.count_arrow(batch)
-                        ws.shard_bytes += n
-                        ws.last_progress = time.monotonic()
-                        with self._lock:
-                            self.in_flight_bytes += n
+                        rg_tally = sngram.LocalTally()
+                        uncommitted = 0
+                        for batch in pf.iter_batches(
+                            batch_size=BATCH_ROWS, columns=[field], row_groups=[rg]
+                        ):
+                            if self.stop.is_set():
+                                self._drop_in_flight(ws)
+                                return
+                            n = rg_tally.count_arrow(batch)
+                            uncommitted += n
+                            ws.shard_bytes += n
+                            ws.last_progress = time.monotonic()
+                            with self._lock:
+                                self.in_flight_bytes += n
+                        # the row group streamed cleanly: fold it in and advance
+                        # the cursor so a later failure never re-reads it
+                        file_tally.add_from(rg_tally)
+                        uncommitted = 0
+                        next_rg = rg + 1
                 finally:
                     if fh is not None:
                         fh.close()
-                    # hand the shard's row-group buffers back to the OS so RSS
+                    # hand this file's row-group buffers back to the OS so RSS
                     # resets between shards instead of creeping over a long run
                     _release_arrow_pool()
             except Exception as e:  # noqa: BLE001 - classified below, never fatal
-                self._drop_in_flight(ws)
+                # discard only the in-progress row group; committed row groups
+                # stay in flight and merge when the retry finishes the file
+                if uncommitted:
+                    with self._lock:
+                        self.in_flight_bytes -= uncommitted
+                    ws.shard_bytes -= uncommitted
+                    uncommitted = 0
                 self._bump("errors")
                 kind = classify_error(e)
                 if kind == "missing":
-                    self._bump("failed_shards")
-                    self._mark_family_failed(task.source.family)
-                    task.accounted = True
-                    self.events.log(
-                        "error", stage="shard", shard=sid, error_kind=kind, error=err_text(e)
-                    )
+                    self._abandon_failed(ws, task, sid, kind, e)
                     return
                 if kind == "hard":
                     task.attempts += 1
                     if task.attempts >= MAX_HARD_ATTEMPTS:
-                        self._bump("failed_shards")
-                        self._mark_family_failed(task.source.family)
-                        task.accounted = True
-                        self.events.log(
-                            "error", stage="shard", shard=sid, error_kind=kind, error=err_text(e)
-                        )
+                        self._abandon_failed(ws, task, sid, kind, e)
                         return
                 task.retries += 1
                 # a long 429 storm must not write millions of identical lines
@@ -629,11 +681,11 @@ class Trainer:
                 continue
 
             shard_bytes = ws.shard_bytes  # _drop_in_flight zeroes it
-            # exactly-once: merge only after the whole shard streamed cleanly,
+            # exactly-once: merge only after every row group streamed cleanly,
             # under the merge lock so checkpoints/mints see a consistent cut —
             # counter, mark_done, and the per-family blend feedback move together
             with self._merge_lock:
-                self.counter.merge(tally)
+                self.counter.merge(file_tally)
                 self.counter.add_files(1)
                 self.state.mark_done(task.source.id, task.n_shards, task.shard, task.revision)
                 fam = task.source.family
@@ -648,6 +700,21 @@ class Trainer:
                 secs=round(time.monotonic() - ws.started, 1),
             )
             return
+
+    def _abandon_failed(
+        self, ws: WorkerState, task: ShardTask, sid: str, kind: str, e: Exception
+    ) -> None:
+        """Terminally drop a shard (missing data, or hard error past its retries):
+        committed-but-unmerged row groups never land, the family is debited so a
+        dead source stops holding its blend share, and the task is accounted so
+        the worker's catch-all cannot count it a second time."""
+        self._drop_in_flight(ws)
+        self._bump("failed_shards")
+        self._mark_family_failed(task.source.family)
+        task.accounted = True
+        self.events.log(
+            "error", stage="shard", shard=sid, error_kind=kind, error=err_text(e)
+        )
 
     def _drop_in_flight(self, ws: WorkerState) -> None:
         with self._lock:

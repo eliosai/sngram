@@ -197,6 +197,18 @@ impl PyLocalTally {
     fn bytes_counted(&self) -> u64 {
         self.inner.bytes()
     }
+
+    /// Fold another tally's counts (and byte/pair totals) into this one.
+    ///
+    /// Lets a worker count each parquet row group into a throwaway sub-tally and
+    /// commit it into a per-file tally only once the row group has streamed
+    /// cleanly: a mid-file connection drop discards just the in-progress row
+    /// group and retries it, instead of re-reading the whole multi-GB shard.
+    fn add_from(&mut self, py: Python<'_>, other: &Self) {
+        let inner = &mut self.inner;
+        let o = &other.inner;
+        py.detach(|| inner.add_from(o));
+    }
 }
 
 /// Shared, lock-free byte-pair counter: the training accumulator.
