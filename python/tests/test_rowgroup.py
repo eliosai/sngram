@@ -10,11 +10,13 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
+import gzip
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from sngram.train.config import Family, Source
-from sngram.train.pipeline import Trainer, WorkerState, _attach_read_heartbeat
+from sngram.train.pipeline import Trainer, WorkerState, _HeartbeatFile, _attach_read_heartbeat
 from tests.test_pipeline import run_trainer
 
 
@@ -177,6 +179,27 @@ def test_read_heartbeat_degrades_on_immutable_handle():
             return b""
 
     _attach_read_heartbeat(Immutable(), ws)  # no exception
+
+
+def test_gzip_raw_stream_heartbeat_tracks_underlying_reads():
+    ws = WorkerState()
+    ws.last_progress = 0.0
+    payload = gzip.compress(b'{"content":"abc"}\n' * 10)
+
+    class SlowBytes:
+        def __init__(self, data: bytes) -> None:
+            self.data = bytearray(data)
+
+        def read(self, n=-1):
+            if n is None or n < 0:
+                n = len(self.data)
+            out = bytes(self.data[:n])
+            del self.data[:n]
+            return out
+
+    gz = gzip.GzipFile(fileobj=_HeartbeatFile(SlowBytes(payload), ws))
+    assert gz.readline()
+    assert ws.last_progress > 0.0
 
 
 def test_multi_rowgroup_file_is_one_shard(tmp_path: Path):

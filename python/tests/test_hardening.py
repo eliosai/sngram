@@ -490,11 +490,9 @@ def test_load_source_resolves_parquet_file_list(tmp_path: Path, monkeypatch):
     trainer.events.close()
 
 
-def test_shard_read_uses_non_retaining_cache(tmp_path: Path, monkeypatch):
-    """The OOM fix: each shard's parquet opens with a cache that does NOT retain
-    read bytes (measured: default grew RSS +4.6 GB per 3.9 GB read) and pyarrow
-    pre_buffer disabled, so per-worker memory is bounded by one row group, not
-    the multi-GB shard."""
+def test_shard_read_uses_bounded_readahead_cache(tmp_path: Path, monkeypatch):
+    """Remote shard reads use bounded readahead: enough buffering to avoid HF/Xet
+    range-request storms, but no whole-file eager read."""
     import io
     import pyarrow.parquet as pq
 
@@ -514,9 +512,21 @@ def test_shard_read_uses_non_retaining_cache(tmp_path: Path, monkeypatch):
     )
     trainer._open_parquet("hf://datasets/x/y@sha/a.parquet")
 
-    assert captured["cache_type"] == "none", "must not retain read bytes"
+    assert captured["cache_type"] == "readahead"
+    assert captured["block_size"] == 64 * 1024 * 1024
     assert captured["pre_buffer"] is False, "no eager whole-file buffering"
     trainer.events.close()
+
+
+def test_remote_stream_limit_defaults_and_env(tmp_path: Path, monkeypatch):
+    trainer = make_trainer(tmp_path, [], workers=16)
+    assert trainer.remote_streams == 4
+    trainer.events.close()
+
+    monkeypatch.setenv("SNG_HF_STREAMS", "3")
+    limited = make_trainer(tmp_path, [], workers=16)
+    assert limited.remote_streams == 3
+    limited.events.close()
 
 
 def test_revision_pinning_rewrites_hf_globs(tmp_path: Path, monkeypatch):

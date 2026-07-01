@@ -35,14 +35,18 @@ from .units import fmt_bytes, mint_label
 MAX_HARD_ATTEMPTS = 3
 QUEUE_DEPTH_PER_WORKER = 4
 BATCH_ROWS = 256
-# We read each shard's parquet file DIRECTLY (not through datasets' streaming
-# iterator), because datasets retains every decompressed byte it reads — RSS
-# grew ~1:1 with each multi-GB shard (measured +4.6 GB per 3.9 GB; ×16 workers
-# => OOM). A direct read with a non-retaining fsspec cache (`cache_type=none`)
-# and `pre_buffer=False` holds only the current row group, so per-worker memory
-# is bounded by the row-group size and stays flat over a multi-TB run.
-SHARD_CACHE_TYPE = "none"
-SHARD_BLOCK_SIZE = 8 * 1024 * 1024
+# We read each shard's parquet/raw file DIRECTLY (not through datasets'
+# streaming iterator), because datasets retains decompressed bytes and can grow
+# RSS ~1:1 with large shards. Remote reads use bounded fsspec readahead instead
+# of `cache_type=none`: no-cache caused storms of tiny HF/Xet range requests,
+# synchronized worker stalls, and extreme rate limiting. With pre_buffer=False,
+# memory is bounded by the active row group plus one readahead block per worker.
+SHARD_CACHE_TYPE = "readahead"
+SHARD_BLOCK_SIZE = 64 * 1024 * 1024
+DEFAULT_REMOTE_STREAMS = 4
+JSON_BATCH_ROWS = 64
+JSON_BATCH_BYTES = 8 * 1024 * 1024
+READ_GAP_WARN_S = 60.0
 STALL_AFTER_S = 180.0
 RETRY_BASE_S = 2.0
 RETRY_CAP_S = 60.0
@@ -271,6 +275,59 @@ def _attach_read_heartbeat(fh, ws: WorkerState) -> None:
         pass
 
 
+class _HeartbeatFile:
+    """File wrapper for gzip/raw streams where monkey-patching read is unreliable."""
+
+    def __init__(self, fh, ws: WorkerState) -> None:
+        self._fh = fh
+        self._ws = ws
+
+    def _beat(self):
+        self._ws.last_progress = time.monotonic()
+
+    def read(self, *args, **kwargs):
+        data = self._fh.read(*args, **kwargs)
+        self._beat()
+        return data
+
+    def read1(self, *args, **kwargs):
+        data = self._fh.read1(*args, **kwargs)
+        self._beat()
+        return data
+
+    def readinto(self, *args, **kwargs):
+        n = self._fh.readinto(*args, **kwargs)
+        self._beat()
+        return n
+
+    def readline(self, *args, **kwargs):
+        line = self._fh.readline(*args, **kwargs)
+        self._beat()
+        return line
+
+    def close(self) -> None:
+        self._fh.close()
+
+    def __enter__(self):
+        self._fh.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._fh.__exit__(*exc)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        line = self.readline()
+        if line:
+            return line
+        raise StopIteration
+
+    def __getattr__(self, name: str):
+        return getattr(self._fh, name)
+
+
 def _utf8_prefix(value: str, limit: int) -> str:
     clipped = value.encode("utf-8")[:limit]
     while clipped:
@@ -345,6 +402,7 @@ class WorkerState:
     stall_started: float = 0.0
     stall_count: int = 0
     max_silent_s: float = 0.0
+    last_gap_log: float = 0.0
 
 
 class Trainer:
@@ -412,7 +470,15 @@ class Trainer:
         # workers: re-resolving metadata per shard would hammer the hub
         self._ds_cache: dict[str, list[str]] = {}
         self._ds_lock = threading.Lock()
-        self._fs = None  # lazily-built HfFileSystem, shared by all workers
+        # Tests may inject _fs; production uses a thread-local HfFileSystem so
+        # one worker's remote session/cache cannot serialize every other worker.
+        self._fs = None
+        self._fs_tls = threading.local()
+        self.remote_streams = max(
+            1,
+            int(os.environ.get("SNG_HF_STREAMS", min(DEFAULT_REMOTE_STREAMS, workers))),
+        )
+        self._remote_sem = threading.BoundedSemaphore(self.remote_streams)
         self.worker_state = [WorkerState() for _ in range(workers)]
         self.stop = threading.Event()
         self.planner_done = threading.Event()
@@ -813,16 +879,21 @@ class Trainer:
             self._ds_cache[source.id] = urls
         return urls
 
-    def _glob_hf_files(self, pattern: str) -> list[str]:
-        if self._fs is None:
-            with self._ds_lock:
-                if self._fs is None:
-                    from huggingface_hub import HfFileSystem
+    def _remote_fs(self):
+        if self._fs is not None:
+            return self._fs
+        fs = getattr(self._fs_tls, "fs", None)
+        if fs is None:
+            from huggingface_hub import HfFileSystem
 
-                    self._fs = HfFileSystem(token=self.token)
+            fs = HfFileSystem(token=self.token)
+            self._fs_tls.fs = fs
+        return fs
+
+    def _glob_hf_files(self, pattern: str) -> list[str]:
         return [
             p if p.startswith("hf://") else f"hf://{p}"
-            for p in sorted(self._fs.glob(pattern))
+            for p in sorted(self._remote_fs().glob(pattern))
         ]
 
     def _source_shards(self, source: Source) -> int:
@@ -919,13 +990,7 @@ class Trainer:
         import pyarrow.parquet as pq
 
         if "://" in url:
-            if self._fs is None:
-                with self._ds_lock:
-                    if self._fs is None:
-                        from huggingface_hub import HfFileSystem
-
-                        self._fs = HfFileSystem(token=self.token)
-            fh = self._fs.open(
+            fh = self._remote_fs().open(
                 url, mode="rb",
                 cache_type=SHARD_CACHE_TYPE, block_size=SHARD_BLOCK_SIZE,
             )
@@ -947,6 +1012,36 @@ class Trainer:
     def _mark_source_failed(self, source: str) -> None:
         with self._lock:
             self._source_failed[source] = self._source_failed.get(source, 0) + 1
+
+    def _acquire_remote_stream(self, url: str, ws: WorkerState, sid: str) -> bool:
+        if "://" not in url:
+            return False
+        while not self.stop.is_set():
+            ws.task = f"{sid} (waiting remote stream)"
+            ws.last_progress = time.monotonic()
+            if self._remote_sem.acquire(timeout=1.0):
+                ws.task = sid
+                ws.last_progress = time.monotonic()
+                return True
+        return False
+
+    def _release_remote_stream(self, acquired: bool) -> None:
+        if acquired:
+            self._remote_sem.release()
+
+    def _note_worker_progress(self, ws: WorkerState, sid: str) -> None:
+        now = time.monotonic()
+        gap = now - ws.last_progress
+        if gap >= READ_GAP_WARN_S and now - ws.last_gap_log >= READ_GAP_WARN_S:
+            ws.last_gap_log = now
+            self.events.log(
+                "warn",
+                stage="read_gap",
+                shard=sid,
+                silent_s=round(gap),
+                shard_bytes=ws.shard_bytes,
+            )
+        ws.last_progress = now
 
     def _remaining_cap_for_worker(self, task: ShardTask, ws: WorkerState) -> int | None:
         with self._merge_lock:
@@ -1038,14 +1133,21 @@ class Trainer:
         ws.stall_started = 0.0
         ws.stall_count = 0
         ws.max_silent_s = 0.0
+        ws.last_gap_log = 0.0
         if task.source.format == "json":
             self._run_json_shard(ws, task, sid)
             return
         while not self.stop.is_set():
+            remote_acquired = False
             try:
                 url = self._load_source(task.source)[task.shard]
-                pf, fh = self._open_parquet(url, ws)
+                remote_acquired = self._acquire_remote_stream(url, ws, sid)
+                if self.stop.is_set():
+                    self._drop_in_flight(ws)
+                    return
+                fh = None
                 try:
+                    pf, fh = self._open_parquet(url, ws)
                     # pyarrow silently yields empty batches for a missing column
                     # rather than raising — so a misnamed text field would count
                     # zero bytes in silence. Fail loudly instead.
@@ -1078,7 +1180,7 @@ class Trainer:
                             )
                             uncommitted += n
                             ws.shard_bytes += n
-                            ws.last_progress = time.monotonic()
+                            self._note_worker_progress(ws, sid)
                             with self._lock:
                                 self.in_flight_bytes += n
                             if n:
@@ -1096,6 +1198,7 @@ class Trainer:
                 finally:
                     if fh is not None:
                         fh.close()
+                    self._release_remote_stream(remote_acquired)
                     # hand this file's row-group buffers back to the OS so RSS
                     # resets between shards instead of creeping over a long run
                     _release_arrow_pool()
@@ -1135,20 +1238,15 @@ class Trainer:
 
     def _open_raw(self, url: str, ws: WorkerState | None = None):
         if "://" in url:
-            if self._fs is None:
-                with self._ds_lock:
-                    if self._fs is None:
-                        from huggingface_hub import HfFileSystem
-
-                        self._fs = HfFileSystem(token=self.token)
-            fh = self._fs.open(
+            fh = self._remote_fs().open(
                 url, mode="rb",
                 cache_type=SHARD_CACHE_TYPE, block_size=SHARD_BLOCK_SIZE,
             )
             if ws is not None:
-                _attach_read_heartbeat(fh, ws)
+                return _HeartbeatFile(fh, ws)
             return fh
-        return open(url, "rb")
+        fh = open(url, "rb")
+        return _HeartbeatFile(fh, ws) if ws is not None else fh
 
     def _run_json_shard(self, ws: WorkerState, task: ShardTask, sid: str) -> None:
         import gzip
@@ -1160,15 +1258,22 @@ class Trainer:
         while not self.stop.is_set():
             file_tally = sngram.LocalTally()
             ws.shard_bytes = 0
+            remote_acquired = False
             try:
                 url = self._load_source(task.source)[task.shard]
+                remote_acquired = self._acquire_remote_stream(url, ws, sid)
+                if self.stop.is_set():
+                    self._drop_in_flight(ws)
+                    return
                 with self._open_raw(url, ws) as fh:
                     gz = gzip.GzipFile(fileobj=fh) if url.endswith(".gz") else fh
                     batch: list[str] = []
+                    batch_bytes = 0
 
                     cap_stop = False
 
                     def flush() -> bool:
+                        nonlocal batch_bytes
                         if not batch:
                             return False
                         tbl = pa.table(
@@ -1179,10 +1284,11 @@ class Trainer:
                         if n:
                             file_tally.add_from(batch_tally)
                         ws.shard_bytes += n
-                        ws.last_progress = time.monotonic()
+                        self._note_worker_progress(ws, sid)
                         with self._lock:
                             self.in_flight_bytes += n
                         batch.clear()
+                        batch_bytes = 0
                         return capped
 
                     for line in gz:
@@ -1198,14 +1304,18 @@ class Trainer:
                         value = obj[task.source.text_field]
                         if isinstance(value, str):
                             batch.append(value)
-                        if len(batch) >= BATCH_ROWS:
+                            batch_bytes += len(value.encode("utf-8"))
+                        if len(batch) >= JSON_BATCH_ROWS or batch_bytes >= JSON_BATCH_BYTES:
                             cap_stop = flush()
                             if cap_stop:
                                 break
                     if not cap_stop:
                         flush()
+                self._release_remote_stream(remote_acquired)
+                remote_acquired = False
                 _release_arrow_pool()
             except Exception as e:  # noqa: BLE001 - classified below, never fatal
+                self._release_remote_stream(remote_acquired)
                 self._drop_in_flight(ws)
                 self._bump("errors")
                 kind = classify_error(e)
@@ -1320,8 +1430,11 @@ class Trainer:
             workers=self.workers,
             queue_depth=QUEUE_DEPTH_PER_WORKER * self.workers,
             batch_rows=BATCH_ROWS,
+            json_batch_rows=JSON_BATCH_ROWS,
+            json_batch_bytes=JSON_BATCH_BYTES,
             shard_cache_type=SHARD_CACHE_TYPE,
             shard_block_size=SHARD_BLOCK_SIZE,
+            remote_streams=self.remote_streams,
             roster_hash=self.roster_hash,
             families=[
                 {"id": f.id, "weight": f.weight, "sources": len(f.sources)}
