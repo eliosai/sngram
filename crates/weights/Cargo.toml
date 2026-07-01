@@ -15,24 +15,14 @@ publish = true
 sngram-types = { workspace = true }
 
 [features]
-# No table is minted yet for 0.5; the new schedule below fills in as the
-# trainer produces tables. Minted sizes embed their bin; not-yet-minted
-# sizes compile_error! when enabled.
 default = []
 
-"100gb" = []
 "500gb" = []
 "1tb" = []
+"2tb" = []
+"3tb" = []
+"4tb" = []
 "5tb" = []
-"10tb" = []
-"15tb" = []
-"20tb" = []
-"25tb" = []
-"30tb" = []
-"35tb" = []
-"40tb" = []
-"45tb" = []
-"50tb" = []
 
 [lints]
 workspace = true
