@@ -1,0 +1,23 @@
+crates/weights/Cargo.toml
+  s_f704bf3c9e2e2d::t_433d2ba663fa76 22-24
+crates/weights/README.md
+  s_f704bf3c9e2e2d::t_2ac7a10f85c9a6 4,6-11,13-18,21-26,29-31,34-37
+crates/weights/src/lib.rs
+  s_f704bf3c9e2e2d::t_db7e19e89b783a 3-4,6-293
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "ef72d9a45eb2d56ae24df39b3a2d594bc3ab5980",
+  "prompts": {},
+  "sessions": {
+    "s_f704bf3c9e2e2d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ed7-888e-7ed1-aa58-28d6f2f8ee18",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
