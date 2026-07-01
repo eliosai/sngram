@@ -1,0 +1,35 @@
+python/tests/test_rowgroup.py
+  s_e6cf9f02ed0ab3::t_058e0081bcb7ca 116-117
+  s_e6cf9f02ed0ab3::t_90ee0675272aa8 115,118-151
+python/sngram/train/pipeline.py
+  s_e6cf9f02ed0ab3::t_e761a788fe9926 303,382-396,782-797,856,907-909
+  s_e6cf9f02ed0ab3::t_687ee40a35ad19 17,51-53,57-59,88,90-91
+  s_e6cf9f02ed0ab3::t_59e2f442c7e46f 281-283,623,653-656,753-754,924-932,934-949
+  s_e6cf9f02ed0ab3::t_2dc8656395b406 485,491,727-728,770-771
+  s_e6cf9f02ed0ab3::t_9d2849973d5eab 60-69,100-111
+  s_e6cf9f02ed0ab3::t_c97bf2b2a53cff 112-113
+python/tests/test_hardening.py
+  s_e6cf9f02ed0ab3::t_dca1c8feaf1d8b 303-304,308-310
+  s_e6cf9f02ed0ab3::t_5eaf694b98097a 424-431
+python/sngram/train/events.py
+  s_e6cf9f02ed0ab3::t_8dd9e7e14e7b88 14
+python/tests/test_pipeline.py
+  s_e6cf9f02ed0ab3::t_e36dd88d899a26 4,140-160
+  s_e6cf9f02ed0ab3::t_c8b94d077e4437 161-162
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "414127ef4ff33d10f98aad073e228e0ab5b77150",
+  "prompts": {},
+  "sessions": {
+    "s_e6cf9f02ed0ab3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ea3-28fc-7120-abc2-b88b6dcc6df8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
