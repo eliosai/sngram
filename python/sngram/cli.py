@@ -1,4 +1,4 @@
-"""The sngram command line: train weight tables, inspect them, bench ingest."""
+"""The sngram command line: train, inspect, and validate weight tables."""
 
 from __future__ import annotations
 
@@ -12,14 +12,14 @@ import typer
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Sparse n-gram weight tables: train, inspect, benchmark.",
+    help="Sparse n-gram weight tables: train, inspect, validate.",
 )
 
 
 @app.command()
 def train(
     mint_dir: Path = typer.Option(Path("./bins"), help="Where minted .bin tables land."),
-    target: str = typer.Option("10TB", help="Total text to count."),
+    target: str = typer.Option("15TB", help="Total text to count."),
     mint_every: str = typer.Option(
         "1TB", help="Steady mint cadence (100GB/500GB bootstrap mints come first)."
     ),
@@ -48,7 +48,8 @@ def train(
     from .train.units import parse_size
 
     if hf_token() is None:
-        typer.echo("warning: no HF_TOKEN set (env or .env); rate limits will be tight")
+        typer.echo("error: HF_TOKEN is required for the production training roster")
+        raise typer.Exit(2)
     n_workers = workers or default_workers()
 
     def build(resume_now: bool) -> Trainer:
@@ -63,7 +64,11 @@ def train(
             resume=resume_now,
         )
 
-    trainer = _run_until_done(build, resume, dashboard)
+    try:
+        trainer = _run_until_done(build, resume, dashboard)
+    except RuntimeError as e:
+        typer.echo(f"preflight failed: {e}")
+        raise typer.Exit(2) from e
     typer.echo(f"done: {trainer.describe_progress()}")
 
 
@@ -74,6 +79,12 @@ def _run_until_done(build, resume: bool, dashboard: bool):
     attempt = 0
     while True:
         trainer = build(resume or attempt > 0)
+        try:
+            trainer.preflight_sources()
+        except Exception:
+            if events := getattr(trainer, "events", None):
+                events.close()
+            raise
         try:
             if dashboard:
                 from .train.dashboard import Dashboard
@@ -115,71 +126,6 @@ def inspect(
     typer.echo("rarest bigrams (highest weight):")
     for w, c1, c2 in pairs[-top:][::-1]:
         typer.echo(f"  {w:<10} {show(c1, c2)}")
-
-
-@app.command("bench-ingest")
-def bench_ingest(
-    size: str = typer.Option("256MB", help="Synthetic corpus size."),
-    workers: int = typer.Option(1, help="Parallel counting workers."),
-) -> None:
-    """Measure the offline ingest pipeline (parquet -> arrow -> count), no network."""
-    import shutil
-    import tempfile
-    import time
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    import sngram
-
-    from .train.units import fmt_bytes, fmt_rate, parse_size
-
-    total = parse_size(size)
-    snippet = (
-        'fn main() { let x = foo_bar(42); println!("{x}"); }\n'
-        "pub async fn read(hash: Hash) -> Result<Bytes, Error> { todo!() }\n"
-    )
-    row = (snippet * 40)[:4096]
-    rows = max(total // len(row), 1)
-
-    tmp = Path(tempfile.mkdtemp(prefix="sngram-bench-"))
-    try:
-        path = tmp / "bench.parquet"
-        arr = pa.array([row] * rows, type=pa.large_string())
-        pq.write_table(pa.table({"content": arr}), path)
-        actual = rows * len(row)
-        typer.echo(f"fixture: {rows} rows, {fmt_bytes(actual)} text, {path.stat().st_size:,} B parquet")
-
-        # pure counting ceiling: in-memory table -> count_arrow
-        tbl = pq.read_table(path)
-        tally = sngram.LocalTally()
-        t0 = time.perf_counter()
-        n = tally.count_arrow(tbl)
-        pure = n / (time.perf_counter() - t0)
-        typer.echo(f"count_arrow (in-memory):   {fmt_rate(pure)}")
-
-        # full pipeline: datasets streaming -> arrow batches -> count_arrow
-        from concurrent.futures import ThreadPoolExecutor
-
-        from datasets import load_dataset
-
-        def stream_all(_w: int) -> int:
-            ds = load_dataset(
-                "parquet", data_files=str(path), split="train", streaming=True
-            ).with_format("arrow")
-            t = sngram.LocalTally()
-            got = 0
-            for batch in ds.iter(batch_size=256):
-                got += t.count_arrow(batch)
-            return got
-
-        t0 = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            counted = sum(pool.map(stream_all, range(workers)))
-        rate = counted / (time.perf_counter() - t0)
-        typer.echo(f"pipeline x{workers} (streamed): {fmt_rate(rate)} total")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _show_pair(c1: int, c2: int) -> str:

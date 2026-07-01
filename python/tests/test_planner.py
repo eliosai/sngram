@@ -137,6 +137,58 @@ def _weighted_family(directory: Path, fid: str, weight: float, files: int) -> Fa
     )
 
 
+def _capped_family(directory: Path, fid: str, cap_bytes: int, files: int) -> Family:
+    directory.mkdir(parents=True, exist_ok=True)
+    rows = ["x" * 1000] * 100  # ~100 KB per shard file
+    for i in range(files):
+        tbl = pa.table({"content": pa.array(rows, type=pa.large_string())})
+        pq.write_table(tbl, directory / f"{fid}-{i}.parquet")
+    glob = str(directory / f"{fid}-*.parquet")
+    return Family(
+        id=fid, weight=cap_bytes,
+        cap_bytes=cap_bytes,
+        sources=(Source(fid, "local", "content", data_files=glob, cap_bytes=cap_bytes),),
+    )
+
+
+def _capped_family_with_rows(
+    directory: Path, fid: str, cap_bytes: int, rows: list[str], files: int
+) -> Family:
+    directory.mkdir(parents=True, exist_ok=True)
+    for i in range(files):
+        tbl = pa.table({"content": pa.array(rows, type=pa.large_string())})
+        pq.write_table(tbl, directory / f"{fid}-{i}.parquet")
+    glob = str(directory / f"{fid}-*.parquet")
+    return Family(
+        id=fid, weight=cap_bytes,
+        cap_bytes=cap_bytes,
+        sources=(Source(fid, "local", "content", data_files=glob, cap_bytes=cap_bytes),),
+    )
+
+
+def _source_capped_family(
+    directory: Path, fid: str, family_cap: int, source_cap: int, files: int
+) -> Family:
+    directory.mkdir(parents=True, exist_ok=True)
+    rows = ["x" * 1000] * 100
+    for i in range(files):
+        tbl = pa.table({"content": pa.array(rows, type=pa.large_string())})
+        pq.write_table(tbl, directory / f"{fid}-{i}.parquet")
+    glob = str(directory / f"{fid}-*.parquet")
+    return Family(
+        id=fid, weight=family_cap, cap_bytes=family_cap,
+        sources=(Source(fid, "local", "content", data_files=glob, cap_bytes=source_cap),),
+    )
+
+
+def _write_source(directory: Path, name: str, rows: list[str], files: int) -> str:
+    directory.mkdir(parents=True, exist_ok=True)
+    for i in range(files):
+        tbl = pa.table({"content": pa.array(rows, type=pa.large_string())})
+        pq.write_table(tbl, directory / f"{name}-{i}.parquet")
+    return str(directory / f"{name}-*.parquet")
+
+
 def test_weighted_blend_holds_target_share(tmp_path: Path):
     # code weighted 0.8, text 0.2; both have far more data than the limit, so
     # neither exhausts and the realized blend must track ~0.8 / ~0.2
@@ -185,3 +237,157 @@ def test_weighted_blend_holds_across_resume(tmp_path: Path):
     total = sum(fb.values())
     code_share = fb.get("code", 0) / total
     assert 0.62 <= code_share <= 0.92, f"blend broke across resume: {code_share:.2%}"
+
+
+def test_sources_inside_family_are_round_robin(tmp_path: Path):
+    rows = ["x" * 1000] * 100
+    a = _write_source(tmp_path / "a", "a", rows, files=3)
+    b = _write_source(tmp_path / "b", "b", rows, files=3)
+    family = Family(
+        id="blend",
+        weight=1.0,
+        cap_bytes=600_000,
+        sources=(
+            Source("blend", "local-a", "content", data_files=a, cap_bytes=300_000),
+            Source("blend", "local-b", "content", data_files=b, cap_bytes=300_000),
+        ),
+    )
+    trainer = Trainer(
+        families=[family],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("50TB"),
+        mint_every=parse_size("50TB"),
+        workers=1,
+        limit=parse_size("200KB"),
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    asyncio.run(trainer.run())
+
+    assert trainer.state.source_bytes["blend/local-a"] == 100_000
+    assert trainer.state.source_bytes["blend/local-b"] == 100_000
+
+
+def test_caps_stop_multilingual_after_code_exhausts(tmp_path: Path):
+    code = _capped_family(tmp_path / "code", "code", cap_bytes=100_000, files=1)
+    multilingual = _capped_family(
+        tmp_path / "multilingual", "multilingual", cap_bytes=200_000, files=10
+    )
+    trainer = Trainer(
+        families=[code, multilingual],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("50TB"),
+        mint_every=parse_size("50TB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    asyncio.run(trainer.run())
+
+    assert trainer.state.family_bytes["code"] <= code.cap_bytes
+    assert trainer.state.family_bytes["multilingual"] <= multilingual.cap_bytes
+    assert trainer.state.family_bytes["multilingual"] == 200_000
+
+
+def test_caps_hold_across_resume(tmp_path: Path):
+    multilingual = _capped_family(
+        tmp_path / "multilingual", "multilingual", cap_bytes=200_000, files=10
+    )
+
+    def run(limit: str | None, resume: bool) -> Trainer:
+        trainer = Trainer(
+            families=[multilingual],
+            mint_dir=tmp_path / "bins",
+            target=parse_size("50TB"),
+            mint_every=parse_size("50TB"),
+            workers=1,
+            limit=parse_size(limit) if limit else None,
+            checkpoint_every_s=3600.0,
+            resume=resume,
+        )
+        asyncio.run(trainer.run())
+        return trainer
+
+    run("100KB", False)
+    resumed = run(None, True)
+
+    assert resumed.state.family_bytes["multilingual"] == 200_000
+    assert resumed.state.source_bytes["multilingual/local"] == 200_000
+
+
+def test_source_cap_stops_dispatching_source(tmp_path: Path):
+    family = _source_capped_family(
+        tmp_path / "source", "docs", family_cap=1_000_000, source_cap=200_000, files=10
+    )
+    trainer = Trainer(
+        families=[family],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("50TB"),
+        mint_every=parse_size("50TB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    asyncio.run(trainer.run())
+
+    assert trainer.state.source_bytes["docs/local"] == 200_000
+    assert len(trainer.state.completed["docs/local"]["done"]) == 2
+
+
+def test_oversized_shard_fills_to_cap_without_overshoot(tmp_path: Path):
+    family = _capped_family(tmp_path / "huge", "multilingual", cap_bytes=50_000, files=1)
+    trainer = Trainer(
+        families=[family],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("50TB"),
+        mint_every=parse_size("50TB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    asyncio.run(trainer.run())
+
+    assert trainer.state.family_bytes["multilingual"] == 50_000
+    assert trainer.durable_bytes() == 50_000
+
+
+def test_single_large_row_fills_cap_without_overshoot(tmp_path: Path):
+    family = _capped_family_with_rows(
+        tmp_path / "large-row", "multilingual", cap_bytes=500, rows=["x" * 1000], files=1
+    )
+    trainer = Trainer(
+        families=[family],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("50TB"),
+        mint_every=parse_size("50TB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    asyncio.run(trainer.run())
+
+    assert trainer.state.family_bytes["multilingual"] == 500
+    assert trainer.durable_bytes() == 500
+
+
+def test_parallel_final_shards_fill_cap_without_inflight_overshoot(tmp_path: Path):
+    family = _capped_family(tmp_path / "parallel", "multilingual", cap_bytes=150_000, files=6)
+    trainer = Trainer(
+        families=[family],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("50TB"),
+        mint_every=parse_size("50TB"),
+        workers=4,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    asyncio.run(trainer.run())
+
+    assert trainer.state.family_bytes["multilingual"] == 150_000
+    assert trainer.state.source_bytes["multilingual/local"] == 150_000
+    assert trainer.durable_bytes() == 150_000

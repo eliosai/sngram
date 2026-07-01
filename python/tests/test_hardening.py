@@ -147,17 +147,18 @@ def test_transient_errors_retry_forever_and_recover(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(pl, "RETRY_CAP_S", 0.02)
     fam = local_family(tmp_path, "alpha", ["hello world"] * 10, files=2)
     trainer = make_trainer(tmp_path, [fam])
+    trainer.preflight_sources()
 
-    real = trainer._load_source
+    real = trainer._open_parquet
     failures = {"n": 0}
 
-    def flaky(source):
-        if failures["n"] < 5:
+    def flaky(url, ws=None):
+        if ws is not None and failures["n"] < 5:
             failures["n"] += 1
             raise ConnectionResetError("connection reset by peer")
-        return real(source)
+        return real(url, ws)
 
-    monkeypatch.setattr(trainer, "_load_source", flaky)
+    monkeypatch.setattr(trainer, "_open_parquet", flaky)
     asyncio.run(trainer.run())
 
     assert failures["n"] == 5, "the flaky path must actually fire"
@@ -169,17 +170,18 @@ def test_transient_errors_retry_forever_and_recover(tmp_path: Path, monkeypatch)
 def test_hard_errors_are_bounded_and_run_continues(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(pl, "RETRY_BASE_S", 0.01)
     good = local_family(tmp_path, "good", ["abcdef"] * 5, files=1)
-    bad_dir = tmp_path / "badfam"
-    bad_dir.mkdir()
-    pq.write_table(
-        pa.table({"other": pa.array(["x"] * 3, type=pa.large_string())}),
-        bad_dir / "bad-0.parquet",
-    )
-    bad = Family(
-        id="bad",
-        sources=(Source("bad", "local", "content", data_files=str(bad_dir / "bad-*.parquet")),),
-    )
+    bad = local_family(tmp_path, "bad", ["abcdef"] * 5, files=1)
     trainer = make_trainer(tmp_path, [good, bad])
+    trainer.preflight_sources()
+
+    real = trainer._open_parquet
+
+    def fail_bad(url, ws=None):
+        if ws is not None and "/bad-" in str(url):
+            raise ValueError("worker-only hard failure")
+        return real(url, ws)
+
+    monkeypatch.setattr(trainer, "_open_parquet", fail_bad)
     asyncio.run(trainer.run())
     assert trainer.failed_shards == 1
     assert trainer.durable_bytes() == 5 * 6
@@ -192,11 +194,9 @@ def test_planner_transient_retry_is_capped_not_starving(tmp_path: Path, monkeypa
     monkeypatch.setattr(pl, "RETRY_BASE_S", 0.001)
     monkeypatch.setattr(pl, "RETRY_CAP_S", 0.002)
     good = local_family(tmp_path, "good", ["hello world"] * 10, files=1)
-    throttled = Family(
-        id="throttled",
-        sources=(Source("throttled", "local", "content", data_files="bogus"),),
-    )
+    throttled = local_family(tmp_path, "throttled", ["hello world"] * 10, files=1)
     trainer = make_trainer(tmp_path, [good, throttled])
+    trainer.preflight_sources()
 
     real = trainer._source_shards
 
@@ -471,10 +471,10 @@ def test_load_source_resolves_parquet_file_list(tmp_path: Path, monkeypatch):
     import datasets
 
     trainer = make_trainer(tmp_path, [])
-    trainer.state.revisions["bigcode/the-stack"] = "deadbeef"
+    trainer.state.revisions["example/code-roster"] = "deadbeef"
     fake_files = [
-        "hf://datasets/bigcode/the-stack@deadbeef/data/000.parquet",
-        "hf://datasets/bigcode/the-stack@deadbeef/data/001.parquet",
+        "hf://datasets/example/code-roster@deadbeef/data/000.parquet",
+        "hf://datasets/example/code-roster@deadbeef/data/001.parquet",
     ]
 
     class FakeEx:
@@ -484,7 +484,7 @@ def test_load_source_resolves_parquet_file_list(tmp_path: Path, monkeypatch):
         _ex_iterable = FakeEx()
 
     monkeypatch.setattr(datasets, "load_dataset", lambda *a, **k: FakeDS())
-    src = Source("the-stack", "bigcode/the-stack", "content")
+    src = Source("code-roster", "example/code-roster", "content")
     assert trainer._load_source(src) == fake_files
     assert trainer._source_shards(src) == 2
     trainer.events.close()
@@ -522,13 +522,13 @@ def test_shard_read_uses_non_retaining_cache(tmp_path: Path, monkeypatch):
 def test_revision_pinning_rewrites_hf_globs(tmp_path: Path, monkeypatch):
     fam = local_family(tmp_path, "alpha", ["x"], files=1)
     trainer = make_trainer(tmp_path, [fam])
-    trainer.state.revisions["codeparrot/github-code"] = "abc123"
+    trainer.state.revisions["example/github-code"] = "abc123"
 
     src = Source(
         "github-code",
-        "codeparrot/github-code",
+        "example/github-code",
         "content",
-        data_files="hf://datasets/codeparrot/github-code/data/*.parquet",
+        data_files="hf://datasets/example/github-code/data/*.parquet",
     )
     captured = {}
 
@@ -542,7 +542,7 @@ def test_revision_pinning_rewrites_hf_globs(tmp_path: Path, monkeypatch):
     with pytest.raises(RuntimeError, match="stop here"):
         trainer._load_source(src)
     assert captured["data_files"] == (
-        "hf://datasets/codeparrot/github-code@abc123/data/*.parquet"
+        "hf://datasets/example/github-code@abc123/data/*.parquet"
     )
     # local fixtures never pin
     assert trainer._source_revision(fam.sources[0]) is None

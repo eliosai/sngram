@@ -26,6 +26,7 @@ _PAIR_COUNT = 256 * 256
 class RunState:
     """Everything a resumed run needs besides the raw counts."""
 
+    roster_hash: str | None = None
     # source id -> {"n_shards": int, "revision": str|None, "done": [int, ...]}
     completed: dict[str, dict] = field(default_factory=dict)
     mints_done: list[str] = field(default_factory=list)
@@ -36,6 +37,8 @@ class RunState:
     # the post-resume increment
     family_bytes: dict[str, int] = field(default_factory=dict)
     family_done: dict[str, int] = field(default_factory=dict)
+    source_bytes: dict[str, int] = field(default_factory=dict)
+    source_done: dict[str, int] = field(default_factory=dict)
     # the previous mint's count vector, so the first post-resume mint can still
     # report KL(mint_n || mint_{n-1}) — the convergence/early-stop signal
     last_mint_counts: list[int] | None = None
@@ -78,6 +81,7 @@ def save(directory: Path, counter: sngram.BigramCounter, state: RunState) -> Non
     directory.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": 2,
+        "roster_hash": state.roster_hash,
         "counts_b64": base64.b64encode(counter.snapshot()).decode(),
         "pairs": counter.pairs_processed,
         "bytes": counter.bytes_processed,
@@ -94,6 +98,8 @@ def save(directory: Path, counter: sngram.BigramCounter, state: RunState) -> Non
         "revisions": dict(state.revisions),
         "family_bytes": dict(state.family_bytes),
         "family_done": dict(state.family_done),
+        "source_bytes": dict(state.source_bytes),
+        "source_done": dict(state.source_done),
         "last_mint_counts_b64": (
             base64.b64encode(
                 struct.pack(f"<{_PAIR_COUNT}Q", *state.last_mint_counts)
@@ -126,6 +132,7 @@ def load(directory: Path, counter: sngram.BigramCounter) -> RunState | None:
         counts = counts_path.read_bytes()
     counter.restore(counts, payload["pairs"], payload["bytes"], payload["files"])
     state = RunState(
+        roster_hash=payload.get("roster_hash"),
         completed={
             sid: {
                 "n_shards": e["n_shards"],
@@ -138,6 +145,8 @@ def load(directory: Path, counter: sngram.BigramCounter) -> RunState | None:
         revisions=dict(payload.get("revisions", {})),
         family_bytes=dict(payload.get("family_bytes", {})),
         family_done=dict(payload.get("family_done", {})),
+        source_bytes=dict(payload.get("source_bytes", {})),
+        source_done=dict(payload.get("source_done", {})),
         last_mint_counts=(
             list(struct.unpack(f"<{_PAIR_COUNT}Q", base64.b64decode(lmc)))
             if (lmc := payload.get("last_mint_counts_b64"))

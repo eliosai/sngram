@@ -1,30 +1,34 @@
-"""The training corpus roster: every source must be ungated, on-distribution,
-and correctly columned, and the mix weights must encode the intended blend.
+"""The training corpus roster: every source must be accessible, on-distribution,
+and correctly columned, and the mix caps must encode the intended blend.
 
-These are red→green guards on the 10 TB Linux-filesystem corpus: a gated repo,
-a metadata-only trap, a stray LLVM-IR config, an untrimmed language list, or a
-weight that drops code below half would all break the table, so each is a test.
+These are red->green guards on the 15 TB Linux-filesystem corpus: a forbidden
+repo, a metadata-only trap, a stray LLVM-IR config, an untrimmed language list,
+or a cap that lets multilingual dominate would all break the table.
 """
 
 from __future__ import annotations
 
 from sngram.train import config
-from sngram.train.config import WEB_LANGS, default_families
+from sngram.train.config import (
+    CJK_LANGS,
+    REQUIRES_HF_TOKEN,
+    TRAIN_TARGET_BYTES,
+    WEB_LANGS,
+    default_families,
+    hf_token,
+)
 
-# Repos we verified (via the HF API and a live resolve+count smoke run) are
-# ungated, parquet-backed, and carry the named streamable text column. Anything
-# outside this set must not appear in the roster. (the-pile-splitted, loghub_2,
-# synthetic-syslog, and dockerfiles-linted were dropped: not parquet-backed, so
-# they break the bounded-memory direct-parquet read.)
-VERIFIED_UNGATED = {
+# Reviewed repos in the capped 15 TB roster. Live HF tests verify access/schema
+# with the user's token; this static guard prevents accidental unreviewed sources.
+VERIFIED_ACCESSIBLE = {
     "nick007x/github-code-2025": "content",
-    "codeparrot/github-code": "content",
+    "CodedotAI/code_clippy_github": "content",
+    "M1keR/the-stack-v2-dedup-filtered-500-stars-100-forks-contents": "text",
+    "bigcode/starcoderdata": "content",
     "OpenCoder-LLM/opc-fineweb-code-corpus": "text",
     "bigcode/starcoder2data-extras": "content",
     "mikex86/stackoverflow-posts": "Body",
-    "substratusai/the-stack-yaml-k8s": "content",
-    "HuggingFaceFW/fineweb": "text",
-    "wikimedia/wikipedia": "text",
+    "HuggingFaceFW/finepdfs": "text",
     "HuggingFaceFW/fineweb-2": "text",
 }
 
@@ -36,7 +40,6 @@ FORBIDDEN_REPOS = {
     "bigcode/the-stack-v2-dedup",           # metadata only
     "bigcode/the-stack-dedup",              # gated=auto
     "bigcode/the-stack",                    # gated
-    "bigcode/starcoderdata",                # gated + injected <reponame> tokens
 }
 
 
@@ -48,7 +51,7 @@ def test_web_langs_trimmed_to_a_dozen_scripts():
     # the measured filesystem is 99.9% ASCII: multilingual is a small coverage
     # slice, not 90 languages of web text
     assert len(WEB_LANGS) <= 15
-    assert "eng_Latn" not in WEB_LANGS  # English comes from fineweb, not here
+    assert "eng_Latn" not in WEB_LANGS  # English comes from FinePDFs, not here
     # spans the UTF-8 multibyte space: CJK, Cyrillic, Arabic, Greek, Hebrew, Indic
     for needed in ("cmn_Hani", "rus_Cyrl", "arb_Arab", "jpn_Jpan", "hin_Deva"):
         assert needed in WEB_LANGS
@@ -59,22 +62,28 @@ def test_no_llvm_ir_configs():
         assert not (s.config or "").startswith("ir_"), f"LLVM-IR config leaked in: {s.id}"
 
 
-def test_no_gated_or_metadata_repos():
+def test_no_forbidden_or_metadata_repos():
     for s in all_sources():
         assert s.repo not in FORBIDDEN_REPOS, f"forbidden repo in roster: {s.repo}"
 
 
-def test_every_repo_is_verified_ungated():
+def test_every_repo_is_verified_accessible():
     for s in all_sources():
-        assert s.repo in VERIFIED_UNGATED, f"unverified repo: {s.repo}"
+        assert s.repo in VERIFIED_ACCESSIBLE, f"unverified repo: {s.repo}"
 
 
 def test_text_field_matches_verified_column():
     for s in all_sources():
-        assert s.text_field == VERIFIED_UNGATED[s.repo], (
+        assert s.text_field == VERIFIED_ACCESSIBLE[s.repo], (
             f"{s.repo}: text_field {s.text_field!r} != verified "
-            f"{VERIFIED_UNGATED[s.repo]!r}"
+            f"{VERIFIED_ACCESSIBLE[s.repo]!r}"
         )
+
+
+def test_token_required_sources_are_declared():
+    repos = {s.repo for s in all_sources()}
+    assert "bigcode/starcoderdata" in REQUIRES_HF_TOKEN
+    assert REQUIRES_HF_TOKEN <= repos
 
 
 def test_weights_present_and_normalizable():
@@ -84,6 +93,40 @@ def test_weights_present_and_normalizable():
     assert total > 0
     norm = {f.id: f.weight / total for f in fams}
     assert abs(sum(norm.values()) - 1.0) < 1e-9
+
+
+def test_distribution_caps_are_hard_targets():
+    fams = default_families()
+    caps = {f.id: f.cap_bytes for f in fams}
+    assert all(cap is not None and cap > 0 for cap in caps.values())
+    assert sum(caps.values()) == TRAIN_TARGET_BYTES == 15_000_000_000_000
+    assert caps["multilingual"] == 450_000_000_000
+    assert caps["multilingual"] / TRAIN_TARGET_BYTES == 0.03
+
+
+def test_source_and_cjk_caps_roll_up_exactly():
+    for family in default_families():
+        source_caps = [s.cap_bytes for s in family.sources]
+        assert all(cap is not None and cap > 0 for cap in source_caps), family.id
+        assert sum(source_caps) == family.cap_bytes, family.id
+
+    ml = next(f for f in default_families() if f.id == "multilingual")
+    cjk = [s for s in ml.sources if s.config in CJK_LANGS]
+    assert len(cjk) == len(CJK_LANGS)
+    assert sum(s.cap_bytes for s in cjk) == 60_000_000_000
+    assert all(s.cap_bytes <= 20_000_000_000 for s in cjk)
+
+
+def test_bucket_caps_match_distribution_doc_exactly():
+    buckets: dict[str, int] = {}
+    for family in default_families():
+        buckets[family.bucket] = buckets.get(family.bucket, 0) + family.cap_bytes
+    assert buckets == {
+        "pure-code": 11_250_000_000_000,
+        "blend": 3_000_000_000_000,
+        "english-docs": 300_000_000_000,
+        "multilingual": 450_000_000_000,
+    }
 
 
 def test_code_is_at_least_half_the_blend():
@@ -110,3 +153,8 @@ def test_source_family_matches_owning_family():
     for f in default_families():
         for s in f.sources:
             assert s.family == f.id, f"{s.id}: source.family {s.family!r} != {f.id!r}"
+
+
+def test_hf_token_uses_environment(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+    assert hf_token() == "hf_test_token"

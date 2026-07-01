@@ -118,6 +118,34 @@ def test_resume_skips_completed_shards(tmp_path: Path):
     assert second.counter.files_processed == 5  # restored, not re-counted
 
 
+def test_resume_refuses_changed_distribution_roster(tmp_path: Path):
+    glob = write_fixture(tmp_path / "alpha", "alpha", ["x" * 1000] * 10, files=1)
+    original = Family(
+        id="alpha",
+        cap_bytes=10_000,
+        sources=(Source("alpha", "local", "content", data_files=glob, cap_bytes=10_000),),
+    )
+    changed = Family(
+        id="alpha",
+        cap_bytes=20_000,
+        sources=(Source("alpha", "local", "content", data_files=glob, cap_bytes=20_000),),
+    )
+
+    run_trainer(tmp_path, [original])
+
+    with pytest.raises(RuntimeError, match="distribution roster changed"):
+        Trainer(
+            families=[changed],
+            mint_dir=tmp_path / "bins",
+            target=parse_size("1GB"),
+            mint_every=parse_size("1GB"),
+            workers=1,
+            limit=None,
+            checkpoint_every_s=3600.0,
+            resume=True,
+        )
+
+
 def test_resume_restores_blend_feedback(tmp_path: Path):
     # the weighted planner's per-family feedback and the KL baseline must come
     # back on resume, not start from amnesia
@@ -160,15 +188,58 @@ def test_run_logs_start_and_family_progress(tmp_path: Path):
     assert summary["families"]["alpha"]["failed"] == 0
 
 
-def test_failed_source_does_not_kill_run(tmp_path: Path):
+def test_run_preflights_all_sources_before_counting(tmp_path: Path):
     good = local_family(tmp_path, "alpha", ["abc"] * 10)
     bad = Family(
         id="broken",
         sources=(Source("broken", "local", "content", data_files=str(tmp_path / "nope-*.parquet")),),
     )
-    trainer = run_trainer(tmp_path, [good, bad])
-    assert trainer.durable_bytes() > 0
-    assert trainer.errors >= 1
+    trainer = Trainer(
+        families=[good, bad],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        asyncio.run(trainer.run())
+
+    assert trainer.durable_bytes() == 0
+
+
+def test_source_with_less_text_than_cap_exhausts_without_overrun(tmp_path: Path):
+    glob = write_fixture(tmp_path / "small", "small", ["x" * 1000] * 100, files=1)
+    family = Family(
+        id="small",
+        weight=200_000,
+        cap_bytes=200_000,
+        sources=(
+            Source(
+                "small", "local", "content",
+                data_files=glob,
+                cap_bytes=200_000,
+            ),
+        ),
+    )
+    trainer = Trainer(
+        families=[family],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    asyncio.run(trainer.run())
+
+    assert trainer.durable_bytes() == 100_000
+    assert trainer.state.family_bytes["small"] == 100_000
+    assert trainer.state.source_bytes["small/local"] == 100_000
 
 
 def test_log_failure_after_merge_does_not_double_count_shard_as_failed(tmp_path: Path):
@@ -264,11 +335,9 @@ def test_classify_error_buckets():
     assert classify_error(KeyError("content")) == "hard"
 
 
-def test_shard_error_path_classifies_and_survives(tmp_path: Path):
-    # a shard whose parquet exists but whose text field is missing exercises
-    # the full _run_shard error path (the path a kwarg-collision bug once
-    # killed): the error must be classified+logged, the shard marked failed,
-    # the worker must survive, and the run must finish
+def test_preflight_rejects_missing_text_field_before_counting(tmp_path: Path):
+    # A misnamed text field used to fail only when that shard reached a worker,
+    # which could be days into a run. It must now fail in preflight.
     directory = tmp_path / "bad"
     directory.mkdir(parents=True)
     tbl = pa.table({"wrong_field": pa.array(["abc"] * 5, type=pa.large_string())})
@@ -279,12 +348,19 @@ def test_shard_error_path_classifies_and_survives(tmp_path: Path):
     )
     good = local_family(tmp_path, "good", ["hello world"] * 10, files=1)
 
-    trainer = run_trainer(tmp_path, [good, bad])
-    assert trainer.durable_bytes() == 11 * 10
-    assert trainer.failed_shards >= 1
-    shard_errors = [e for e in (trainer.events.tail or []) if e.get("stage") == "shard"]
-    assert shard_errors, "the shard failure must be logged, not swallowed"
-    assert all("multiple values" not in str(e) for e in shard_errors)
+    trainer = Trainer(
+        families=[good, bad],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    with pytest.raises(RuntimeError, match="preflight"):
+        trainer.preflight_sources()
+    assert trainer.durable_bytes() == 0
 
 
 # --- ETA must track bytes actually counted, never the lagging durable --------

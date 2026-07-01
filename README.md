@@ -65,8 +65,8 @@ and index keys changed — reindex.
 A table is a 256x256 grid: one `u32` per byte pair, 65,536 entries, plus a
 16-byte header (magic, version, CRC32). 262,160 bytes, validated on load.
 
-The 0.4-era tables are retired: the 0.5 trainer uses a blended corpus and a
-new mint schedule (`100gb`, `500gb`, `1tb`, then every 5 TB to `50tb`).
+The 0.4-era tables are retired: the 0.5 trainer uses a capped blended corpus
+and a new mint schedule (`100gb`, `500gb`, then every 1 TB to `15tb`).
 `sngram-weights` will embed the new tables as they mint — until then every
 size feature is a `compile_error!`, and you load a table you minted yourself:
 
@@ -107,16 +107,16 @@ CLI.
 ```sh
 cd python && uv sync
 export HF_TOKEN=hf_...                   # or put it in .env
-uv run sngram train --mint-dir ./bins    # 50 TB target, mints every 5 TB
+uv run sngram train --mint-dir ./bins    # 15 TB target, mints every 1 TB
 uv run sngram train --limit 1GB          # smoke run
 uv run sngram inspect bins/5tb_weights.bin
-uv run sngram bench-ingest --workers 8   # offline pipeline benchmark
 ```
 
-`train` streams the corpus mix (the-stack, finepdfs, fineweb-2,
-starcoderdata, github-code) from Hugging Face with N parallel workers, blends
+`train` streams the capped corpus mix (CodeClippy, GitHub2025, the selected
+high-star Stack v2 mirror, FinePDFs, FineWeb-2, StarCoderData config/markup,
+and code/text blend sources) from Hugging Face with N parallel workers, blends
 the datasets so every mint reflects the whole mix, counts through the Rust
-core (~3 GB/s/core), mints exactly every 5 TB, checkpoints continuously, and
+core (~3 GB/s/core), mints every 1 TB, checkpoints continuously, and
 resumes exactly where it stopped. A live dashboard shows throughput, ETA to
 the next mint, per-worker progress, and stalls; every event also lands in a
 JSONL log next to the mints.
