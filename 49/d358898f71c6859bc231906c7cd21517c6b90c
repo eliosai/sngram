@@ -1,0 +1,110 @@
+python/tests/test_pipeline.py
+  s_e6cf9f02ed0ab3::t_8569afb6ab4fe6 227-228,230-237
+  s_e6cf9f02ed0ab3::t_63bf8a71395fa1 121-148
+  s_e6cf9f02ed0ab3::t_f10c8235433e75 197-208,211-213,215-226,229
+  s_e6cf9f02ed0ab3::t_0a2fbd0b94aa35 239
+  s_e6cf9f02ed0ab3::t_31223485cd9b14 191,209
+  s_e6cf9f02ed0ab3::t_343ee567be41bb 362
+  s_e6cf9f02ed0ab3::t_a0d35c905a8e1c 214,238,240-242
+  s_e6cf9f02ed0ab3::t_68f14012cf9d01 338-340,351-361,363
+  s_e6cf9f02ed0ab3::t_2bfb21a988a316 210
+python/tests/test_checkpoint.py
+  s_e6cf9f02ed0ab3::t_c6c3d8ca8c5abc 27,52
+  s_e6cf9f02ed0ab3::t_c94064e6e00d55 66-67,76-77
+  s_e6cf9f02ed0ab3::t_7c706df3888caf 22-23,26,44-48,51
+python/tests/test_config.py
+  s_e6cf9f02ed0ab3::t_41d8aa83b8024c 120-131
+  s_e6cf9f02ed0ab3::t_370e3072c93b1c 1-2,4-6,54,65
+  s_e6cf9f02ed0ab3::t_794c6306c11d7b 25
+  s_e6cf9f02ed0ab3::t_ff910a6a35edeb 14,23,70,72,77,79,83-86
+  s_e6cf9f02ed0ab3::t_69ac3e3e34ed8d 105-117
+  s_e6cf9f02ed0ab3::t_b23fd3df86b036 21-22,27,31
+  s_e6cf9f02ed0ab3::t_dae3dd5a4d7010 26
+  s_e6cf9f02ed0ab3::t_3dd7a11b419a9b 12-13,15-19,156-160
+  s_e6cf9f02ed0ab3::t_a872306628640b 98-104
+  s_e6cf9f02ed0ab3::t_90fc49c6c367da 20
+  s_e6cf9f02ed0ab3::t_96851f9f1323c9 87-88
+  s_e6cf9f02ed0ab3::t_d69c13aefc4531 118-119
+python/sngram/train/checkpoint.py
+  s_e6cf9f02ed0ab3::t_b45cd0d8f0d735 29,84,135
+  s_e6cf9f02ed0ab3::t_431914c1e398e7 40-41,101-102,148-149
+python/tests/test_cli.py
+  s_e6cf9f02ed0ab3::t_5f8cfadcf2664b 1,4,49-50,90-109
+  s_e6cf9f02ed0ab3::t_dc02b587e22222 12-48
+  s_e6cf9f02ed0ab3::t_3b7e1ba3856a6d 51-89
+  s_e6cf9f02ed0ab3::t_997ba15fe72128 2-3,5-11
+python/sngram/cli.py
+  s_e6cf9f02ed0ab3::t_a72b43e715f2da 1,15
+  s_e6cf9f02ed0ab3::t_5ccd91225df8f1 82-87
+  s_e6cf9f02ed0ab3::t_6d813c4d837474 51-52
+  s_e6cf9f02ed0ab3::t_80f2607d11dc50 67-71
+  s_e6cf9f02ed0ab3::t_654bc36328ef8a 22
+README.md
+  s_e6cf9f02ed0ab3::t_7269faf39a2317 115-117
+  s_e6cf9f02ed0ab3::t_452c6865df784a 110
+  s_e6cf9f02ed0ab3::t_e738d71f81b27e 68-69,119
+python/tests/test_hardening.py
+  s_e6cf9f02ed0ab3::t_636869a362254f 474,476-477,487,525,529,531,545
+  s_e6cf9f02ed0ab3::t_08188496433886 150,152,155-156,159,161,173,175-184,197,199
+python/sngram/train/config.py
+  s_e6cf9f02ed0ab3::t_73584ddf2b54cb 83-87,230
+  s_e6cf9f02ed0ab3::t_dc3d4d8af7a7fd 26-29,39,52,70,72-82,91,99,102-103,105-110,113-115,120,130-132,134-137,139-141,144-146,149-150,153-156,160,162,165,167-169,171-176,179-181,183-192,195-197,200-203,206,208-210,214-215,219,222-223,226-229
+  s_e6cf9f02ed0ab3::t_bcbbeb240eae7e 71,104,116,133,147,170,182,198,211,224
+  s_e6cf9f02ed0ab3::t_9ee2349ae29849 151
+  s_e6cf9f02ed0ab3::t_0daf881863ab72 152,157-159,161
+  s_e6cf9f02ed0ab3::t_33520bac3a09d6 34
+  s_e6cf9f02ed0ab3::t_142dd7acc95ff3 11-13,41
+  s_e6cf9f02ed0ab3::t_8265b1f86a6cfc 138
+  s_e6cf9f02ed0ab3::t_771a1d252a69f2 53,119,121-125
+python/sngram/train/pipeline.py
+  s_e6cf9f02ed0ab3::t_7e63b27fe2546d 16-17,197-225
+  s_e6cf9f02ed0ab3::t_6b1e620e57be4b 373,379,383-391
+  s_e6cf9f02ed0ab3::t_7beeb69daede31 364-365,425,465-466,474-481,486-533,626-633,642-646,658-664,947-950,1259,1289,1301-1309
+  s_e6cf9f02ed0ab3::t_9fa88f7020b7a5 833-837,839,842-845,857-865,867-868,870,872-886,898-908
+  s_e6cf9f02ed0ab3::t_04f4e63c87a436 866
+  s_e6cf9f02ed0ab3::t_f08517bf97ba24 871
+  s_e6cf9f02ed0ab3::t_e2c550053039cc 1232-1247,1250-1252,1254-1258,1260-1264,1266-1267,1270-1277
+  s_e6cf9f02ed0ab3::t_d93c5072aa98a5 1325
+  s_e6cf9f02ed0ab3::t_bffc07380e25fb 1041-1043,1133-1167,1170,1172,1174-1176,1181-1185,1187-1201,1207-1228
+  s_e6cf9f02ed0ab3::t_b3d4ac73a1154f 534-575,595,600,608-609,612,614-625,634-641,647-657,671
+  s_e6cf9f02ed0ab3::t_d7a4a1f851a83f 887-897
+  s_e6cf9f02ed0ab3::t_03555f9d4c7b5e 797-801,816-826
+  s_e6cf9f02ed0ab3::t_b634f3cba164f5 962-963
+  s_e6cf9f02ed0ab3::t_b9be8efe764044 803
+  s_e6cf9f02ed0ab3::t_754d279b6fe122 274-303,972-981
+  s_e6cf9f02ed0ab3::t_1891b7ef9ca210 15,786-792
+  s_e6cf9f02ed0ab3::t_066cd0042655b8 838
+  s_e6cf9f02ed0ab3::t_38410675709164 438,840-841,846-856,869
+  s_e6cf9f02ed0ab3::t_1569293b2fa0d1 43,1331-1335
+  s_e6cf9f02ed0ab3::t_c6a82da628a8a5 951-961,964-971,982,1062,1075-1078,1084-1088,1094-1095,1168-1169,1171,1173,1177-1180,1186,1202-1206
+  s_e6cf9f02ed0ab3::t_3340ac9751728f 685-705,708-709
+  s_e6cf9f02ed0ab3::t_a1543c2cdf1c3a 226-227,827,1229-1231,1310
+python/tests/test_planner.py
+  s_e6cf9f02ed0ab3::t_7e81757f1f31b4 169-183,317-336
+  s_e6cf9f02ed0ab3::t_857dfb204e0ca0 184-191,240-268
+  s_e6cf9f02ed0ab3::t_9b4420855ec0aa 154-168,355-372
+  s_e6cf9f02ed0ab3::t_c5f0d277511d38 291-316
+  s_e6cf9f02ed0ab3::t_d0d06226cf362b 337-338,340-352
+  s_e6cf9f02ed0ab3::t_579d69b93b6d4f 140-153,269-290
+  s_e6cf9f02ed0ab3::t_9862c39a743f1e 339,353-354,375-393
+  s_e6cf9f02ed0ab3::t_45b70575bdf978 373-374
+python/tests/test_live_datasets.py
+  s_e6cf9f02ed0ab3::t_9a804f030551cf 39
+  s_e6cf9f02ed0ab3::t_1fab3ed8fc9a1a 1-38,40-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "49d358898f71c6859bc231906c7cd21517c6b90c",
+  "prompts": {},
+  "sessions": {
+    "s_e6cf9f02ed0ab3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ea3-28fc-7120-abc2-b88b6dcc6df8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
