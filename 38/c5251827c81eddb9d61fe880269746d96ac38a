@@ -1,0 +1,39 @@
+python/sngram/train/pipeline.py
+  s_e6cf9f02ed0ab3::t_a67b7b826f6cda 882-891,893,896
+  s_e6cf9f02ed0ab3::t_c86c219c4aa1ec 993,1241
+  s_e6cf9f02ed0ab3::t_d5866a7685813b 1016-1045
+  s_e6cf9f02ed0ab3::t_55b1c6e3d4a70f 1136,1141,1144-1147,1183,1201
+  s_e6cf9f02ed0ab3::t_4cdf279c2542b6 1246,1248-1249
+  s_e6cf9f02ed0ab3::t_51b72f3d73b850 1261,1264-1267,1271,1276,1287,1291,1307-1308,1314-1315,1318
+  s_e6cf9f02ed0ab3::t_fb42e60b6a0783 1433-1434,1437
+  s_e6cf9f02ed0ab3::t_8872a3892e18ed 278-330
+  s_e6cf9f02ed0ab3::t_1d3902cdc38e34 1148,1150
+  s_e6cf9f02ed0ab3::t_ee97c2de3b7a8a 47-49
+  s_e6cf9f02ed0ab3::t_389e6275a6887d 38-45
+  s_e6cf9f02ed0ab3::t_e8d7db024aa415 46
+  s_e6cf9f02ed0ab3::t_8879189f299924 405
+  s_e6cf9f02ed0ab3::t_5b41335e109f3a 473-481
+python/tests/test_hardening.py
+  s_e6cf9f02ed0ab3::t_f6af227d01af8d 493-495,515-516,521-522,524-529
+  s_e6cf9f02ed0ab3::t_e085d2663fea11 523
+  s_e6cf9f02ed0ab3::t_8d68f24ff3291a 530-531
+python/tests/test_rowgroup.py
+  s_e6cf9f02ed0ab3::t_df41396603fe07 13-14,19,184-202
+  s_e6cf9f02ed0ab3::t_be5d84b00e88ab 203-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "38c5251827c81eddb9d61fe880269746d96ac38a",
+  "prompts": {},
+  "sessions": {
+    "s_e6cf9f02ed0ab3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ea3-28fc-7120-abc2-b88b6dcc6df8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
