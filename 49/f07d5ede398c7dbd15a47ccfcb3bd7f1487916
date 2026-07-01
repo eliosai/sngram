@@ -1,0 +1,45 @@
+docs/distr.md
+  s_e6cf9f02ed0ab3::t_f9054e273f0d27 1-111
+.agents/skills/stop-slop/CHANGELOG.md
+  s_e6cf9f02ed0ab3::t_1dea01b63e6b14 1-24
+.agents/skills/stop-slop/LICENSE
+  s_e6cf9f02ed0ab3::t_350230cb1d870b 1-21
+.agents/skills/stop-slop/README.md
+  s_e6cf9f02ed0ab3::t_1f90388aa6a9e2 1-62
+.agents/skills/stop-slop/SKILL.md
+  s_e6cf9f02ed0ab3::t_875d76626470f6 1-68
+.agents/skills/stop-slop/references/examples.md
+  s_e6cf9f02ed0ab3::t_d27707f27f6d2b 1-59
+.agents/skills/stop-slop/references/phrases.md
+  s_e6cf9f02ed0ab3::t_bc13d0203f3218 1-128
+.agents/skills/stop-slop/references/structures.md
+  s_e6cf9f02ed0ab3::t_764d03bf5f07e5 1-134
+.agents/skills/tdd/SKILL.md
+  s_e6cf9f02ed0ab3::t_6acdc5e06324ec 1-109
+.agents/skills/tdd/deep-modules.md
+  s_e6cf9f02ed0ab3::t_2c0c449cba6bf0 1-33
+.agents/skills/tdd/interface-design.md
+  s_e6cf9f02ed0ab3::t_b24fa07bc5a76f 1-31
+.agents/skills/tdd/mocking.md
+  s_e6cf9f02ed0ab3::t_b340efec1ab29f 1-59
+.agents/skills/tdd/refactoring.md
+  s_e6cf9f02ed0ab3::t_0f65b44c2d14b3 1-10
+.agents/skills/tdd/tests.md
+  s_e6cf9f02ed0ab3::t_494ccb983a5034 1-61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "49f07d5ede398c7dbd15a47ccfcb3bd7f1487916",
+  "prompts": {},
+  "sessions": {
+    "s_e6cf9f02ed0ab3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ea3-28fc-7120-abc2-b88b6dcc6df8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
