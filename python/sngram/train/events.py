@@ -11,7 +11,7 @@ from pathlib import Path
 # events worth surfacing in the dashboard's recent-events panel. checkpoint is
 # deliberately absent: its status is pinned in the header, so it never crowds
 # out errors/warnings/mints in the tail.
-TAIL_KINDS = frozenset({"error", "warn", "mint", "stall"})
+TAIL_KINDS = frozenset({"error", "warn", "mint", "stall", "stall_end"})
 
 
 class EventLog:

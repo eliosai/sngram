@@ -300,10 +300,14 @@ def test_watchdog_flags_and_clears_stalls(tmp_path: Path):
     ws.last_progress = time.monotonic() - 10_000
     trainer._watchdog()
     assert ws.stalled
-    assert any(e["kind"] == "stall" for e in trainer.events.tail)
+    stall = next(e for e in trainer.events.tail if e["kind"] == "stall")
+    assert stall["stall_count"] == 1
     ws.last_progress = time.monotonic()
     trainer._watchdog()
     assert not ws.stalled
+    end = next(e for e in trainer.events.tail if e["kind"] == "stall_end")
+    assert end["stall_count"] == 1
+    assert end["stalled_s"] >= 0
     trainer.events.close()
 
 
@@ -415,6 +419,14 @@ def test_classify_modern_network_failures():
         "HTTP 500 InternalError",
     ):
         assert classify_error(Exception(msg)) == "transient", msg
+
+
+def test_incomplete_body_byte_counts_are_not_missing():
+    msg = (
+        "RemoteProtocolError: peer closed connection without sending complete "
+        "message body (received 404195355 bytes, expected 511313345)"
+    )
+    assert classify_error(Exception(msg)) == "transient"
 
 
 def test_err_text_is_bounded():

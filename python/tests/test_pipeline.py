@@ -1,6 +1,7 @@
 """Pipeline end-to-end over local parquet fixtures — no network."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import pyarrow as pa
@@ -134,6 +135,29 @@ def test_resume_restores_blend_feedback(tmp_path: Path):
     )
     assert second.state.family_bytes.get("alpha", 0) == first.state.family_bytes["alpha"]
     assert second.state.last_mint_counts == first.state.last_mint_counts
+
+
+def test_run_logs_start_and_family_progress(tmp_path: Path):
+    fam = local_family(tmp_path, "alpha", ["hello world"] * 10, files=1)
+    trainer = run_trainer(tmp_path, [fam], workers=1)
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "bins" / "train-events.jsonl").read_text().splitlines()
+    ]
+
+    start = next(e for e in events if e["kind"] == "run_start")
+    assert start["target"] == parse_size("1GB")
+    assert start["workers"] == 1
+    assert start["queue_depth"] == 4
+    assert start["batch_rows"] == 256
+
+    checkpoint = [e for e in events if e["kind"] == "checkpoint"][-1]
+    assert checkpoint["families"]["alpha"]["bytes"] == trainer.durable_bytes()
+    assert checkpoint["families"]["alpha"]["done"] == 1
+
+    summary = next(e for e in events if e["kind"] == "summary")
+    assert summary["families"]["alpha"]["bytes"] == trainer.durable_bytes()
+    assert summary["families"]["alpha"]["failed"] == 0
 
 
 def test_failed_source_does_not_kill_run(tmp_path: Path):

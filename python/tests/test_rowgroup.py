@@ -112,6 +112,43 @@ def test_in_flight_bytes_settle_to_zero_after_midfile_retry(tmp_path: Path, monk
     assert trainer.total_bytes() == expected      # total == durable, no double count
 
 
+def test_retry_log_keeps_incomplete_body_numbers(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("sngram.train.pipeline.RETRY_BASE_S", 0.01)
+    monkeypatch.setattr("sngram.train.pipeline.RETRY_CAP_S", 0.02)
+    rows = ["hello world"] * 12
+    fam = _rg_family(tmp_path, rows, row_group_size=6)
+    fired = {"x": False}
+    real_open = Trainer._open_parquet
+
+    def patched_open(self, url, ws=None):
+        pf, fh = real_open(self, url, ws)
+
+        class Wrap:
+            schema_arrow = pf.schema_arrow
+            num_row_groups = pf.num_row_groups
+
+            def iter_batches(self_w, *a, row_groups=None, **k):
+                if not fired["x"]:
+                    fired["x"] = True
+                    raise Exception(
+                        "RemoteProtocolError: peer closed connection without sending "
+                        "complete message body (received 404195355 bytes, "
+                        "expected 511313345)"
+                    )
+                yield from pf.iter_batches(*a, row_groups=row_groups, **k)
+
+        return Wrap(), fh
+
+    monkeypatch.setattr(Trainer, "_open_parquet", patched_open)
+    trainer = run_trainer(tmp_path, [fam], workers=1)
+
+    warn = next(e for e in trainer.events.tail if e.get("stage") == "shard")
+    assert warn["error_kind"] == "transient"
+    assert warn["error_type"] == "remoteprotocolerror"
+    assert warn["received_bytes"] == 404195355
+    assert warn["expected_bytes"] == 511313345
+
+
 def test_read_heartbeat_bumps_progress_during_fetch():
     # a worker downloading a large row group (no batch decoded yet) must still
     # look alive to the watchdog: every underlying read advances last_progress

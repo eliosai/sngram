@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import queue
+import re
 import shutil
 import threading
 import time
@@ -47,13 +48,25 @@ RETRY_CAP_S = 60.0
 BOOTSTRAP_MINTS = [100 * 10**9, 500 * 10**9, 10**12]
 
 _TRANSIENT_MARKERS = (
-    "429", "too many requests", "rate limit", "throttl", "timeout", "timed out",
-    "connection", "reset by peer", "broken pipe", "temporarily", "500", "502",
-    "503", "504", "incompleteread", "chunkedencoding", "ssl", "eof occurred",
+    "too many requests", "rate limit", "throttl", "timeout", "timed out",
+    "connection", "reset by peer", "broken pipe", "temporarily",
+    "incompleteread", "chunkedencoding", "ssl", "eof occurred",
     "disconnected", "payload", "slowdown", "serviceunavailable", "internalerror",
     "protocolerror", "remote end closed", "unavailable",
 )
-_NOT_FOUND_MARKERS = ("404", "not found", "does not exist", "gated")
+_TRANSIENT_STATUS_RE = re.compile(r"\b(?:429|500|502|503|504)\b")
+_NOT_FOUND_MARKERS = ("not found", "does not exist", "gated")
+_NOT_FOUND_STATUS_RE = re.compile(r"\b404\b")
+_INCOMPLETE_BODY_RE = re.compile(r"received\s+(\d+)\s+bytes,\s+expected\s+(\d+)")
+_ERROR_TYPES = (
+    "remoteprotocolerror",
+    "chunkedencodingerror",
+    "incompleteread",
+    "serverdisconnectederror",
+    "clientpayloaderror",
+    "connectionreseterror",
+    "timeout",
+)
 
 
 def _chain_text(e: BaseException) -> str:
@@ -72,16 +85,30 @@ def _chain_text(e: BaseException) -> str:
 def classify_error(e: Exception) -> str:
     """transient (retry forever with backoff) | missing (skip) | hard (bounded)."""
     s = _chain_text(e)
-    if any(m in s for m in _NOT_FOUND_MARKERS):
-        return "missing"
-    if any(m in s for m in _TRANSIENT_MARKERS):
+    if any(m in s for m in _TRANSIENT_MARKERS) or _TRANSIENT_STATUS_RE.search(s):
         return "transient"
+    if any(m in s for m in _NOT_FOUND_MARKERS) or _NOT_FOUND_STATUS_RE.search(s):
+        return "missing"
     return "hard"
 
 
 def err_text(e: Exception, limit: int = 400) -> str:
     """Bounded error description for event logs (a 500-page body is not a log line)."""
     return _chain_text(e)[:limit]
+
+
+def error_debug_fields(e: Exception) -> dict[str, object]:
+    """Small structured fields that make retry logs grep-able."""
+    s = _chain_text(e)
+    fields: dict[str, object] = {}
+    for error_type in _ERROR_TYPES:
+        if error_type in s:
+            fields["error_type"] = error_type
+            break
+    if m := _INCOMPLETE_BODY_RE.search(s):
+        fields["received_bytes"] = int(m.group(1))
+        fields["expected_bytes"] = int(m.group(2))
+    return fields
 
 
 def default_workers() -> int:
@@ -251,6 +278,9 @@ class WorkerState:
     started: float = 0.0
     last_progress: float = field(default_factory=time.monotonic)
     stalled: bool = False
+    stall_started: float = 0.0
+    stall_count: int = 0
+    max_silent_s: float = 0.0
 
 
 class Trainer:
@@ -270,6 +300,7 @@ class Trainer:
         self.mint_dir = mint_dir
         self.target = target
         self.limit = limit
+        self.mint_every = mint_every
         self.workers = workers
         self.checkpoint_every_s = checkpoint_every_s
         self.on_refresh = on_refresh
@@ -347,6 +378,21 @@ class Trainer:
 
     def durable_bytes(self) -> int:
         return self.counter.bytes_processed
+
+    def _family_progress(self) -> dict[str, dict[str, int]]:
+        with self._merge_lock:
+            family_bytes = dict(self.state.family_bytes)
+            family_done = dict(self.state.family_done)
+        with self._lock:
+            family_failed = dict(self._family_failed)
+        return {
+            f.id: {
+                "bytes": int(family_bytes.get(f.id, 0)),
+                "done": int(family_done.get(f.id, 0)),
+                "failed": int(family_failed.get(f.id, 0)),
+            }
+            for f in self.families
+        }
 
     # ------------------------------------------------------------- planner
 
@@ -436,12 +482,13 @@ class Trainer:
                 if kind == "missing" or hard >= MAX_HARD_ATTEMPTS or transient >= 8:
                     self.events.log(
                         "error", stage="plan", source=source.id,
-                        error_kind=kind, error=err_text(e),
+                        error_kind=kind, error=err_text(e), **error_debug_fields(e),
                     )
                     return None
                 self.events.log(
                     "warn", stage="plan", source=source.id, error_kind=kind,
                     retry_in_s=round(delay), error=err_text(e),
+                    **error_debug_fields(e),
                 )
                 self.stop.wait(delay)
                 delay = min(delay * 2, RETRY_CAP_S)
@@ -573,8 +620,8 @@ class Trainer:
                 self.events.log("error", stage="worker", worker=wid, error=err_text(e))
             finally:
                 self.queue.task_done()
+                self._clear_stall(wid, ws)
                 ws.task = "idle"
-                ws.stalled = False
 
     def _run_shard(self, ws: WorkerState, task: ShardTask) -> None:
         """Stream one shard (one parquet file) to completion a row group at a
@@ -603,6 +650,10 @@ class Trainer:
         ws.shard_bytes = 0
         ws.started = time.monotonic()
         ws.last_progress = ws.started
+        ws.stalled = False
+        ws.stall_started = 0.0
+        ws.stall_count = 0
+        ws.max_silent_s = 0.0
         while not self.stop.is_set():
             try:
                 url = self._load_source(task.source)[task.shard]
@@ -673,7 +724,8 @@ class Trainer:
                 if task.retries <= 3 or task.retries % 10 == 0:
                     self.events.log(
                         "warn", stage="shard", shard=sid, error_kind=kind,
-                        retries=task.retries, retry_in_s=round(delay), error=err_text(e),
+                        retries=task.retries, retry_in_s=round(delay),
+                        error=err_text(e), **error_debug_fields(e),
                     )
                 ws.task = f"{sid} (retry in {delay:.0f}s)"
                 self.stop.wait(delay)  # interruptible backoff
@@ -698,6 +750,8 @@ class Trainer:
                 shard=sid,
                 bytes=shard_bytes,
                 secs=round(time.monotonic() - ws.started, 1),
+                stall_count=ws.stall_count,
+                max_silent_s=round(ws.max_silent_s),
             )
             return
 
@@ -713,7 +767,8 @@ class Trainer:
         self._mark_family_failed(task.source.family)
         task.accounted = True
         self.events.log(
-            "error", stage="shard", shard=sid, error_kind=kind, error=err_text(e)
+            "error", stage="shard", shard=sid, error_kind=kind,
+            error=err_text(e), **error_debug_fields(e),
         )
 
     def _drop_in_flight(self, ws: WorkerState) -> None:
@@ -724,6 +779,22 @@ class Trainer:
     # ---------------------------------------------------------- supervisor
 
     async def run(self) -> None:
+        self.events.log(
+            "run_start",
+            schema=2,
+            target=self.target,
+            limit=self.limit,
+            mint_every=self.mint_every,
+            workers=self.workers,
+            queue_depth=QUEUE_DEPTH_PER_WORKER * self.workers,
+            batch_rows=BATCH_ROWS,
+            shard_cache_type=SHARD_CACHE_TYPE,
+            shard_block_size=SHARD_BLOCK_SIZE,
+            families=[
+                {"id": f.id, "weight": f.weight, "sources": len(f.sources)}
+                for f in self.families
+            ],
+        )
         loop = asyncio.get_running_loop()
         pool = ThreadPoolExecutor(max_workers=self.workers + 1, thread_name_prefix="sngram")
         futures = [loop.run_in_executor(pool, self._plan)]
@@ -782,6 +853,7 @@ class Trainer:
                     failed_shards=self.failed_shards,
                     rss=rss_bytes(),
                     wall_s=round(time.monotonic() - self.started_at, 1),
+                    families=self._family_progress(),
                 )
             finally:
                 self.events.close()
@@ -832,7 +904,9 @@ class Trainer:
         self.checkpoints_written += 1
         self.disk_free = free
         self.events.log(
-            "checkpoint", bytes=self.durable_bytes(), rss=rss_bytes(), disk_free=free
+            "checkpoint", bytes=self.durable_bytes(), rss=rss_bytes(),
+            disk_free=free, in_flight_bytes=self.in_flight_bytes,
+            families=self._family_progress(),
         )
         if 0 < free < 5 * 10**9:
             self.events.log("warn", stage="disk", free=free)
@@ -847,9 +921,32 @@ class Trainer:
             age = now - ws.last_progress
             if age > STALL_AFTER_S and not ws.stalled:
                 ws.stalled = True
-                self.events.log("stall", worker=i, shard=ws.task, silent_s=round(age))
+                ws.stall_started = now
+                ws.stall_count += 1
+                ws.max_silent_s = max(ws.max_silent_s, age)
+                self.events.log(
+                    "stall", worker=i, shard=ws.task, silent_s=round(age),
+                    stall_count=ws.stall_count, shard_bytes=ws.shard_bytes,
+                )
+            elif age > STALL_AFTER_S:
+                ws.max_silent_s = max(ws.max_silent_s, age)
             elif age <= STALL_AFTER_S:
-                ws.stalled = False
+                self._clear_stall(i, ws)
+
+    def _clear_stall(self, wid: int, ws: WorkerState) -> None:
+        if not ws.stalled:
+            return
+        now = time.monotonic()
+        ws.stalled = False
+        self.events.log(
+            "stall_end",
+            worker=wid,
+            shard=ws.task,
+            stalled_s=round(now - ws.stall_started),
+            max_silent_s=round(ws.max_silent_s),
+            stall_count=ws.stall_count,
+            shard_bytes=ws.shard_bytes,
+        )
 
     def _rate_sample(self) -> None:
         # a 60s window: long enough to smooth the lumps of multi-GB shards
