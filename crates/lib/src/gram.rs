@@ -45,8 +45,14 @@ impl Gram {
     /// Concatenation of two byte strings as one gram, without an intermediate
     /// allocation when the result fits inline.
     #[must_use]
-    #[allow(clippy::indexing_slicing, reason = "a.len() + b.len() <= INLINE_CAP in the inline arm")]
-    #[allow(clippy::cast_possible_truncation, reason = "inline arm length <= INLINE_CAP < 256")]
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "a.len() + b.len() <= INLINE_CAP in the inline arm"
+    )]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "inline arm length <= INLINE_CAP < 256"
+    )]
     pub fn concat(a: &[u8], b: &[u8]) -> Self {
         let n = a.len() + b.len();
         if n <= INLINE_CAP {
@@ -82,8 +88,14 @@ impl Gram {
 }
 
 impl From<&[u8]> for Gram {
-    #[allow(clippy::indexing_slicing, reason = "bytes.len() <= INLINE_CAP in the inline arm")]
-    #[allow(clippy::cast_possible_truncation, reason = "inline arm length <= INLINE_CAP < 256")]
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "bytes.len() <= INLINE_CAP in the inline arm"
+    )]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "inline arm length <= INLINE_CAP < 256"
+    )]
     fn from(bytes: &[u8]) -> Self {
         if bytes.len() <= INLINE_CAP {
             let mut buf = [0u8; INLINE_CAP];

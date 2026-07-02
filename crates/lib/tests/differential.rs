@@ -154,7 +154,9 @@ fn inputs() -> Vec<(String, Vec<u8>)> {
     for len in [300usize, 2000] {
         out.push((
             format!("alpha4_{len}"),
-            (0..len).map(|_| b'a' + (rng.next_u32() % 4) as u8).collect(),
+            (0..len)
+                .map(|_| b'a' + (rng.next_u32() % 4) as u8)
+                .collect(),
         ));
     }
     // uniform bytes, runs longer than MAX_LEN
@@ -210,8 +212,13 @@ fn scan_matches_reference_exactly() {
                 expected.push((s, e, direct_hash(&content[s..e])));
             });
             let mut got = Vec::new();
-            sngram::scan(&table, &Content::new(&content), |s, e, h| got.push((s, e, h)));
-            assert_eq!(got, expected, "scan diverged on table={tname} input={iname}");
+            sngram::scan(&table, &Content::new(&content), |s, e, h| {
+                got.push((s, e, h))
+            });
+            assert_eq!(
+                got, expected,
+                "scan diverged on table={tname} input={iname}"
+            );
             cases += 1;
         }
     }
@@ -303,7 +310,6 @@ fn eviction_path_is_exercised() {
         }
     });
     let content: Vec<u8> = (0u8..=200).collect();
-    let mut depth = 0usize;
     let mut max_depth = 0usize;
     let mut stack: Vec<(usize, u32)> = Vec::new();
     for i in 0..content.len() - 1 {
@@ -318,8 +324,7 @@ fn eviction_path_is_exercised() {
             }
         }
         stack.push((i, w));
-        depth = stack.len();
-        max_depth = max_depth.max(depth);
+        max_depth = max_depth.max(stack.len());
     }
     assert!(
         max_depth > STACK_CAP,

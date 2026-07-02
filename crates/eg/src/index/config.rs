@@ -13,7 +13,7 @@ pub(crate) enum IndexMode {
 
 impl Default for IndexMode {
     fn default() -> IndexMode {
-        IndexMode::NoIndex
+        IndexMode::Auto
     }
 }
 
@@ -27,6 +27,8 @@ impl IndexMode {
 /// Index backend selected by the user.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IndexBackend {
+    /// eg's compact mmap-backed postings index.
+    Postings,
     /// Tantivy on disk, using its mmap-backed directory.
     Tantivy,
     /// Tantivy in memory. This is for benchmark isolation.
@@ -35,7 +37,7 @@ pub(crate) enum IndexBackend {
 
 impl Default for IndexBackend {
     fn default() -> IndexBackend {
-        IndexBackend::Tantivy
+        IndexBackend::Postings
     }
 }
 

@@ -118,7 +118,11 @@ fn emit_hashed(
 ) {
     let len = end - start;
     if (MIN_LEN..=MAX_LEN).contains(&len) {
-        let h_before = if start == 0 { 0 } else { ring[(start - 1) & RING_MASK] };
+        let h_before = if start == 0 {
+            0
+        } else {
+            ring[(start - 1) & RING_MASK]
+        };
         emit(start, end, hashing::from_prefixes(h_end, h_before, len));
     }
 }
@@ -289,7 +293,11 @@ fn emit_window(
 ) {
     let len = end - start;
     if (MIN_LEN..=MAX_LEN).contains(&len) {
-        let h_before = if start == 0 { 0 } else { ring[(start - 1) & RING_MASK] };
+        let h_before = if start == 0 {
+            0
+        } else {
+            ring[(start - 1) & RING_MASK]
+        };
         emit(
             &window[start - base..end - base],
             hashing::from_prefixes(h_end, h_before, len),
@@ -331,7 +339,10 @@ impl StreamScanner<'_> {
 /// Covering grams of a single literal, as raw bytes. The query analysis ANDs
 /// these per literal: a document containing `literal` contains all of them
 /// (`cover(L) ⊆ scan(D)` for any `D ⊇ L`), so none is a false negative.
-#[allow(clippy::indexing_slicing, reason = "cover emits start..end within literal")]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "cover emits start..end within literal"
+)]
 #[must_use]
 pub fn cover_one(table: &WeightTable, literal: &[u8]) -> Vec<Gram> {
     let mut grams = Vec::new();

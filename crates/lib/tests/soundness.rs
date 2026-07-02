@@ -42,11 +42,11 @@ fn satisfies(plan: &QueryPlan, grams: &HashSet<Vec<u8>>) -> bool {
         QueryPlan::And { grams: g, sub } => {
             g.iter().all(|x| grams.contains(x.as_bytes()))
                 && sub.iter().all(|s| satisfies(s, grams))
-        }
+        },
         QueryPlan::Or { grams: g, sub } => {
             g.iter().any(|x| grams.contains(x.as_bytes()))
                 || sub.iter().any(|s| satisfies(s, grams))
-        }
+        },
     }
 }
 
@@ -59,7 +59,12 @@ fn index_grams(t: &WeightTable, doc: &[u8]) -> HashSet<Vec<u8>> {
 }
 
 /// Assert no document the oracle matches is rejected by the plan.
-fn assert_no_false_negative(t: &WeightTable, re: &str, docs: &[&[u8]], indexed: &[HashSet<Vec<u8>>]) {
+fn assert_no_false_negative(
+    t: &WeightTable,
+    re: &str,
+    docs: &[&[u8]],
+    indexed: &[HashSet<Vec<u8>>],
+) {
     let plan = query(t, &Pattern::new(re).expect("pattern parses"));
     if plan == QueryPlan::All {
         return; // too broad to prefilter; the caller scans instead
@@ -157,8 +162,19 @@ fn words(max: usize) -> Vec<Vec<u8>> {
 /// and classes over {a,b,c}.
 fn sweep_patterns() -> Vec<String> {
     let mut pats: Vec<String> = [
-        "abc", "abca", "a.c", "ab.ab", "abc|bca", "a(bc|ca)b", "abc.*abc", "a+bc", "ab?cabc",
-        "[ab]cabc", "abcabc", "(abc)+", "ca(b|c)ca",
+        "abc",
+        "abca",
+        "a.c",
+        "ab.ab",
+        "abc|bca",
+        "a(bc|ca)b",
+        "abc.*abc",
+        "a+bc",
+        "ab?cabc",
+        "[ab]cabc",
+        "abcabc",
+        "(abc)+",
+        "ca(b|c)ca",
     ]
     .iter()
     .map(|s| (*s).to_string())

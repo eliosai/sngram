@@ -38,10 +38,11 @@ mod extract;
 mod gram;
 mod hashing;
 
+pub use error::QueryError;
 #[doc(inline)]
 pub use extract::StreamScanner;
-pub use error::QueryError;
 pub use gram::Gram;
+pub use hashing::hash_bytes;
 pub use pattern::Pattern;
 pub use plan::QueryPlan;
 
@@ -407,5 +408,4 @@ mod tests {
         });
         assert_eq!(from_reader, from_scan);
     }
-
 }

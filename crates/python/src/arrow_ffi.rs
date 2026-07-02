@@ -18,7 +18,11 @@ use sngram::learn::LocalTally;
 
 /// Count all string/binary columns of `data` into `tally`, per row.
 /// Returns the number of text bytes counted by this call.
-pub fn count_arrow(py: Python<'_>, data: &Bound<'_, PyAny>, tally: &mut LocalTally) -> PyResult<u64> {
+pub fn count_arrow(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    tally: &mut LocalTally,
+) -> PyResult<u64> {
     let before = tally.bytes();
     if data.hasattr("__arrow_c_stream__")? {
         count_stream(py, data, tally)?;
@@ -43,7 +47,10 @@ fn count_stream(py: Python<'_>, data: &Bound<'_, PyAny>, tally: &mut LocalTally)
     // SAFETY: the capsule contract hands us an owned FFI_ArrowArrayStream;
     // from_raw moves it out and leaves a released struct for the capsule's
     // destructor, so it is consumed exactly once.
-    #[allow(unsafe_code, reason = "Arrow PyCapsule ownership transfer, per protocol")]
+    #[allow(
+        unsafe_code,
+        reason = "Arrow PyCapsule ownership transfer, per protocol"
+    )]
     let mut reader = unsafe {
         ArrowArrayStreamReader::from_raw(
             capsule
@@ -75,7 +82,10 @@ fn count_array(py: Python<'_>, data: &Bound<'_, PyAny>, tally: &mut LocalTally) 
 
     // SAFETY: same ownership contract as the stream path — each struct is
     // moved out of its capsule once, leaving an empty/released struct behind.
-    #[allow(unsafe_code, reason = "Arrow PyCapsule ownership transfer, per protocol")]
+    #[allow(
+        unsafe_code,
+        reason = "Arrow PyCapsule ownership transfer, per protocol"
+    )]
     let array_data = {
         let schema_ptr = schema_capsule
             .pointer_checked(Some(c"arrow_schema"))?
@@ -105,7 +115,10 @@ fn count_batch(py: Python<'_>, batch: &RecordBatch, tally: &mut LocalTally) {
     });
 }
 
-#[allow(clippy::too_many_lines, reason = "one arm per supported arrow text type")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm per supported arrow text type"
+)]
 fn count_column(col: &dyn Array, tally: &mut LocalTally) {
     use arrow_array::{
         BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, StringArray,

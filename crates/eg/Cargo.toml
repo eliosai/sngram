@@ -14,7 +14,15 @@ grep = "0.4.1"
 ignore = "0.4.24"
 lexopt = "0.3.0"
 log = "0.4.5"
+rayon = "1.10.0"
+memmap2 = "0.9"
+regex-syntax = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.23"
+sngram = { workspace = true }
+sngram-types = { workspace = true }
+sngram-weights = { workspace = true, features = ["5tb"] }
+tantivy = "0.26.1"
 textwrap = { version = "0.16.2", default-features = false }
 termcolor = "1.4.1"
 

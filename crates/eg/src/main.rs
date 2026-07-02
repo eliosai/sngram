@@ -415,7 +415,7 @@ fn special(mode: crate::flags::SpecialMode) -> anyhow::Result<ExitCode> {
 /// We only show this error message when the user does *not* provide an
 /// explicit path to search. This is because the message can otherwise be
 /// noisy, e.g., when it is intended that there is nothing to search.
-fn eprint_nothing_searched() {
+pub(crate) fn eprint_nothing_searched() {
     err_message!(
         "No files were searched, which means elgrep probably \
          applied a filter you didn't expect.\n\
@@ -435,7 +435,7 @@ fn eprint_nothing_searched() {
 /// whether stats fail to print or not generally shouldn't cause ripgrep to
 /// enter into an "error" state. And usually the only way for this to fail is
 /// if writing to stdout itself fails.
-fn print_stats<W: Write>(
+pub(crate) fn print_stats<W: Write>(
     mode: SearchMode,
     stats: &grep::printer::Stats,
     started: std::time::Instant,

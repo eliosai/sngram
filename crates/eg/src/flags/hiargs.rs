@@ -60,6 +60,7 @@ pub(crate) struct HiArgs {
     hyperlink_config: grep::printer::HyperlinkConfig,
     ignore_file_case_insensitive: bool,
     index: IndexConfig,
+    index_mmap: bool,
     ignore_file: Vec<PathBuf>,
     include_zero: bool,
     invert_match: bool,
@@ -278,6 +279,7 @@ impl HiArgs {
             ignore_file: low.ignore_file,
             ignore_file_case_insensitive: low.ignore_file_case_insensitive,
             index: low.index,
+            index_mmap: !matches!(low.mmap, MmapMode::Never),
             include_zero: low.include_zero,
             invert_match: low.invert_match,
             is_terminal_stdout: state.is_terminal_stdout,
@@ -350,6 +352,11 @@ impl HiArgs {
         self.paths.has_implicit_path
     }
 
+    /// Returns the current working directory captured during argument parsing.
+    pub(crate) fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
     /// Return a properly configured builder for constructing haystacks.
     ///
     /// The builder can be used to turn a directory entry (from the `ignore`
@@ -363,6 +370,120 @@ impl HiArgs {
     /// Return eg index configuration.
     pub(crate) fn index(&self) -> &IndexConfig {
         &self.index
+    }
+
+    /// Returns true when patterns should be treated as fixed strings.
+    pub(crate) fn fixed_strings(&self) -> bool {
+        self.fixed_strings
+    }
+
+    /// Returns true when index planning should use case-insensitive constraints.
+    pub(crate) fn indexed_case_insensitive(&self) -> bool {
+        match self.case {
+            CaseMode::Sensitive => false,
+            CaseMode::Insensitive => true,
+            CaseMode::Smart => self
+                .patterns
+                .patterns
+                .iter()
+                .all(|pattern| !pattern.chars().any(char::is_uppercase)),
+        }
+    }
+
+    /// Returns true when a non-default regex engine may be used.
+    pub(crate) fn non_default_regex_engine(&self) -> bool {
+        !matches!(self.engine, EngineChoice::Default)
+    }
+
+    /// Returns true when the searcher decodes through an explicit encoding.
+    pub(crate) fn explicit_encoding(&self) -> bool {
+        matches!(self.encoding, EncodingMode::Some(_))
+    }
+
+    /// Returns true when a preprocessor command is configured.
+    pub(crate) fn has_preprocessor(&self) -> bool {
+        self.pre.is_some()
+    }
+
+    /// Returns true when compressed archives should be searched.
+    pub(crate) fn search_zip(&self) -> bool {
+        self.search_zip
+    }
+
+    /// Returns true when indexed scanning may use mmap.
+    pub(crate) fn index_mmap(&self) -> bool {
+        self.index_mmap
+    }
+
+    /// Returns true when Unicode regex semantics are disabled.
+    pub(crate) fn no_unicode(&self) -> bool {
+        self.no_unicode
+    }
+
+    /// Return a fingerprint for arguments that affect the indexed file set or
+    /// document ordinal order.
+    pub(crate) fn index_walk_fingerprint(&self) -> u64 {
+        fn write_part(hash: &mut u64, part: impl std::fmt::Debug) {
+            for byte in format!("{part:?}\n").bytes() {
+                *hash = (*hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        write_part(&mut hash, &self.paths.paths);
+        write_part(&mut hash, self.paths.has_implicit_path);
+        write_part(&mut hash, self.follow);
+        write_part(&mut hash, &self.globs);
+        write_part(&mut hash, self.hidden);
+        write_part(&mut hash, self.ignore_file_case_insensitive);
+        write_part(&mut hash, &self.ignore_file);
+        write_part(&mut hash, self.max_depth);
+        write_part(&mut hash, self.max_filesize);
+        write_part(&mut hash, self.no_ignore_dot);
+        write_part(&mut hash, self.no_ignore_exclude);
+        write_part(&mut hash, self.no_ignore_files);
+        write_part(&mut hash, self.no_ignore_global);
+        write_part(&mut hash, self.no_ignore_parent);
+        write_part(&mut hash, self.no_ignore_vcs);
+        write_part(&mut hash, self.no_require_git);
+        write_part(&mut hash, self.one_file_system);
+        write_part(&mut hash, &self.sort);
+        write_part(&mut hash, &self.types);
+        hash
+    }
+
+    /// Returns true when Git status can conservatively accelerate freshness.
+    pub(crate) fn index_git_freshness_safe(&self) -> bool {
+        self.ignore_file.is_empty()
+            && !self.follow
+            && self.max_filesize.is_none()
+            && !self.no_ignore_dot
+            && !self.no_ignore_exclude
+            && !self.no_ignore_files
+            && !self.no_ignore_global
+            && !self.no_ignore_parent
+            && !self.no_ignore_vcs
+            && !self.no_require_git
+    }
+
+    /// Returns true when matches should be inverted.
+    pub(crate) fn invert_match(&self) -> bool {
+        self.invert_match
+    }
+
+    /// Returns true when zero-count summaries should be printed.
+    pub(crate) fn include_zero(&self) -> bool {
+        self.include_zero
+    }
+
+    /// Returns true when every line should be printed around matches.
+    pub(crate) fn passthru(&self) -> bool {
+        matches!(self.context, ContextMode::Passthru)
+    }
+
+    /// Return the search patterns compiled from positional, `-e`, and `-f` inputs.
+    pub(crate) fn patterns(&self) -> &[String] {
+        &self.patterns.patterns
     }
 
     /// Return the matcher that should be used for searching using the engine
@@ -842,6 +963,11 @@ impl HiArgs {
     /// determine how many threads to spawn.
     pub(crate) fn threads(&self) -> usize {
         self.threads
+    }
+
+    /// Return the paths supplied to the directory walker.
+    pub(crate) fn search_paths(&self) -> &[PathBuf] {
+        &self.paths.paths
     }
 
     /// Returns the file type matcher that was built.

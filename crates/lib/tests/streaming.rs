@@ -30,7 +30,12 @@ fn crc_table() -> WeightTable {
     let mut buf = vec![0u8; TABLE_BINARY_SIZE];
     for c1 in 0u16..256 {
         for c2 in 0u16..256 {
-            set_weight(&mut buf, c1 as u8, c2 as u8, crc32fast::hash(&[c1 as u8, c2 as u8]));
+            set_weight(
+                &mut buf,
+                c1 as u8,
+                c2 as u8,
+                crc32fast::hash(&[c1 as u8, c2 as u8]),
+            );
         }
     }
     finish(buf)

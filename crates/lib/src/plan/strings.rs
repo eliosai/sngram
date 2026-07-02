@@ -78,7 +78,9 @@ impl StringSet {
     pub fn clean(&mut self, order: Order) {
         match order {
             Order::Prefix => self.0.sort_unstable(),
-            Order::Suffix => self.0.sort_unstable_by(|a, b| cmp_suffix(a.as_bytes(), b.as_bytes())),
+            Order::Suffix => self
+                .0
+                .sort_unstable_by(|a, b| cmp_suffix(a.as_bytes(), b.as_bytes())),
         }
         self.0.dedup();
     }
@@ -134,7 +136,7 @@ fn cmp_suffix(a: &[u8], b: &[u8]) -> core::cmp::Ordering {
         ia -= 1;
         ib -= 1;
         match a[ia].cmp(&b[ib]) {
-            core::cmp::Ordering::Equal => {}
+            core::cmp::Ordering::Equal => {},
             other => return other,
         }
     }

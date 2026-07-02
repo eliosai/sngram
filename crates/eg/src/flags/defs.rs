@@ -3414,20 +3414,22 @@ impl Flag for IndexBackendFlag {
     fn doc_long(&self) -> &'static str {
         r"
 Select the backend used by eg's sparse n-gram index. \fBtantivy\fP uses
-Tantivy's mmap-backed on-disk directory. \fBtantivy-ram\fP uses Tantivy's
-in-memory directory for benchmark isolation.
+\fBeg\fP's compact mmap-backed postings index. \fBtantivy\fP uses Tantivy's
+mmap-backed on-disk directory. \fBtantivy-ram\fP uses Tantivy's in-memory
+directory for benchmark isolation.
 "
     }
     fn doc_choices(&self) -> &'static [&'static str] {
-        &["tantivy", "tantivy-ram"]
+        &["postings", "tantivy", "tantivy-ram"]
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         args.index.backend = match convert::str(&v.unwrap_value())? {
+            "postings" => IndexBackend::Postings,
             "tantivy" => IndexBackend::Tantivy,
             "tantivy-ram" => IndexBackend::TantivyRam,
             other => anyhow::bail!(
-                "unrecognized index backend '{other}', expected tantivy or tantivy-ram"
+                "unrecognized index backend '{other}', expected postings, tantivy or tantivy-ram"
             ),
         };
         if args.index.mode.is_no_index() {

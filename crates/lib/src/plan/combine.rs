@@ -125,15 +125,15 @@ fn alternate_sets(xy: &mut RegexpInfo, x: &RegexpInfo, y: &RegexpInfo) {
         (Some(xe), None) => {
             xy.prefix = xe.clone().union(&y.prefix, Order::Prefix);
             xy.suffix = xe.clone().union(&y.suffix, Order::Suffix);
-        }
+        },
         (None, Some(ye)) => {
             xy.prefix = x.prefix.clone().union(ye, Order::Prefix);
             xy.suffix = x.suffix.clone().union(ye, Order::Suffix);
-        }
+        },
         (None, None) => {
             xy.prefix = x.prefix.clone().union(&y.prefix, Order::Prefix);
             xy.suffix = x.suffix.clone().union(&y.suffix, Order::Suffix);
-        }
+        },
     }
 }
 

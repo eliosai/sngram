@@ -27,13 +27,13 @@ mod tests {
     /// Gather every gram referenced anywhere in a plan.
     fn collect_grams(plan: &QueryPlan, out: &mut Vec<Vec<u8>>) {
         match plan {
-            QueryPlan::All | QueryPlan::None => {}
+            QueryPlan::All | QueryPlan::None => {},
             QueryPlan::And { grams, sub } | QueryPlan::Or { grams, sub } => {
                 out.extend(grams.iter().map(|g| g.as_bytes().to_vec()));
                 for s in sub {
                     collect_grams(s, out);
                 }
-            }
+            },
         }
     }
 

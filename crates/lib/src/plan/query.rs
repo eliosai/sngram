@@ -198,7 +198,10 @@ fn factor(mut q: Query, mut r: Query, op: Op) -> Query {
 /// Remove the grams present in both sets and return them, leaving each input
 /// with only its own grams. Both are [`Order::Prefix`]-cleaned, so one merge
 /// walk finds the intersection.
-#[allow(clippy::indexing_slicing, reason = "qi, ri stay below the lengths checked")]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "qi, ri stay below the lengths checked"
+)]
 fn split_common(q: &mut StringSet, r: &mut StringSet) -> StringSet {
     let qs = std::mem::take(q).into_vec();
     let rs = std::mem::take(r).into_vec();
@@ -212,7 +215,7 @@ fn split_common(q: &mut StringSet, r: &mut StringSet) -> StringSet {
                 common.push(qs[qi].clone());
                 qi += 1;
                 ri += 1;
-            }
+            },
         }
     }
     drain_rest(q, &qs, qi);
@@ -324,7 +327,10 @@ mod tests {
         let right = gram(b"abc").or(gram(b"ghi"));
         let actual = left.and(right);
         // Common "abc" implies each side, so the AND collapses to "abc".
-        assert!(grams_imply(&StringSet::of(crate::gram::Gram::from(&b"abc"[..])), &actual));
+        assert!(grams_imply(
+            &StringSet::of(crate::gram::Gram::from(&b"abc"[..])),
+            &actual
+        ));
     }
 
     #[test]

@@ -47,14 +47,21 @@ impl Default for LocalTally {
 impl LocalTally {
     /// Fresh tally with all counts zero.
     #[must_use]
-    #[allow(clippy::expect_used, clippy::missing_panics_doc,
-        reason = "Vec has exactly PAIR_COUNT elements; cannot fail")]
+    #[allow(
+        clippy::expect_used,
+        clippy::missing_panics_doc,
+        reason = "Vec has exactly PAIR_COUNT elements; cannot fail"
+    )]
     pub fn new() -> Self {
         let counts = vec![0u32; PAIR_COUNT]
             .into_boxed_slice()
             .try_into()
             .expect("PAIR_COUNT elements");
-        Self { counts, pairs: 0, bytes: 0 }
+        Self {
+            counts,
+            pairs: 0,
+            bytes: 0,
+        }
     }
 
     /// Count every overlapping byte pair in one value's bytes.
@@ -109,8 +116,11 @@ impl Default for BigramCounter {
 impl BigramCounter {
     /// Fresh counter with all counts zero.
     #[must_use]
-    #[allow(clippy::expect_used, clippy::missing_panics_doc,
-        reason = "exactly PAIR_COUNT elements collected; cannot fail")]
+    #[allow(
+        clippy::expect_used,
+        clippy::missing_panics_doc,
+        reason = "exactly PAIR_COUNT elements collected; cannot fail"
+    )]
     pub fn new() -> Self {
         let counts: Box<[AtomicU64; PAIR_COUNT]> = (0..PAIR_COUNT)
             .map(|_| AtomicU64::new(0))
@@ -135,8 +145,10 @@ impl BigramCounter {
                 self.counts[idx].fetch_add(u64::from(n), Ordering::Relaxed);
             }
         }
-        self.pairs_processed.fetch_add(tally.pairs, Ordering::Relaxed);
-        self.bytes_processed.fetch_add(tally.bytes, Ordering::Relaxed);
+        self.pairs_processed
+            .fetch_add(tally.pairs, Ordering::Relaxed);
+        self.bytes_processed
+            .fetch_add(tally.bytes, Ordering::Relaxed);
     }
 
     /// Count one value's bytes directly (convenience over a one-shot tally).
@@ -191,7 +203,10 @@ impl BigramCounter {
     /// Snapshot all `PAIR_COUNT` counts in index order — for checkpointing.
     #[must_use]
     pub fn counts_vec(&self) -> Vec<u64> {
-        self.counts.iter().map(|c| c.load(Ordering::Relaxed)).collect()
+        self.counts
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .collect()
     }
 
     /// Add `n` to one byte pair's count — for checkpoint restore.
@@ -402,20 +417,30 @@ mod tests {
         for row in corpus {
             c.process(row);
         }
-        assert_eq!(c.pairs_processed(), total, "pair total must match reference");
+        assert_eq!(
+            c.pairs_processed(),
+            total,
+            "pair total must match reference"
+        );
 
         let table = WeightTable::from_bytes(&c.to_table_bytes()).unwrap();
         for c1 in 0u8..=255 {
             for c2 in 0u8..=255 {
                 let count = counts.get(&(c1, c2)).copied().unwrap_or(0);
-                assert_eq!(table.weight(c1, c2), expected_weight(total, count), "weight ({c1},{c2})");
+                assert_eq!(
+                    table.weight(c1, c2),
+                    expected_weight(total, count),
+                    "weight ({c1},{c2})"
+                );
             }
         }
     }
 
     #[allow(clippy::cast_possible_truncation, reason = "min() clamps to u32 range")]
     fn expected_weight(total: u64, count: u64) -> u32 {
-        total.checked_div(count).map_or(u32::MAX, |w| w.min(u64::from(u32::MAX)) as u32)
+        total
+            .checked_div(count)
+            .map_or(u32::MAX, |w| w.min(u64::from(u32::MAX)) as u32)
     }
 
     fn tally_ab(n: usize) -> LocalTally {

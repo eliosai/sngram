@@ -51,7 +51,10 @@ pub const fn step(h: u64, byte: u8) -> u64 {
 /// or leading zero bytes cannot collide — the property a length prefix gave
 /// the old std-`Hash` path.
 #[inline]
-#[allow(clippy::indexing_slicing, reason = "emitted gram lengths are <= MAX_LEN")]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "emitted gram lengths are <= MAX_LEN"
+)]
 pub const fn from_prefixes(h_end: u64, h_before_start: u64, len: usize) -> u64 {
     mix(h_end.wrapping_sub(h_before_start.wrapping_sub(1).wrapping_mul(POW[len])))
 }

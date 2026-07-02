@@ -71,7 +71,7 @@ impl<'a> Analyzer<'a> {
                 let mut info = demote_plus(self.analyze(&rep.sub));
                 self.simplify(&mut info, false);
                 info
-            }
+            },
         }
     }
 
@@ -90,7 +90,7 @@ impl<'a> Analyzer<'a> {
                     };
                 }
                 info
-            }
+            },
         }
     }
 }
@@ -153,7 +153,7 @@ fn class_set(cls: &Class) -> ClassSet {
                 .map(|r| (r.start() as u32, r.end() as u32))
                 .collect();
             enumerate(&ranges, encode_char)
-        }
+        },
         Class::Bytes(cb) => {
             let ranges: Vec<(u32, u32)> = cb
                 .ranges()
@@ -161,15 +161,12 @@ fn class_set(cls: &Class) -> ClassSet {
                 .map(|r| (u32::from(r.start()), u32::from(r.end())))
                 .collect();
             enumerate(&ranges, encode_byte)
-        }
+        },
     }
 }
 
 fn enumerate(ranges: &[(u32, u32)], encode: fn(u32) -> Option<Gram>) -> ClassSet {
-    let count: u64 = ranges
-        .iter()
-        .map(|&(lo, hi)| u64::from(hi - lo) + 1)
-        .sum();
+    let count: u64 = ranges.iter().map(|&(lo, hi)| u64::from(hi - lo) + 1).sum();
     if count == 0 {
         return ClassSet::Empty;
     }

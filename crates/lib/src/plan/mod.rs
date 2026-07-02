@@ -253,7 +253,11 @@ mod tests {
     fn nested_alternations_both_survive() {
         let plan = plan_of("(z*abcz*defz*)(z*(ghi|jkl)z*)");
         assert!(has_or(&plan), "alternation lost in {}", shape(&plan));
-        assert!(shape(&plan).contains('&'), "concat lost in {}", shape(&plan));
+        assert!(
+            shape(&plan).contains('&'),
+            "concat lost in {}",
+            shape(&plan)
+        );
     }
 
     #[test]
