@@ -174,34 +174,90 @@ impl<'a> Analyzer<'a> {
 
     /// `x?`, `x*`, `x+`, `x{n,m}`: expand what is bounded, collapse the rest.
     ///
-    /// A small bounded repetition enumerates exactly: `x{2,4}` is
-    /// `xx|xxx|xxxx`. An unbounded (or large) one expands its minimum:
-    /// `x{n,}` matches `x`ⁿ⁻¹ concatenated with one-or-more `x`, so up to
+    /// When the base analyzes to a small exact set `E` and the closed
+    /// repetition's *whole* language stays within [`MAX_EXACT`]/
+    /// [`MAX_EXACT_BYTES`], it is expanded to that exact string set even above
+    /// [`MAX_REPEAT_EXPAND`] (see [`Self::expand_exact`]): `x{5}` becomes exact
+    /// `xxxxx`, `h{3,5}` becomes `{hhh, hhhh, hhhhh}`. The guard is on the
+    /// projected set size, not the pattern shape, so a class-heavy base like
+    /// `[0-9a-f]{16}` (16¹⁶ strings) folds early exactly as before.
+    ///
+    /// Otherwise a small `m` enumerates its allowed counts; an unbounded (or
+    /// large) minimum expands: `x{n,}` matches `x`ⁿ⁻ᵏ concatenated with `x{k,}`
+    /// — the open tail `x{k,}` is `x{k} | x{k+1,}`, so up to
     /// [`MAX_REPEAT_EXPAND`] leading copies are analyzed as an explicit
-    /// concatenation and the rest fold into the `x+` form.
+    /// concatenation and the rest fold into the `x+` form, keeping a full copy
+    /// on both edges of the run.
     fn repetition(&self, rep: &Repetition) -> RegexpInfo {
-        match (rep.min, rep.max) {
-            (min, Some(max)) if max <= MAX_REPEAT_EXPAND => self.enumerate_counts(rep, min, max),
-            (0, _) => RegexpInfo::any_match(),
-            (min, max) => self.expand_minimum(rep, min, max == Some(min)),
+        let (min, max) = (rep.min, rep.max);
+        if min == 0 && max.is_none() {
+            return RegexpInfo::any_match(); // `x*`, `x{0,}`
         }
+        let base = self.analyze(&rep.sub);
+        if let Some(max) = max {
+            if let Some(info) = self.expand_exact(&base, min, max) {
+                return info;
+            }
+            if max <= MAX_REPEAT_EXPAND {
+                return self.enumerate_counts(&base, min, max);
+            }
+        }
+        if min == 0 {
+            // Closed with a large `m` (or an open tail) over a base too wide to
+            // enumerate exactly, and optional: no useful gram survives.
+            return RegexpInfo::any_match();
+        }
+        self.expand_from(&base, min, max == Some(min))
     }
 
-    /// `x{n,m}` with small `m`: the alternation of every allowed count.
-    fn enumerate_counts(&self, rep: &Repetition, min: u32, max: u32) -> RegexpInfo {
-        let base = self.analyze(&rep.sub);
+    /// Fully expand a *closed* repetition `x{n,m}` whose base is a small exact
+    /// set into its exact string language `⋃ₖ₌ₙᵐ Eᵏ`, when that language stays
+    /// within [`MAX_EXACT`] strings and [`MAX_EXACT_BYTES`] bytes.
+    ///
+    /// `Eᵏ` is the `k`-fold cross product of the base's exact set `E`, i.e. the
+    /// exact language of `x` repeated `k` times; the union over `k ∈ [n, m]` is
+    /// the exact language of `x{n,m}` — no over- or under-approximation, so it
+    /// is sound by construction. Returns `None` (falling back to the copy/demote
+    /// machinery) for an open repetition, a non-exact base, or a projected set
+    /// that would exceed the guard while it is being built.
+    ///
+    /// The result adopts a blank (`All`) match query, dropping `base.match_`.
+    /// That is sound only when the base carries no gram constraint of its own —
+    /// which a surviving exact set always satisfies, since flushing an exact set
+    /// into the match query is exactly what discards it. The `weight == 0` guard
+    /// makes the invariant explicit: a base with real match grams (which cannot
+    /// legitimately co-exist with an exact set) falls back to the copy
+    /// machinery, where `concat` ANDs `base.match_` into every copy.
+    fn expand_exact(&self, base: &RegexpInfo, min: u32, max: u32) -> Option<RegexpInfo> {
+        let exact = base.exact.as_ref().filter(|e| !e.is_empty())?;
+        if base.match_.weight() != 0 {
+            return None;
+        }
+        let set = bounded_power_union(exact, min, max)?;
+        let mut info = RegexpInfo {
+            can_empty: set.as_slice().iter().any(|s| s.is_empty()),
+            exact: Some(set),
+            ..RegexpInfo::blank()
+        };
+        self.simplify(&mut info, false);
+        Some(info)
+    }
+
+    /// `x{n,m}` with small `m` and a base too wide to expand exactly: the
+    /// alternation of every allowed count.
+    fn enumerate_counts(&self, base: &RegexpInfo, min: u32, max: u32) -> RegexpInfo {
         let total: u32 = (min..=max).sum();
-        if self.affordable_copies(&base, total) < total {
+        if self.affordable_copies(base, total) < total {
             return if min == 0 {
                 RegexpInfo::any_match()
             } else {
-                self.expand_from(&base, min, false)
+                self.expand_from(base, min, false)
             };
         }
         self.spend(base.match_.weight().saturating_mul(total as usize));
         let mut info: Option<RegexpInfo> = None;
         for k in min..=max {
-            let mut power = self.power(&base, k);
+            let mut power = self.power(base, k);
             self.flush_sets(&mut power);
             info = Some(match info {
                 None => power,
@@ -209,14 +265,6 @@ impl<'a> Analyzer<'a> {
             });
         }
         info.unwrap_or_else(RegexpInfo::no_match)
-    }
-
-    /// `x{n}`, `x{n,}`, `x{n,m}` with large `m`: expand up to
-    /// [`MAX_REPEAT_EXPAND`] leading copies; unless the count is exact and
-    /// fully expanded, the last copy folds the rest as one-or-more `x`.
-    fn expand_minimum(&self, rep: &Repetition, min: u32, exact_count: bool) -> RegexpInfo {
-        let base = self.analyze(&rep.sub);
-        self.expand_from(&base, min, exact_count)
     }
 
     /// Expand an already-analyzed base to as many copies as
@@ -312,12 +360,50 @@ impl<'a> Analyzer<'a> {
 
 /// `x+`: at least one `x`, so prefixes and suffixes survive but the whole is
 /// no longer an exact set.
+///
+/// When the base is a small exact set `E`, the demoted `E+` records `E` as its
+/// [`RegexpInfo::plus_base`] so the enclosing concat can tighten the seam where
+/// the run meets a neighbour: `E` alone is an exhaustive prefix/suffix, but an
+/// exhaustive OR-set gains nothing from padding it with longer members (the
+/// short `E` member still covers every match), so the second boundary byte can
+/// only be pinned down at the cross, not in the set. A non-exact base carries
+/// no `plus_base`: its language is not a finite set to cross with.
 fn demote_plus(mut info: RegexpInfo) -> RegexpInfo {
     if let Some(exact) = info.exact.take() {
         info.prefix = exact.clone();
-        info.suffix = exact;
+        info.suffix = exact.clone();
+        info.plus_base = Some(exact);
     }
     info
+}
+
+/// The exact language `⋃ₖ₌ₘᵢₙᵐᵃˣ Eᵏ` of a closed repetition of the exact set
+/// `E`, or `None` if it would exceed [`MAX_EXACT`] strings or
+/// [`MAX_EXACT_BYTES`] bytes at any point while it is built.
+///
+/// `Eᵏ` grows by one cross with `E` per step (`E⁰ = {""}`), and the guard is
+/// checked before each growth, so a class-heavy base bails within a few steps
+/// (`[0-9a-f]{16}`: `E²` is 256 strings, `E³` overflows) instead of ever
+/// materializing the explosion.
+fn bounded_power_union(base: &StringSet, min: u32, max: u32) -> Option<StringSet> {
+    let mut power = StringSet::of(Gram::empty()); // E⁰ = {""}
+    let mut union = StringSet::new();
+    for k in 0..=max {
+        if k >= min {
+            union = union.union(&power, Order::Prefix);
+            if union.len() > MAX_EXACT || union.byte_len() > MAX_EXACT_BYTES {
+                return None;
+            }
+        }
+        if k == max {
+            break;
+        }
+        power = power.cross(base, Order::Prefix);
+        if power.len() > MAX_EXACT || power.byte_len() > MAX_EXACT_BYTES {
+            return None;
+        }
+    }
+    Some(union)
 }
 
 /// Whether any assertion pending between `left` and `right` is provably

@@ -28,6 +28,16 @@ pub struct RegexpInfo {
     /// unknown. Look-around pruning reads last bytes from this, so dropping
     /// members is unsound.
     pub suffix: StringSet,
+    /// When `Some(E)`, this info is a *pure* one-or-more repetition `E+` of the
+    /// small exact set `E` (both edges an open `E`-run), freshly produced by
+    /// [`super::analyze::demote_plus`]. It carries no constraint of its own —
+    /// `prefix`/`suffix` already equal `E` and stay exhaustive — but lets the
+    /// enclosing [`Analyzer::concat`] tighten the seam where the run abuts a
+    /// neighbour (see `plus_prefix`/`plus_suffix`). It is a transient hint: the
+    /// concat that consumes it bakes the tightened window into `prefix`/`suffix`
+    /// and leaves the result's `plus_base` `None`, so every other combinator
+    /// (alternation, a further concat, `blank`) clears it by construction.
+    pub plus_base: Option<StringSet>,
     /// A query every match must satisfy, beyond prefix/suffix.
     pub match_: Query,
 }
@@ -40,6 +50,7 @@ impl RegexpInfo {
             exact: None,
             prefix: StringSet::new(),
             suffix: StringSet::new(),
+            plus_base: None,
             match_: Query::all(),
         }
     }
@@ -51,6 +62,7 @@ impl RegexpInfo {
             exact: None,
             prefix: empty_member(),
             suffix: empty_member(),
+            plus_base: None,
             match_: Query::all(),
         }
     }
@@ -62,6 +74,7 @@ impl RegexpInfo {
             exact: None,
             prefix: empty_member(),
             suffix: empty_member(),
+            plus_base: None,
             match_: Query::all(),
         }
     }
@@ -73,6 +86,7 @@ impl RegexpInfo {
             exact: None,
             prefix: StringSet::new(),
             suffix: StringSet::new(),
+            plus_base: None,
             match_: Query::none(),
         }
     }
@@ -84,6 +98,7 @@ impl RegexpInfo {
             exact: Some(StringSet::of(Gram::empty())),
             prefix: StringSet::new(),
             suffix: StringSet::new(),
+            plus_base: None,
             match_: Query::all(),
         }
     }
@@ -98,6 +113,7 @@ impl RegexpInfo {
             exact: Some(StringSet::of(Gram::from(bytes))),
             prefix: StringSet::new(),
             suffix: StringSet::new(),
+            plus_base: None,
             match_: Query::all(),
         }
     }

@@ -55,6 +55,16 @@ impl Analyzer<'_> {
         } else {
             xy.prefix = concat_prefix(&x, &y);
             xy.suffix = concat_suffix(&x, &y);
+            // Tighten the seam where a pure `E+` run abuts its neighbour. The
+            // result's own `plus_base` stays `None` (blank): the tightened
+            // window is baked into `prefix`/`suffix` here, so a later concat
+            // crosses it normally. Both may fire (`a+b+`), independently.
+            if let Some(e) = y.plus_base.as_ref() {
+                xy.suffix = plus_suffix(&x, e);
+            }
+            if let Some(e) = x.plus_base.as_ref() {
+                xy.prefix = plus_prefix(&y, e);
+            }
         }
         xy.match_ = x.match_.and(y.match_);
         if let Some(boundary) = boundary {
@@ -335,6 +345,36 @@ fn concat_suffix(x: &RegexpInfo, y: &RegexpInfo) -> StringSet {
         return s.union(&x.suffix, Order::Suffix);
     }
     s
+}
+
+/// The exhaustive suffix set of `X·E+` given the left side `x` and the plus
+/// base `E`: `(suffix(X) ∪ E) × E`.
+///
+/// Proof it is exhaustive. A match is `w·e₁···eₖ` with `w ∈ L(X)`, `eᵢ ∈ E`,
+/// `k ≥ 1`. Its last two blocks are `w_tail·e₁` when `k = 1` (`w_tail` a suffix
+/// of `w`, so in `suffix(X) × E`) or `e_{k-1}·eₖ` when `k ≥ 2` (in `E × E`);
+/// either way a member of `(suffix(X) ∪ E) × E`. When `x`'s last byte is
+/// unknown (empty `suffix(X)`), fall back to `E` — every match still ends with
+/// some `eₖ ∈ E`. The `""` sentinel, if present in `suffix(X)`, contributes
+/// `"" × E = E`, the same sound weakening.
+fn plus_suffix(x: &RegexpInfo, e: &StringSet) -> StringSet {
+    let s = x.exact.as_ref().unwrap_or(&x.suffix);
+    if s.is_empty() {
+        return e.clone();
+    }
+    s.clone().union(e, Order::Suffix).cross(e, Order::Suffix)
+}
+
+/// The exhaustive prefix set of `E+·Y` given the right side `y` and the plus
+/// base `E`: `E × (E ∪ prefix(Y))`. Symmetric to [`plus_suffix`]: the first two
+/// blocks of `e₁···eₖ·w` are `e₁·e₂ ∈ E × E` (`k ≥ 2`) or `e₁·w_head ∈
+/// E × prefix(Y)` (`k = 1`).
+fn plus_prefix(y: &RegexpInfo, e: &StringSet) -> StringSet {
+    let p = y.exact.as_ref().unwrap_or(&y.prefix);
+    if p.is_empty() {
+        return e.clone();
+    }
+    e.cross(&e.clone().union(p, Order::Prefix), Order::Prefix)
 }
 
 /// The boundary strings straddling a concat seam, when both sides lack an

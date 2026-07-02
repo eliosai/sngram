@@ -333,6 +333,26 @@ mod tests {
     }
 
     #[test]
+    fn exact_base_repetition_above_cap_expands_to_literal() {
+        // A counted repetition whose base is a small exact set expands to its
+        // exact language even above MAX_REPEAT_EXPAND, so it plans identically
+        // to the fully written-out literal instead of a demoted stub.
+        assert_eq!(plan_of("x{5}"), plan_of("xxxxx"));
+        assert_eq!(plan_of("ab{5}cd"), plan_of("abbbbbcd"));
+        assert_eq!(plan_of("(abc){5}"), plan_of("abcabcabcabcabc"));
+        assert_eq!(plan_of("a{8}"), plan_of("aaaaaaaa"));
+    }
+
+    #[test]
+    fn bounded_range_above_cap_matches_enumeration() {
+        // A narrow range above the cap enumerates every allowed count exactly,
+        // so `h{3,5}i` is `(hhh|hhhh|hhhhh)i` and `[ch]{5}` is the exact set of
+        // all 32 length-5 strings over {c,h}.
+        assert_eq!(plan_of("h{3,5}i"), plan_of("hhhi|hhhhi|hhhhhi"));
+        assert_eq!(plan_of("[ch]{5}"), plan_of("(?:c|h){5}"));
+    }
+
+    #[test]
     fn exact_literal_cover_keeps_dense_subwindows() {
         let plan = plan_of("sched_clock");
         let rendered = plan.to_string();

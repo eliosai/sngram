@@ -176,6 +176,16 @@ fn counted_group_repetition_is_not_all() {
     assert_eq!(plan_of("(abc){2}"), plan_of("abcabc"));
 }
 
+#[test]
+fn bounded_range_above_cap_rejects_short_run() {
+    // `h{3,5}` has max 5 > MAX_REPEAT_EXPAND, but the base is a one-byte exact
+    // set and the range is narrow, so it enumerates to {hhh,hhhh,hhhhh}·i
+    // instead of collapsing to a single demoted copy. A demoted plan keeps
+    // only "hhi" and admits any two-h run before an "i"; the enumerated plan
+    // requires "hhh" too. "ahhi" has just two h's, so it must be rejected.
+    assert_rejects("h{3,5}i", b"ahhi");
+}
+
 // --- alternation branches must not cross-mix prefixes and suffixes ---
 
 #[test]
@@ -199,6 +209,26 @@ fn optional_prefix_keeps_required_suffix() {
 #[test]
 fn plus_seam_is_covered() {
     assert_rejects("mem+set", b"memory setup offset");
+}
+
+#[test]
+fn plus_seam_rejects_reordered_run() {
+    // `mem+set` is `me·m+·set`. Every match is "memset" (one m) or contains
+    // "mmset" (two or more), so the sound suffix after crossing the run with
+    // "set" is {memset, mmset}. A plan that only knows the single-byte run
+    // base admits "mset" anywhere after "mem"; "memory mset here" holds "mem",
+    // "mse", and "set" as scattered fragments but neither "memset" nor
+    // "mmset", so the seam-aware plan rejects it.
+    assert_rejects("mem+set", b"memory mset here");
+}
+
+#[test]
+fn plus_seam_rejects_split_literal() {
+    // `rea+d_lock` is `re·a+·d_lock`; the sound suffix after the seam is
+    // {read_lock, aad_lock}. "realized ad_lock" carries "rea" and every gram
+    // of "ad_lock" but neither full seam string (no "read" run, no "aad"), so
+    // it is rejected — a plan blind to the seam admits it on the fragments.
+    assert_rejects("rea+d_lock", b"realized ad_lock");
 }
 
 #[test]
