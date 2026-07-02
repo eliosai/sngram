@@ -40,7 +40,9 @@ const MAX_MAXIMAL_COVER_BRANCHES: usize = 8;
 const REGROW_TARGET: usize = MAX_SET / 4;
 
 /// A conservative gram-count estimate for flushing `set`: roughly one gram
-/// per bigram of each string under minimal covers.
+/// per trigram of each string under minimal covers. Maximal covers (taken
+/// for few-branch sets) can exceed this by a small constant factor, which
+/// is why plan-size pins allow slack over the budget.
 fn flush_estimate(set: &StringSet) -> usize {
     set.len()
         .saturating_mul(set.max_len().div_ceil(MIN_LEN) + 1)
@@ -127,11 +129,16 @@ impl Analyzer<'_> {
     /// Cover an exact set into its own match query, then demote it to
     /// prefix/suffix stubs.
     fn flush_spill(&self, info: &mut RegexpInfo) {
+        self.flush_exact(info);
+        self.simplify(info, false);
+    }
+
+    /// Cover the exact set and spill it into prefix/suffix stubs.
+    fn flush_exact(&self, info: &mut RegexpInfo) {
         self.add_exact(info);
         if let Some(exact) = info.exact.take() {
             spill_exact(info, &exact);
         }
-        self.simplify(info, false);
     }
 
     /// Flush a non-exact branch's prefix and suffix covers into its own match
@@ -153,9 +160,13 @@ impl Analyzer<'_> {
     /// A lone string gets the maximal cover; a many-branch set gets each
     /// string's minimal cover, since the OR over branches dilutes what the
     /// redundant interior grams would add and every gram costs a lookup.
-    /// One flush may spend at most half the remaining budget — `order` says
-    /// which end of the strings to shorten when it must fit — so the head of
-    /// a long pattern can never starve its tail of constraints.
+    /// One flush may spend at most half the remaining budget (floored, see
+    /// [`Analyzer::flush_cap`]) — `order` says which end of the strings to
+    /// shorten when it must fit — so the head of a long pattern can never
+    /// starve its tail of constraints. `order` must match the set's kind:
+    /// shortening in that direction must preserve guaranteed containment,
+    /// so prefix-like sets (including exact sets) shorten from the tail and
+    /// suffix sets from the head.
     pub fn and_grams(&self, q: Query, set: &StringSet, order: Order) -> Query {
         if set.is_empty() || set.min_len() < MIN_LEN || !self.within_budget() {
             return q;
@@ -210,10 +221,7 @@ impl Analyzer<'_> {
     /// maximal sound constraint set; the minimal covering set is included for
     /// its equal-weight plateau grams the scan's dedup collapses.
     fn cover_set(&self, s: &[u8]) -> StringSet {
-        let mut set = StringSet::new();
-        for gram in extract::cover_one(self.table(), s) {
-            set.push(gram);
-        }
+        let mut set = self.minimal_cover_set(s);
         #[allow(
             clippy::indexing_slicing,
             reason = "scan emits start..end spans within s"
@@ -233,10 +241,7 @@ impl Analyzer<'_> {
             exact.clean(Order::Prefix);
         }
         if should_flush_exact(info, force) {
-            self.add_exact(info);
-            if let Some(exact) = info.exact.take() {
-                spill_exact(info, &exact);
-            }
+            self.flush_exact(info);
         }
         if info.exact.is_none() {
             self.simplify_set(info, Order::Prefix, force);

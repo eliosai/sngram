@@ -17,7 +17,7 @@ pub(super) fn query_plan(args: &HiArgs, table: &WeightTable) -> anyhow::Result<Q
         bail!("indexed search requires at least one pattern");
     }
     let opts = args.plan_options();
-    let plan = sngram::query_with(table, patterns, &opts).with_context(|| {
+    let plan = sngram::query_with(table, patterns, opts).with_context(|| {
         format!("indexed query planner could not parse {patterns:?}; use --no-index")
     })?;
     if matches!(plan, QueryPlan::All) {

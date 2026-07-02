@@ -61,7 +61,7 @@ pub const fn from_prefixes(h_end: u64, h_before_start: u64, len: usize) -> u64 {
 
 /// Hash a gram's bytes directly; identical to the rolling value `scan` emits
 /// for the same bytes. The fold seeds at 1 — the implicit sentinel matching
-/// [`from_prefixes`].
+/// `from_prefixes`.
 #[must_use]
 #[allow(clippy::indexing_slicing, reason = "i stays < bytes.len()")]
 pub const fn hash_bytes(bytes: &[u8]) -> u64 {

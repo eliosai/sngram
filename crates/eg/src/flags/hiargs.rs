@@ -391,7 +391,7 @@ impl HiArgs {
             unicode: !self.no_unicode,
             dotall: self.multiline && self.multiline_dotall,
             crlf: self.crlf,
-            invert: false, // inverted search is rejected before planning
+            invert: self.invert_match,
         }
     }
 

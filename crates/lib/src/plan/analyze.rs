@@ -18,8 +18,8 @@ use super::strings::{Order, StringSet};
 ///
 /// Codesearch used 7 so three case-folded letters (2³ = 8 variants) trigger a
 /// flush — all a trigram index can use. Sparse grams keep gaining selectivity
-/// with window length, so case-folded windows are allowed to span about six
-/// doubling characters before they flush.
+/// with window length, so case-folded windows are allowed to span about
+/// eight doubling characters before they flush.
 pub const MAX_EXACT: usize = 256;
 /// Upper bound on prefix and suffix set sizes.
 pub const MAX_SET: usize = 128;
@@ -56,7 +56,8 @@ pub const PLAN_GRAM_BUDGET: usize = 4096;
 /// Folds a regex HIR into a conservative gram query using a weight table.
 pub struct Analyzer<'a> {
     table: &'a WeightTable,
-    /// Gram instances flushed into the plan so far, capped by
+    /// Gram instances charged to the plan so far — covering-set flushes
+    /// plus repetition-expansion replications — capped by
     /// [`PLAN_GRAM_BUDGET`].
     flushed: core::cell::Cell<usize>,
 }

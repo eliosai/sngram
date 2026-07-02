@@ -3,9 +3,11 @@
 //! The gram plan is only sound when it is built from the same match
 //! semantics the verifying engine uses. [`PlanOptions`] carries the
 //! semantics-bearing knobs; anything affecting only output, traversal, or
-//! engine resource limits stays out on purpose. Word/line anchoring and line
-//! terminators are also absent: they only restrict the language, so a plan
-//! that ignores them is already a sound superset.
+//! engine resource limits stays out on purpose. Word/line anchoring is also
+//! absent: it only restricts the language, so a plan built without it is
+//! already a sound superset (and a boundary the byte context refutes still
+//! proves the pattern empty). Anchor flavors that change WHICH byte counts
+//! as a line terminator do matter — that is the `crlf` field.
 
 use regex_syntax::ast::{self, Ast, ClassSet, ClassSetItem};
 
@@ -29,7 +31,7 @@ pub enum PlanCase {
     /// Match case insensitively.
     Insensitive,
     /// Insensitive when no pattern contains an uppercase literal
-    /// (`grep -S`); resolved here with the same rule `grep-regex` applies,
+    /// (`ripgrep -S`); resolved here with the same rule `grep-regex` applies,
     /// so the plan and the verifier can never disagree.
     Smart,
 }
@@ -49,6 +51,8 @@ pub struct PlanOptions {
     /// Unicode mode (`--no-unicode` disables).
     pub unicode: bool,
     /// Whether `.` matches line terminators (`-U --multiline-dotall`).
+    /// Currently plan-inert — `.` over-approximates to any character either
+    /// way — but kept so the planner's HIR always equals the verifier's.
     pub dotall: bool,
     /// CRLF-aware anchors (`--crlf`).
     pub crlf: bool,

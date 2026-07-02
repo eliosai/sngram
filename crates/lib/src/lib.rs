@@ -12,11 +12,11 @@
 //! strictly greater than all internal weights are emitted as
 //! sparse n-grams. These go into an inverted index keyed by hash.
 //!
-//! **Querying** (per regex): the pattern is parsed into an AST,
-//! fixed literal substrings are extracted (both prefix and suffix),
-//! and each literal is decomposed into a minimal covering set of
-//! sparse n-grams (a subset of the index set). These are looked up
-//! in the inverted index.
+//! **Querying** (per regex): the pattern's HIR is folded into a
+//! conservative boolean query over gram presence. Literals cover to
+//! the grams the scan is guaranteed to emit for them (maximal for a
+//! lone literal, minimal per branch for wide variant sets), which are
+//! looked up in the inverted index.
 //!
 //! # Choosing an API
 //!
@@ -25,7 +25,9 @@
 //!   into an inverted index costs nothing extra.
 //! - [`StreamScanner`] — the same extraction over chunked input with bounded
 //!   memory; emits each gram's bytes and hash as it closes.
-//! - [`query`] — decomposes a regex into covering grams for index lookup.
+//! - [`query_with`] — decomposes patterns under the verifying engine's
+//!   match options (case, fixed strings, unicode, inversion); prefer this.
+//! - [`query`] — decomposes a bare regex with default semantics.
 //! - `learn` module (feature `learn`) — bigram counters for training fresh weight tables
 
 pub mod error;
@@ -88,9 +90,9 @@ pub fn query(table: &WeightTable, pattern: &Pattern) -> QueryPlan {
 pub fn query_with<P: AsRef<str>>(
     table: &WeightTable,
     patterns: &[P],
-    opts: &PlanOptions,
+    opts: PlanOptions,
 ) -> Result<QueryPlan, QueryError> {
-    plan::query_with(table, patterns, *opts)
+    plan::query_with(table, patterns, opts)
 }
 
 #[cfg(test)]

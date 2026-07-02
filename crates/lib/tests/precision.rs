@@ -165,13 +165,9 @@ fn exact_repetition_matches_expanded_plan() {
 
 #[test]
 fn min_repetition_keeps_expanded_prefix() {
-    // The expanded copies must bind to the following literal: "aab" only
-    // exists when at least two expanded copies sit adjacent to "bcd".
-    let rendered = plan_of("a{3,}bcd").to_string();
-    assert!(
-        rendered.contains("aab"),
-        "expected the repeat run bound to the literal in {rendered}"
-    );
+    // The expanded copies must bind to the following literal: a document
+    // holding "abcd" but never a double-a run before it must be rejected.
+    assert_rejects("a{3,}bcd", b"aaaa then abcd");
 }
 
 #[test]

@@ -18,9 +18,15 @@ pub struct RegexpInfo {
     /// The exact, finite set of matching strings, when one exists.
     /// `None` means use [`Self::prefix`] and [`Self::suffix`] instead.
     pub exact: Option<StringSet>,
-    /// Possible match prefixes (used only when `exact` is `None`).
+    /// Match prefixes (used only when `exact` is `None`). Exhaustive: every
+    /// match STARTS with some member; a `""` member means the first byte is
+    /// unknown. Look-around pruning reads first bytes from this, so dropping
+    /// members is unsound.
     pub prefix: StringSet,
-    /// Possible match suffixes (used only when `exact` is `None`).
+    /// Match suffixes (used only when `exact` is `None`). Exhaustive: every
+    /// match ENDS with some member; a `""` member means the last byte is
+    /// unknown. Look-around pruning reads last bytes from this, so dropping
+    /// members is unsound.
     pub suffix: StringSet,
     /// A query every match must satisfy, beyond prefix/suffix.
     pub match_: Query,
@@ -98,7 +104,8 @@ impl RegexpInfo {
 }
 
 /// A set holding only the empty string, the identity for prefix/suffix cross
-/// products (`"" + s == s`).
+/// products (`"" + s == s`) and the "boundary byte unknown" sentinel for
+/// look-around pruning, distinct from `can_empty`.
 fn empty_member() -> StringSet {
     StringSet::of(Gram::empty())
 }

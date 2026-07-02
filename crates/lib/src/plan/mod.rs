@@ -114,6 +114,9 @@ fn parse_joined(joined: &str, opts: PlanOptions) -> Result<Hir, QueryError> {
         .nest_limit(VERIFIER_NEST_LIMIT)
         .octal(false)
         .utf8(false)
+        // Always on, like grep-regex's translator. Sound for any verifier:
+        // line anchors are strictly harder to prove impossible than text
+        // anchors, so None-pruning never over-fires.
         .multi_line(true)
         .case_insensitive(insensitive)
         .dot_matches_new_line(opts.dotall)
@@ -434,6 +437,40 @@ mod tests {
         fn multiple_patterns_join_as_alternation() {
             let joined = with(PlanOptions::default(), &["max_file", "min_file"]);
             assert_eq!(joined, plan_of("(?:max_file)|(?:min_file)"));
+        }
+
+        #[test]
+        fn insensitive_flag_equals_inline_wrapping() {
+            // eg used to wrap patterns as (?i:..) before parsing; the flag
+            // path must plan identically.
+            for pat in ["max_file_size", "sched[_-]clock", "mem+set"] {
+                let flagged = with(
+                    PlanOptions {
+                        case: PlanCase::Insensitive,
+                        ..PlanOptions::default()
+                    },
+                    &[pat],
+                );
+                assert_eq!(flagged, plan_of(&format!("(?i:{pat})")), "{pat}");
+            }
+        }
+
+        #[test]
+        fn crlf_keeps_carriage_return_anchors_satisfiable() {
+            // Without crlf, $ is EndLF and a following \r proves the
+            // pattern empty; with crlf the anchor accepts \r and the plan
+            // must survive. Mis-plumbing this field would silently drop
+            // real matches.
+            let default = with(PlanOptions::default(), &[r"foo$\r\nbar"]);
+            assert_eq!(default, QueryPlan::None);
+            let crlf = with(
+                PlanOptions {
+                    crlf: true,
+                    ..PlanOptions::default()
+                },
+                &[r"foo$\r\nbar"],
+            );
+            assert!(!matches!(crlf, QueryPlan::None));
         }
 
         #[test]
