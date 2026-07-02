@@ -1,0 +1,24 @@
+crates/lib/tests/precision.rs
+  s_a130935442d1aa::t_ebf441beb9c088 69-72,75,245-271
+  s_a130935442d1aa::t_fe308d2236aa21 272
+crates/lib/tests/soundness.rs
+  s_a130935442d1aa::t_ebf441beb9c088 111-118,165-170
+crates/lib/src/plan/analyze.rs
+  s_a130935442d1aa::t_ebf441beb9c088 44-55,570-579,583-587,598-604,616,624,629-639,645-646,657-658,672-912
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "5cf3369974d00daafb956dbb8f94e833f874877a",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
