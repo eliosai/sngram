@@ -1,0 +1,79 @@
+crates/lib/src/plan/mod.rs
+  s_f704bf3c9e2e2d::t_4f584e77f65f36 252-274
+crates/lib/tests/precision.rs
+  s_a130935442d1aa::t_813f9a2d186c3a 186
+  s_a130935442d1aa::t_6d921e10610528 114-115,124,128
+  s_a130935442d1aa::t_a74ccb44b34e7f 126-127,129-131,134-135
+  s_a130935442d1aa::t_dde204a1400d77 216-244
+  s_a130935442d1aa::t_153715991e45bc 1-113,116-123,125,132-133,136-185,187-215
+crates/lib/src/plan/analyze.rs
+  s_a130935442d1aa::t_a99d39bb308401 25
+  s_a130935442d1aa::t_f2705ba2326859 23
+  s_f704bf3c9e2e2d::t_ba9fbc13824189 26-32
+  s_a130935442d1aa::t_03009666981ce0 87,106-110,116,157-166,200
+  s_a130935442d1aa::t_6c9444494a0a07 104-105
+  s_a130935442d1aa::t_88e38cdf690d5c 17-22,33,35-36,38-40,44-47
+  s_a130935442d1aa::t_2fdd019e88135f 170-174,180,182,192-199
+  s_a130935442d1aa::t_04e9ce3b366064 49-54,59-61,67-70,78-86
+  s_a130935442d1aa::t_ceb6e8700f54f3 37,41
+  s_a130935442d1aa::t_22601e57ba8103 113,115,117-129,131-156
+  s_a130935442d1aa::t_6f87b328af3cf0 48
+  s_a130935442d1aa::t_aa47a9115a1845 88
+crates/lib/src/plan/query.rs
+  s_a130935442d1aa::t_813f9a2d186c3a 126
+  s_a130935442d1aa::t_0d0ea85c93e5f8 261-263
+  s_a130935442d1aa::t_a2b883b5f76781 122-123,125
+  s_a130935442d1aa::t_5a9a87f66d657a 264-265
+crates/lib/tests/soundness.rs
+  s_a130935442d1aa::t_7183e53a71d529 61-63,74,76,79-80
+  s_a130935442d1aa::t_4b013b2a7391fd 138-156
+  s_a130935442d1aa::t_6cb6d99d2bdca8 218,220-243,245
+  s_f704bf3c9e2e2d::t_68311d7e4719bf 98-99,132-137
+  s_a130935442d1aa::t_2997eb03589a4d 172,182-200,206
+  s_a130935442d1aa::t_d05723038ad9ae 100-110
+crates/lib/src/plan/strings.rs
+  s_f704bf3c9e2e2d::t_eaf64946f446d7 77-82
+Cargo.toml
+  s_a130935442d1aa::t_1067610f8d2342 29
+crates/lib/src/plan/combine.rs
+  s_a130935442d1aa::t_0daa48ad972fb9 33-41
+  s_a130935442d1aa::t_ccfa9f87fa7f58 5-9,21-24,65-69,111-121,161,163-169,175-181,200-201,205-210,220-228,277-278,289-291,303-315,328-330,333-335,339-340,349
+  s_a130935442d1aa::t_4d5ce085966ef4 124-125,131,136,146,149
+  s_f704bf3c9e2e2d::t_2ad16597bee0d3 25,325
+  s_a130935442d1aa::t_813f9a2d186c3a 16
+  s_a130935442d1aa::t_ac54817d63ca90 213-219
+  s_a130935442d1aa::t_ffeea4642423cc 126-129,134,138-142,153-160
+  s_a130935442d1aa::t_55562e08c22b89 344-348
+  s_a130935442d1aa::t_e4f56bd7a6399f 45-46
+  s_a130935442d1aa::t_051c9af324e341 292-302,316
+  s_a130935442d1aa::t_47a016659c7753 341-342,353
+  s_a130935442d1aa::t_854341113da637 26-32
+  s_a130935442d1aa::t_69c69f1c560071 93-110
+  s_a130935442d1aa::t_4ecc0991f3499a 122,162
+crates/lib/Cargo.toml
+  s_a130935442d1aa::t_2fd890e4435773 30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "ccf89decd77376805c0e534d7b0bea57804d922a",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    },
+    "s_f704bf3c9e2e2d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ed7-888e-7ed1-aa58-28d6f2f8ee18",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
