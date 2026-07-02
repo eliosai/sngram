@@ -1,0 +1,39 @@
+crates/lib/src/lib.rs
+  s_a130935442d1aa::t_e9becb4a938f6a 15-19,28-30,93,95
+crates/eg/src/index/planner.rs
+  s_a130935442d1aa::t_e9becb4a938f6a 20
+crates/lib/src/plan/combine.rs
+  s_a130935442d1aa::t_d3755fe83317a7 43-45,132-137,163-169,224,244
+crates/lib/src/plan/info.rs
+  s_a130935442d1aa::t_1338e06313521f 21-24,26-29
+  s_a130935442d1aa::t_d3755fe83317a7 107-108
+crates/eg/src/flags/hiargs.rs
+  s_a130935442d1aa::t_e9becb4a938f6a 394
+crates/lib/src/plan/options.rs
+  s_a130935442d1aa::t_e9becb4a938f6a 6-10,34,54-55
+crates/lib/src/plan/mod.rs
+  s_a130935442d1aa::t_717e4ded972f0a 442-475
+  s_a130935442d1aa::t_e9becb4a938f6a 117-119
+crates/lib/tests/precision.rs
+  s_a130935442d1aa::t_717e4ded972f0a 168-170
+crates/lib/src/plan/analyze.rs
+  s_a130935442d1aa::t_e9becb4a938f6a 21-22,59-60
+crates/lib/src/hashing.rs
+  s_a130935442d1aa::t_07f7265788b919 64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "f579be330147fe430257ad420b7d5e386c2f819a",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
