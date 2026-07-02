@@ -88,6 +88,22 @@ fn bench_query(c: &mut Criterion) {
             b.iter(|| sngram::query(&table, p));
         });
     }
+
+    // Maximum-length case-folded runs: the analyzer must go idle once the
+    // plan budget saturates instead of folding the rest of the pattern.
+    let long_runs = [
+        ("ci_max_run", format!("(?i){}", "a".repeat(4000))),
+        (
+            "ci_max_varied",
+            format!("(?i){}", "abcdefghijklmnop".repeat(250)),
+        ),
+    ];
+    for (name, pat) in &long_runs {
+        let pattern = Pattern::new(pat).expect("long pattern parses");
+        group.bench_with_input(BenchmarkId::new("query", *name), &pattern, |b, p| {
+            b.iter(|| sngram::query(&table, p));
+        });
+    }
     group.finish();
 }
 

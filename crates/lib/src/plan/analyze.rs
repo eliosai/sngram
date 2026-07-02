@@ -116,6 +116,12 @@ impl<'a> Analyzer<'a> {
 
     /// Analyze `hir`, returning its conservative summary.
     pub fn analyze(&self, hir: &Hir) -> RegexpInfo {
+        if !self.within_budget() {
+            // A saturated budget means no flush can commit grams anyway;
+            // skipping the fold trades nothing but the walk's cost. The
+            // over-approximation only widens the plan.
+            return RegexpInfo::any_match();
+        }
         let mut info = match hir.kind() {
             HirKind::Empty | HirKind::Look(_) => return RegexpInfo::empty_string(),
             HirKind::Capture(c) => return self.analyze(&c.sub),
@@ -150,6 +156,9 @@ impl<'a> Analyzer<'a> {
                 None => info,
                 Some(prev) => self.concat(prev, info),
             });
+            if !self.within_budget() {
+                return acc.unwrap_or_else(RegexpInfo::any_match);
+            }
         }
         if looks_blocked(&mut pending, acc.as_ref(), None) {
             return RegexpInfo::no_match();
