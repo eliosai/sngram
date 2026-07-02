@@ -193,6 +193,52 @@ rep_min2_two_sided	init(xy){2,}done
 look_word_class	foo\b[x+]bar
 greek_byte_seam	\p{Greek}term_var
 
+# --- audit sentinels: numeric/hex/version (largest non-floor FP class) ---
+ver_semver	v[0-9]+\.[0-9]+\.[0-9]+
+rep_ip_octet	([0-9]{1,3}\.){3}[0-9]
+hex_addr16	0x[0-9a-fA-F]{16}
+num_mask	0xff\b
+num_bit_shift	1UL << [0-9]+
+
+# --- audit sentinels: bounded-rep expansion cap ---
+bounded_rep5	x{5}
+rep_cap5_lit	ab{5}cd
+rep_word_ops	\w{4,8}_ops
+
+# --- audit sentinels: crlf/anchor floors ---
+crlf_export_end	EXPORT_SYMBOL$	--crlf
+crlf_define_start	^#define CONFIG	--crlf
+
+# --- audit sentinels: deep alternations ---
+alt_gfp	GFP_(KERNEL|ATOMIC|NOWAIT|NOFS|NOIO|USER)
+alt_irqf	IRQF_(SHARED|ONESHOT|TRIGGER_HIGH|TRIGGER_LOW|NO_SUSPEND)
+alt_reg_nested	((un)?register|(de)?activate)_netdev
+
+# --- audit sentinels: realistic developer greps ---
+fnptr_decl	int \(\*\w+\)\(
+fnptr_const_ops	static const struct \w+_operations
+field_skb_data	skb->data
+field_cast_sock	\(struct sock \*\)
+pf_ps	%pS
+pf_hex08	0x%08x
+pf_err_fmt	pr_err\("%s:
+err_alt	-E(INVAL|NOMEM|BUSY|AGAIN)
+err_ptr	ERR_PTR\(-E
+phrase_spdx	SPDX-License-Identifier: GPL
+phrase_signed_off	Signed-off-by:
+
+# --- audit sentinels: smart case and non-ASCII ---
+smart_lower_fn	spin_lock_irqsave	-S
+smart_long_lower	netif_receive_skb_core	-S
+smart_struct	TaskStruct	-S
+uni_micro	µs
+uni_cjk	中文
+path_include	include/linux/netdevice\.h
+
+# --- audit sentinels: gap floors ---
+gap_lock_unlock	spin_lock.*spin_unlock
+gap_static_return	static.*return -E
+
 # --- known-unsupported (should stay graceful, recorded not crashed) ---
 unsup_dotstar	.*
 unsup_wordplus	\w+
