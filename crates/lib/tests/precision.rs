@@ -66,10 +66,13 @@ fn index_grams(t: &WeightTable, doc: &[u8]) -> HashSet<Vec<u8>> {
 /// to reject it; rejecting it proves the plan retains enough structure.
 fn assert_rejects(re: &str, doc: &[u8]) {
     let t = weight_table();
-    let oracle = regex_lite::Regex::new(re).expect("oracle parses pattern");
+    // The full `regex` crate over raw bytes, matching the soundness oracle and
+    // the engine eg verifies with: it supports `\p{..}` unicode classes and
+    // reads the document as the bytes the index scanned.
+    let oracle = regex::bytes::Regex::new(re).expect("oracle parses pattern");
     let text = String::from_utf8_lossy(doc);
     assert!(
-        !oracle.is_match(&text),
+        !oracle.is_match(doc),
         "test bug: {re:?} actually matches {text:?}; pick a non-matching doc"
     );
     let plan = query(&t, &Pattern::new(re).expect("pattern parses"));
@@ -207,6 +210,34 @@ fn wide_class_pair_keeps_the_trailing_seam() {
     // boundary set all the way to empty strings would sever the seam to
     // "lock" and admit any document with "read" and "lock" fragments.
     assert_rejects("read[a-zA-Z][a-zA-Z]lock", b"readb lock held");
+}
+
+// --- wide classes keep a boundary-byte seam to their neighbours ---
+
+#[test]
+fn wide_class_before_literal_keeps_boundary_seam() {
+    // \p{Greek} exceeds the enumeration cap, but every Greek scalar's UTF-8
+    // encoding ends in a continuation byte, so the plan requires some
+    // <continuation-byte>term_var window. This document has "term_var" but
+    // preceded by an ASCII space, so no such window exists and it is rejected
+    // — where a bare any_char (prefix/suffix {""}) would admit it.
+    assert_rejects(r"\p{Greek}term_var", b"the term_var here");
+}
+
+#[test]
+fn wide_class_after_literal_keeps_boundary_seam() {
+    // Symmetric to the leading case: term_var\p{Greek} requires a
+    // term_var<Greek-lead-byte> window, which "term_var" followed by an
+    // ASCII space (or end of line) lacks.
+    assert_rejects(r"term_var\p{Greek}", b"a term_var stops here");
+}
+
+#[test]
+fn wide_class_between_literals_keeps_both_seams() {
+    // A wide class flanked by literals crosses its lead bytes into the left
+    // literal and its continuation bytes into the right one, so both edges
+    // stay anchored.
+    assert_rejects(r"read\p{Cyrillic}lock", b"read lock, readlock, red lock");
 }
 
 #[test]
