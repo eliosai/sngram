@@ -1,0 +1,22 @@
+crates/eg/src/index/postings.rs
+  s_a130935442d1aa::t_13d00f50047eba 5,10
+  s_a130935442d1aa::t_5006377e720b27 622-625
+  s_a130935442d1aa::t_f50446bb6fb6c2 528-532,534-555,564,567,574,577
+  s_a130935442d1aa::t_078d8697f7cfda 586,588,590,593
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "165c282d9e2dd0a19d204583bc45ff2fae4c3096",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
