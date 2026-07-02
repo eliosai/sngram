@@ -1,0 +1,37 @@
+scripts/eg-fp-rates.sh
+  s_a130935442d1aa::t_0e4c15c746d9de 108
+  s_f704bf3c9e2e2d::t_74c88847a0c7d4 1-94,96-97,103-107,109-134
+  s_a130935442d1aa::t_309b0f44751203 95
+  s_a130935442d1aa::t_00c7fdbd3de233 98-102
+.gitignore
+  s_f704bf3c9e2e2d::t_74c88847a0c7d4 169
+scripts/fp-queries.tsv
+  s_a130935442d1aa::t_c3695e1c7bd40f 1-15,17-71,73-128,130-167
+  s_a130935442d1aa::t_f480568c276a4a 72
+  s_a130935442d1aa::t_dad336588c26fb 16
+  s_a130935442d1aa::t_efc304b3b55758 129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "2051ee74e19d0fad746e01d59e9769cb0b9bcdfd",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    },
+    "s_f704bf3c9e2e2d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ed7-888e-7ed1-aa58-28d6f2f8ee18",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
