@@ -149,7 +149,7 @@ def default_families() -> list[Family]:
                         "hf://datasets/CodedotAI/code_clippy_github/"
                         "github-dedup-*.json.gz"
                     ),
-                    path_field="file_path",
+                    path_field="path",
                     exclude_path_regex=DOC_OR_CONFIG_PATH_RE,
                 ),
             ),
@@ -187,7 +187,7 @@ def default_families() -> list[Family]:
                         "hf://datasets/CodedotAI/code_clippy_github/"
                         "github-dedup-*.json.gz"
                     ),
-                    path_field="file_path", include_path_regex=CONFIG_PATH_RE,
+                    path_field="path", include_path_regex=CONFIG_PATH_RE,
                 ),
                 *tuple(
                     Source(
@@ -235,7 +235,7 @@ def default_families() -> list[Family]:
                         "hf://datasets/CodedotAI/code_clippy_github/"
                         "github-dedup-*.json.gz"
                     ),
-                    path_field="file_path", include_path_regex=DOC_PATH_RE,
+                    path_field="path", include_path_regex=DOC_PATH_RE,
                 ),
             ),
         ),

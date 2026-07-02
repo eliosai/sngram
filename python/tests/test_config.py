@@ -172,7 +172,8 @@ def test_source_family_matches_owning_family():
 def test_path_filtered_sources_declare_metadata_field():
     for s in all_sources():
         if s.include_path_regex or s.exclude_path_regex:
-            assert s.path_field == "file_path", s.id
+            expected = "path" if s.repo == "CodedotAI/code_clippy_github" else "file_path"
+            assert s.path_field == expected, s.id
 
 
 def test_github2025_is_used_across_filtered_buckets():
@@ -181,6 +182,15 @@ def test_github2025_is_used_across_filtered_buckets():
     assert any(s.exclude_path_regex for s in github_sources)
     assert any(s.include_path_regex == DOC_PATH_RE for s in github_sources)
     assert any(s.include_path_regex == CONFIG_PATH_RE for s in github_sources)
+
+
+def test_code_clippy_raw_json_uses_path_metadata_field():
+    sources = [
+        s for s in all_sources()
+        if s.repo == "CodedotAI/code_clippy_github" and (s.include_path_regex or s.exclude_path_regex)
+    ]
+    assert sources
+    assert all(s.path_field == "path" for s in sources)
 
 
 def test_hf_token_uses_environment(monkeypatch):
