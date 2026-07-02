@@ -119,11 +119,11 @@ impl Query {
         if self.is(Op::And) || (self.is(Op::Or) && self.is_atom()) {
             return grams_imply(&self.grams, other);
         }
+        // An OR implies `other` when every alternative does: each sub-query,
+        // and each gram on its own.
         self.is(Op::Or)
-            && other.is(Op::Or)
-            && !self.grams.is_empty()
-            && self.sub.is_empty()
-            && self.grams.is_subset_of(&other.grams)
+            && self.sub.iter().all(|q| q.implies(other))
+            && self.grams.as_slice().iter().all(|g| gram_implies(g, other))
     }
 }
 
@@ -256,6 +256,11 @@ fn any_gram_in(t: &StringSet, set: &StringSet) -> bool {
     t.as_slice()
         .iter()
         .any(|g| StringSet::of(g.clone()).is_subset_of(set))
+}
+
+/// Whether the presence of the single gram `g` implies query `q`.
+fn gram_implies(g: &crate::gram::Gram, q: &Query) -> bool {
+    grams_imply(&StringSet::of(g.clone()), q)
 }
 
 #[cfg(test)]

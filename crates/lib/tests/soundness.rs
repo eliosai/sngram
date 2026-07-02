@@ -58,7 +58,9 @@ fn index_grams(t: &WeightTable, doc: &[u8]) -> HashSet<Vec<u8>> {
     grams
 }
 
-/// Assert no document the oracle matches is rejected by the plan.
+/// Assert no document the oracle matches is rejected by the plan. The oracle
+/// is the full `regex` crate over raw bytes: the same parser and Unicode case
+/// folding the planner sees, and the same engine eg verifies with.
 fn assert_no_false_negative(
     t: &WeightTable,
     re: &str,
@@ -69,13 +71,13 @@ fn assert_no_false_negative(
     if plan == QueryPlan::All {
         return; // too broad to prefilter; the caller scans instead
     }
-    let oracle = regex_lite::Regex::new(re).expect("oracle parses pattern");
+    let oracle = regex::bytes::Regex::new(re).expect("oracle parses pattern");
     for (doc, grams) in docs.iter().zip(indexed) {
-        let text = String::from_utf8_lossy(doc);
-        if oracle.is_match(&text) {
+        if oracle.is_match(doc) {
             assert!(
                 satisfies(&plan, grams),
-                "FALSE NEGATIVE: {re:?} matches {text:?} but the plan rejects it",
+                "FALSE NEGATIVE: {re:?} matches {:?} but the plan rejects it",
+                String::from_utf8_lossy(doc),
             );
         }
     }
@@ -93,6 +95,19 @@ fn corpus() -> Vec<&'static [u8]> {
         b"let mut grams = Vec::with_capacity(n * 2);".as_slice(),
         b"// the quick brown fox jumps over the lazy dog".as_slice(),
         b"SELECT grams FROM content_ngrams WHERE grams @> ARRAY[1,2,3];".as_slice(),
+        b"sched_clock and sched-clock both name scheduler clock helpers".as_slice(),
+        b"abcef abdef foo123bar MAX_FILE_SIZE max_file_size".as_slice(),
+        // Unicode simple folds the planner enumerates: Kelvin sign for k,
+        // long s for s, dotless variants near i.
+        "KOBJECT kobject \u{212A}OBJECT_GET ver\u{17F}ion VERSION".as_bytes(),
+        "Max_File_Size mAx_FiLe_sIzE MAX_file_SIZE".as_bytes(),
+        "bj\u{f6}rn BJ\u{d6}RN caf\u{e9} CAF\u{c9} sequence \u{5e8f}\u{5217}".as_bytes(),
+        b"xxx ababab abcabc 0xdeadbeef 0XDEADBEEF v5.11 v6.1".as_slice(),
+        b"getuser_pages get_user_pages unlikely(!ptr) likely(x)".as_slice(),
+        b"memset memmset memmmset offset upset outset".as_slice(),
+        b"static\tvoid  init and static void init with spaces".as_slice(),
+        b"\xFF\xFEbinary\x00garbage\x80\x81 with high bytes".as_slice(),
+        b"aaabcd abcd aaa bcd a{3}bcd literal braces".as_slice(),
     ]
 }
 
@@ -114,6 +129,31 @@ const PATTERNS: &[&str] = &[
     "(?i)weighttable",
     "println",
     "1024 \\* 1024",
+    "sched[_-]clock",
+    "sched_clock|sched-clock",
+    "ab[cd]ef",
+    "abcef|abdef",
+    "foo.{0,20}bar",
+    "(?i)max_file_size",
+    "(?i)kobject_get",
+    "(?i)version",
+    "(?i)bj\u{f6}rn",
+    "caf[\u{e9}\u{e8}]",
+    "x{3}",
+    "(ab){3}",
+    "(abc){2}",
+    "a{3,}bcd",
+    "ab{2,4}a",
+    "0x[0-9a-f]{8}",
+    "mem+set",
+    "get_?user_pages",
+    "(?:un)?likely\\(!",
+    "hello+xyzzy|abcde+fghij",
+    "static\\s+void\\s+init",
+    "(?i)max_\\w+_size",
+    "v[0-9]+\\.[0-9]+",
+    "[RT]X_RING|s[ck][bh]_buff",
+    "\u{5e8f}\u{5217}",
 ];
 
 #[test]
@@ -129,7 +169,7 @@ fn plan_never_misses_a_real_match_on_realistic_code() {
 #[test]
 fn plan_never_misses_on_exhaustive_small_alphabet_sweep() {
     let t = weight_table();
-    let owned = words(6);
+    let owned = words(6, b"abc");
     let docs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     let indexed: Vec<_> = docs.iter().map(|d| index_grams(&t, d)).collect();
     for re in sweep_patterns() {
@@ -139,14 +179,31 @@ fn plan_never_misses_on_exhaustive_small_alphabet_sweep() {
     }
 }
 
-/// All non-empty strings over {a,b,c} up to `max` bytes.
-fn words(max: usize) -> Vec<Vec<u8>> {
+/// The same sweep under case folding: every pattern is also planned with
+/// `(?i)` and checked against mixed-case documents, so the folded variant
+/// sets and their window flushes can never drop a real match.
+#[test]
+fn plan_never_misses_on_case_folded_sweep() {
+    let t = weight_table();
+    let owned = words(5, b"abC");
+    let docs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+    let indexed: Vec<_> = docs.iter().map(|d| index_grams(&t, d)).collect();
+    for re in sweep_patterns() {
+        let folded = format!("(?i){re}");
+        if Pattern::new(&folded).is_ok() {
+            assert_no_false_negative(&t, &folded, &docs, &indexed);
+        }
+    }
+}
+
+/// All non-empty strings over `alphabet` up to `max` bytes.
+fn words(max: usize, alphabet: &[u8]) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     let mut frontier = vec![Vec::new()];
     for _ in 0..max {
         let mut next = Vec::new();
         for w in &frontier {
-            for &c in b"abc" {
+            for &c in alphabet {
                 let mut n = w.clone();
                 n.push(c);
                 out.push(n.clone());
@@ -158,27 +215,34 @@ fn words(max: usize) -> Vec<Vec<u8>> {
     out
 }
 
-/// Short regexes exercising literals, alternation, concatenation, repetition,
+/// Regex shapes exercising literals, alternation, concatenation, repetition,
 /// and classes over {a,b,c}.
+const SWEEP_SHAPES: &[&str] = &[
+    "abc",
+    "abca",
+    "a.c",
+    "ab.ab",
+    "abc|bca",
+    "a(bc|ca)b",
+    "abc.*abc",
+    "a+bc",
+    "ab?cabc",
+    "[ab]cabc",
+    "abcabc",
+    "(abc)+",
+    "ca(b|c)ca",
+    "a{3}",
+    "a{2,4}b",
+    "(ab){2}",
+    "(ab){2,}c",
+    "ab{0,2}ca",
+    "a(bc){3}",
+    "(a|bb){2}c",
+];
+
+/// [`SWEEP_SHAPES`] plus every six-byte doubled word over {a,b,c}.
 fn sweep_patterns() -> Vec<String> {
-    let mut pats: Vec<String> = [
-        "abc",
-        "abca",
-        "a.c",
-        "ab.ab",
-        "abc|bca",
-        "a(bc|ca)b",
-        "abc.*abc",
-        "a+bc",
-        "ab?cabc",
-        "[ab]cabc",
-        "abcabc",
-        "(abc)+",
-        "ca(b|c)ca",
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect();
+    let mut pats: Vec<String> = SWEEP_SHAPES.iter().map(|s| (*s).to_string()).collect();
     for &a in b"abc" {
         for &b in b"abc" {
             for &c in b"abc" {

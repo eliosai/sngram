@@ -250,6 +250,29 @@ mod tests {
     }
 
     #[test]
+    fn small_class_between_literals_matches_explicit_alternation() {
+        assert_eq!(plan_of("ab[cd]ef"), plan_of("abcef|abdef"));
+        assert_eq!(
+            plan_of("sched[_-]clock"),
+            plan_of("sched_clock|sched-clock")
+        );
+    }
+
+    #[test]
+    fn exact_literal_cover_keeps_dense_subwindows() {
+        let plan = plan_of("sched_clock");
+        let rendered = plan.to_string();
+        for gram in [
+            "sch", "che", "hed", "ed_", "d_c", "_cl", "clo", "loc", "ock",
+        ] {
+            assert!(
+                rendered.contains(gram),
+                "expected {rendered:?} to contain dense literal gram {gram:?}"
+            );
+        }
+    }
+
+    #[test]
     fn nested_alternations_both_survive() {
         let plan = plan_of("(z*abcz*defz*)(z*(ghi|jkl)z*)");
         assert!(has_or(&plan), "alternation lost in {}", shape(&plan));

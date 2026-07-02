@@ -26,6 +26,7 @@ sngram-weights = { version = "0.5.0", path = "crates/weights" }
 crc32fast = "1.5"
 
 # Regex parsing
+regex = "1"
 regex-syntax = "0.8"
 regex-lite = "0.1"
 

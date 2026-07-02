@@ -74,6 +74,12 @@ impl StringSet {
         self.0.iter().map(|g| g.len()).max().unwrap_or(0)
     }
 
+    /// Total bytes held by all strings in the set.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.0.iter().map(|g| g.len()).sum()
+    }
+
     /// Sort by `order` and remove duplicates, in place.
     pub fn clean(&mut self, order: Order) {
         match order {

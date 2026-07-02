@@ -27,6 +27,7 @@ crc32fast = { workspace = true, optional = true }
 
 [dev-dependencies]
 crc32fast = { workspace = true }
+regex = { workspace = true }
 regex-lite = { workspace = true }
 
 [lints]

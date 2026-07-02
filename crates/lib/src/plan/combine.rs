@@ -2,23 +2,48 @@
 //!
 //! `concat` and `alternate` join two [`RegexpInfo`]s; `simplify` keeps the
 //! exact/prefix/suffix sets and the match query from growing without bound,
-//! flushing their grams into the query as they get large. Ported 1:1 from
-//! Google codesearch, with sparse `cover_one` in place of trigram extraction.
+//! flushing their grams into the query as they get large. The structure is
+//! Google codesearch's; the bounds and the covering sets are sparse-native:
+//! literals cover to every gram [`extract::scan`] would emit for them (the
+//! maximal set guaranteed present in any containing document), and windows
+//! stay wide instead of degrading to trigrams after the first flush.
 
 use std::mem;
 
 use crate::extract::{self, MIN_LEN};
 use crate::gram::Gram;
 
-use super::analyze::{Analyzer, BOUNDARY_CTX, MAX_EXACT, MAX_SET};
+use super::analyze::{Analyzer, BOUNDARY_GROW, BOUNDARY_KEEP, MAX_EXACT, MAX_EXACT_BYTES, MAX_SET};
 use super::info::RegexpInfo;
 use super::query::{Op, Query};
 use super::strings::{Order, StringSet};
 
+/// Bound on the seam cross product flushed at a concat boundary. Beyond it
+/// the boundary strings are truncated back toward codesearch's two-byte
+/// stubs, trading precision for a bounded plan.
+const MAX_SEAM_CROSS: usize = 128;
+
+/// Most strings ever covered in one flush, and the largest exact cross
+/// product built in one concat step. Case-folded text doubles per character
+/// and stays under this; a wide class (like a hex digit) multiplies by its
+/// arity and would otherwise balloon the plan into thousands of OR branches
+/// in a single step.
+const MAX_FLUSH_SET: usize = 512;
+
+/// Branch count past which a flushed set covers each string minimally
+/// instead of maximally.
+const MAX_MAXIMAL_COVER_BRANCHES: usize = 8;
+
+/// After a count-overflow flush, sets shrink to this many strings so several
+/// characters of regrowth fit before the next flush: case-folded windows
+/// then flush every few characters instead of every character.
+const REGROW_TARGET: usize = MAX_SET / 4;
+
 impl Analyzer<'_> {
     /// The summary for `xy` given the summaries of `x` and `y`. Consumes both
     /// match queries rather than cloning them.
-    pub fn concat(&self, x: RegexpInfo, y: RegexpInfo) -> RegexpInfo {
+    pub fn concat(&self, mut x: RegexpInfo, y: RegexpInfo) -> RegexpInfo {
+        self.bound_exact_cross(&mut x, &y);
         let mut xy = RegexpInfo::blank();
         let boundary = seam(&x, &y);
         if let (Some(xe), Some(ye)) = (&x.exact, &y.exact) {
@@ -37,6 +62,11 @@ impl Analyzer<'_> {
     }
 
     /// The summary for `x|y` given the summaries of `x` and `y`.
+    ///
+    /// Callers folding a many-branch alternation should flush each branch
+    /// with [`Self::flush_sets`] first, so every branch's constraints stay in
+    /// its own match query instead of cross-mixing through the unioned
+    /// prefix/suffix sets.
     pub fn alternate(&self, mut x: RegexpInfo, mut y: RegexpInfo) -> RegexpInfo {
         let mut xy = RegexpInfo::blank();
         alternate_sets(&mut xy, &x, &y);
@@ -60,28 +90,95 @@ impl Analyzer<'_> {
         }
     }
 
+    /// Flush and spill `x`'s exact set before a concat whose cross product
+    /// would exceed [`MAX_FLUSH_SET`], so one wide class cannot balloon the
+    /// exact set (and the flush that follows it) in a single step. The full
+    /// windows accumulated so far are covered before any byte is dropped.
+    fn bound_exact_cross(&self, x: &mut RegexpInfo, y: &RegexpInfo) {
+        let (Some(xe), Some(ye)) = (&x.exact, &y.exact) else {
+            return;
+        };
+        if xe.len().saturating_mul(ye.len()) <= MAX_FLUSH_SET {
+            return;
+        }
+        self.add_exact(x);
+        if let Some(exact) = x.exact.take() {
+            spill_exact(x, &exact);
+        }
+        self.simplify(x, false);
+    }
+
+    /// Flush a non-exact branch's prefix and suffix covers into its own match
+    /// query. Used before alternation unions the sets, which would otherwise
+    /// let one branch's prefix satisfy another branch's suffix.
+    pub fn flush_sets(&self, info: &mut RegexpInfo) {
+        if info.exact.is_some() {
+            return;
+        }
+        let q = mem::replace(&mut info.match_, Query::all());
+        let q = self.and_grams(q, &info.prefix);
+        info.match_ = self.and_grams(q, &info.suffix);
+    }
+
     /// `q` AND the OR over each string's covering grams. A string shorter than
-    /// a gram, or one that covers to nothing, leaves `q` unconstrained.
+    /// a gram, or one that covers to nothing, leaves `q` unconstrained, as
+    /// does an exhausted [`super::analyze::PLAN_GRAM_BUDGET`].
+    ///
+    /// A lone string gets the maximal cover; a many-branch set gets each
+    /// string's minimal cover, since the OR over branches dilutes what the
+    /// redundant interior grams would add and every gram costs a lookup.
     pub fn and_grams(&self, q: Query, set: &StringSet) -> Query {
-        if set.min_len() < MIN_LEN {
+        if set.is_empty() || set.min_len() < MIN_LEN || !self.within_budget() {
             return q;
         }
+        let minimal = set.len() > MAX_MAXIMAL_COVER_BRANCHES;
         let mut or = Query::none();
+        let mut spent = 0;
         for s in set.as_slice() {
-            let grams = self.cover_set(s);
+            let grams = if minimal {
+                self.minimal_cover_set(s)
+            } else {
+                self.cover_set(s)
+            };
             if grams.is_empty() {
                 return q;
             }
+            spent += grams.len();
             or = or.or(Query::grams(Op::And, grams));
         }
+        self.spend(spent);
         q.and(or)
     }
 
+    /// The minimal covering grams of `s`, chaining it end to end.
+    fn minimal_cover_set(&self, s: &[u8]) -> StringSet {
+        let mut set = StringSet::new();
+        for gram in extract::cover_one(self.table(), s) {
+            set.push(gram);
+        }
+        set.clean(Order::Prefix);
+        set
+    }
+
+    /// Every gram guaranteed to be indexed for a document containing `s`.
+    ///
+    /// A gram's emission by [`extract::scan`] depends only on the bigram
+    /// weights inside its span, so each gram the scan emits for `s` alone is
+    /// also emitted when scanning any document that contains `s`. This is the
+    /// maximal sound constraint set; the minimal covering set is included for
+    /// its equal-weight plateau grams the scan's dedup collapses.
     fn cover_set(&self, s: &[u8]) -> StringSet {
         let mut set = StringSet::new();
         for gram in extract::cover_one(self.table(), s) {
             set.push(gram);
         }
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "scan emits start..end spans within s"
+        )]
+        extract::scan(self.table(), s, |start, end, _| {
+            set.push(Gram::from(&s[start..end]));
+        });
         set.clean(Order::Prefix);
         set
     }
@@ -100,20 +197,35 @@ impl Analyzer<'_> {
             }
         }
         if info.exact.is_none() {
-            self.simplify_set(info, Order::Prefix);
-            self.simplify_set(info, Order::Suffix);
+            self.simplify_set(info, Order::Prefix, force);
+            self.simplify_set(info, Order::Suffix, force);
         }
     }
 
-    /// Flush a prefix or suffix set's grams into the match query, then shrink
-    /// the set back under [`MAX_SET`] by truncating and de-duplicating.
-    fn simplify_set(&self, info: &mut RegexpInfo, order: Order) {
+    /// Bound a prefix or suffix set. The set's covers are flushed into the
+    /// match query only when the set must shrink (or at `force`, the final
+    /// flush): flushing every step would re-cover the same window each time a
+    /// character is appended, while flushing on truncation covers each window
+    /// once, exactly before the bytes that formed it are dropped.
+    fn simplify_set(&self, info: &mut RegexpInfo, order: Order, force: bool) {
         let mut t = take_set(info, order);
         t.clean(order);
-        let q = mem::replace(&mut info.match_, Query::all());
-        info.match_ = self.and_grams(q, &t);
-        reduce_set(&mut t, order);
-        dedup_redundant(&mut t, order);
+        if t.len() > MAX_FLUSH_SET {
+            // A wide class ballooned the set in one step; covering every
+            // string would balloon the plan the same way. Shrink first and
+            // cover what survives.
+            reduce_set(&mut t, order);
+            dedup_redundant(&mut t, order);
+        }
+        let needs_reduce = t.len() > MAX_SET || t.max_len() > BOUNDARY_GROW;
+        if force || needs_reduce {
+            let q = mem::replace(&mut info.match_, Query::all());
+            info.match_ = self.and_grams(q, &t);
+        }
+        if needs_reduce {
+            reduce_set(&mut t, order);
+            dedup_redundant(&mut t, order);
+        }
         put_set(info, order, t);
     }
 }
@@ -162,7 +274,8 @@ fn concat_suffix(x: &RegexpInfo, y: &RegexpInfo) -> StringSet {
 }
 
 /// The boundary strings straddling a concat seam, when both sides lack an
-/// exact set, the sets are small, and the strings are long enough to cover.
+/// exact set and the strings are long enough to cover. An oversized cross
+/// product is rebuilt from short stubs so the flush stays bounded.
 fn seam(x: &RegexpInfo, y: &RegexpInfo) -> Option<StringSet> {
     if x.exact.is_some() || y.exact.is_some() {
         return None;
@@ -173,7 +286,34 @@ fn seam(x: &RegexpInfo, y: &RegexpInfo) -> Option<StringSet> {
     if x.suffix.min_len() + y.prefix.min_len() < MIN_LEN {
         return None;
     }
-    Some(x.suffix.cross(&y.prefix, Order::Prefix))
+    if x.suffix.len().saturating_mul(y.prefix.len()) <= MAX_SEAM_CROSS {
+        return Some(x.suffix.cross(&y.prefix, Order::Prefix));
+    }
+    let (left, right) = shrink_seam(x.suffix.clone(), y.prefix.clone())?;
+    if left.min_len() + right.min_len() < MIN_LEN {
+        return None;
+    }
+    Some(left.cross(&right, Order::Prefix))
+}
+
+/// Truncate the larger seam side, one byte at a time, until the cross product
+/// fits under [`MAX_SEAM_CROSS`]. Truncation merges strings that shared the
+/// dropped byte, shrinking the set.
+fn shrink_seam(mut left: StringSet, mut right: StringSet) -> Option<(StringSet, StringSet)> {
+    while left.len().saturating_mul(right.len()) > MAX_SEAM_CROSS {
+        let (bigger, order) = if left.len() >= right.len() {
+            (&mut left, Order::Suffix)
+        } else {
+            (&mut right, Order::Prefix)
+        };
+        let keep = bigger.max_len().saturating_sub(1);
+        if keep == 0 {
+            return None;
+        }
+        truncate_to(bigger, order, keep);
+        bigger.clean(order);
+    }
+    Some((left, right))
 }
 
 /// Whether the exact set has grown large enough, or selective enough, to flush.
@@ -182,33 +322,35 @@ fn should_flush_exact(info: &RegexpInfo, force: bool) -> bool {
         return false;
     };
     let min = exact.min_len();
-    exact.len() > MAX_EXACT || (min >= MIN_LEN && force) || min > MIN_LEN
+    exact.len() > MAX_EXACT || exact.byte_len() > MAX_EXACT_BYTES || (min >= MIN_LEN && force)
 }
 
-/// Move each exact string into the prefix and suffix sets as a short stub.
-#[allow(clippy::indexing_slicing, reason = "k is min(BOUNDARY_CTX, len)")]
+/// Move each exact string into the prefix and suffix sets as a stub wide
+/// enough for the next windows to overlap the flushed one.
+#[allow(clippy::indexing_slicing, reason = "k is min(BOUNDARY_KEEP, len)")]
 fn spill_exact(info: &mut RegexpInfo, exact: &StringSet) {
     for s in exact.as_slice() {
-        if s.len() < MIN_LEN {
-            info.prefix.push(s.clone());
-            info.suffix.push(s.clone());
-        } else {
-            let k = BOUNDARY_CTX.min(s.len());
-            info.prefix.push(Gram::from(&s[..k]));
-            info.suffix.push(Gram::from(&s[s.len() - k..]));
-        }
+        let k = BOUNDARY_KEEP.min(s.len());
+        info.prefix.push(Gram::from(&s[..k]));
+        info.suffix.push(Gram::from(&s[s.len() - k..]));
     }
 }
 
-/// Shrink `t` under [`MAX_SET`] by truncating its strings to ever-shorter
-/// prefixes (or suffixes), de-duplicating after each pass. Strings up to
-/// [`BOUNDARY_CTX`] bytes are kept intact while the set stays small enough.
+/// Shrink `t` back under its bounds: strings are truncated to
+/// [`BOUNDARY_KEEP`] bytes of context, then to ever-shorter prefixes (or
+/// suffixes) until an overflowing set drops to [`REGROW_TARGET`] strings,
+/// de-duplicating between passes.
 fn reduce_set(t: &mut StringSet, order: Order) {
-    let mut keep = BOUNDARY_CTX.min(t.max_len());
+    let target = if t.len() > MAX_SET {
+        REGROW_TARGET
+    } else {
+        MAX_SET
+    };
+    let mut keep = BOUNDARY_KEEP.min(t.max_len());
     loop {
         truncate_to(t, order, keep);
         t.clean(order);
-        if t.len() <= MAX_SET || keep == 0 {
+        if t.len() <= target || keep == 0 {
             break;
         }
         keep -= 1;
