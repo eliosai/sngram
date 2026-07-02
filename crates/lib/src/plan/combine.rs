@@ -39,12 +39,32 @@ const MAX_MAXIMAL_COVER_BRANCHES: usize = 8;
 /// then flush every few characters instead of every character.
 const REGROW_TARGET: usize = MAX_SET / 4;
 
+/// A conservative gram-count estimate for flushing `set`: roughly one gram
+/// per bigram of each string under minimal covers.
+fn flush_estimate(set: &StringSet) -> usize {
+    set.len()
+        .saturating_mul(set.max_len().div_ceil(MIN_LEN) + 1)
+}
+
+/// Shorten `set`'s strings from the far end until its flush estimate fits
+/// `cap`; truncation merges strings that shared the dropped bytes.
+fn fit_flush(set: &mut StringSet, order: Order, cap: usize) {
+    while flush_estimate(set) > cap && set.max_len() > MIN_LEN {
+        truncate_to(set, order, set.max_len() - 1);
+        set.clean(order);
+    }
+}
+
 impl Analyzer<'_> {
     /// The summary for `xy` given the summaries of `x` and `y`. Consumes both
     /// match queries rather than cloning them.
-    pub fn concat(&self, mut x: RegexpInfo, y: RegexpInfo) -> RegexpInfo {
-        self.bound_exact_cross(&mut x, &y);
+    pub fn concat(&self, mut x: RegexpInfo, mut y: RegexpInfo) -> RegexpInfo {
+        self.bound_crosses(&mut x, &mut y);
         let mut xy = RegexpInfo::blank();
+        // Codesearch leaves this false and leans on the "" set member; the
+        // flag is set faithfully here because look-around satisfiability
+        // reads it to know whether a boundary byte must exist.
+        xy.can_empty = x.can_empty && y.can_empty;
         let boundary = seam(&x, &y);
         if let (Some(xe), Some(ye)) = (&x.exact, &y.exact) {
             xy.exact = Some(xe.cross(ye, Order::Prefix));
@@ -55,7 +75,7 @@ impl Analyzer<'_> {
         xy.match_ = x.match_.and(y.match_);
         if let Some(boundary) = boundary {
             let q = mem::replace(&mut xy.match_, Query::all());
-            xy.match_ = self.and_grams(q, &boundary);
+            xy.match_ = self.and_grams(q, &boundary, Order::Prefix);
         }
         self.simplify(&mut xy, false);
         xy
@@ -86,26 +106,32 @@ impl Analyzer<'_> {
     pub fn add_exact(&self, info: &mut RegexpInfo) {
         if let Some(exact) = info.exact.clone() {
             let q = mem::replace(&mut info.match_, Query::all());
-            info.match_ = self.and_grams(q, &exact);
+            info.match_ = self.and_grams(q, &exact, Order::Prefix);
         }
     }
 
-    /// Flush and spill `x`'s exact set before a concat whose cross product
-    /// would exceed [`MAX_FLUSH_SET`], so one wide class cannot balloon the
-    /// exact set (and the flush that follows it) in a single step. The full
+    /// Flush and spill an exact set before a concat whose cross product
+    /// would exceed [`MAX_FLUSH_SET`], so one wide class cannot balloon a
+    /// set (and the flush that follows it) in a single step. The full
     /// windows accumulated so far are covered before any byte is dropped.
-    fn bound_exact_cross(&self, x: &mut RegexpInfo, y: &RegexpInfo) {
-        let (Some(xe), Some(ye)) = (&x.exact, &y.exact) else {
-            return;
-        };
-        if xe.len().saturating_mul(ye.len()) <= MAX_FLUSH_SET {
-            return;
+    fn bound_crosses(&self, x: &mut RegexpInfo, y: &mut RegexpInfo) {
+        let over = |a: usize, b: usize| a.saturating_mul(b) > MAX_FLUSH_SET;
+        match (&x.exact, &y.exact) {
+            (Some(xe), Some(ye)) if over(xe.len(), ye.len()) => self.flush_spill(x),
+            (Some(xe), None) if over(xe.len(), y.prefix.len()) => self.flush_spill(x),
+            (None, Some(ye)) if over(x.suffix.len(), ye.len()) => self.flush_spill(y),
+            _ => {},
         }
-        self.add_exact(x);
-        if let Some(exact) = x.exact.take() {
-            spill_exact(x, &exact);
+    }
+
+    /// Cover an exact set into its own match query, then demote it to
+    /// prefix/suffix stubs.
+    fn flush_spill(&self, info: &mut RegexpInfo) {
+        self.add_exact(info);
+        if let Some(exact) = info.exact.take() {
+            spill_exact(info, &exact);
         }
-        self.simplify(x, false);
+        self.simplify(info, false);
     }
 
     /// Flush a non-exact branch's prefix and suffix covers into its own match
@@ -116,8 +142,8 @@ impl Analyzer<'_> {
             return;
         }
         let q = mem::replace(&mut info.match_, Query::all());
-        let q = self.and_grams(q, &info.prefix);
-        info.match_ = self.and_grams(q, &info.suffix);
+        let q = self.and_grams(q, &info.prefix, Order::Prefix);
+        info.match_ = self.and_grams(q, &info.suffix, Order::Suffix);
     }
 
     /// `q` AND the OR over each string's covering grams. A string shorter than
@@ -127,10 +153,26 @@ impl Analyzer<'_> {
     /// A lone string gets the maximal cover; a many-branch set gets each
     /// string's minimal cover, since the OR over branches dilutes what the
     /// redundant interior grams would add and every gram costs a lookup.
-    pub fn and_grams(&self, q: Query, set: &StringSet) -> Query {
+    /// One flush may spend at most half the remaining budget — `order` says
+    /// which end of the strings to shorten when it must fit — so the head of
+    /// a long pattern can never starve its tail of constraints.
+    pub fn and_grams(&self, q: Query, set: &StringSet, order: Order) -> Query {
         if set.is_empty() || set.min_len() < MIN_LEN || !self.within_budget() {
             return q;
         }
+        if flush_estimate(set) > self.flush_cap() {
+            let mut fitted = set.clone();
+            fit_flush(&mut fitted, order, self.flush_cap());
+            if fitted.is_empty() || fitted.min_len() < MIN_LEN {
+                return q;
+            }
+            return self.cover_or(q, &fitted);
+        }
+        self.cover_or(q, set)
+    }
+
+    /// AND into `q` the OR over each string's covers, spending the budget.
+    fn cover_or(&self, q: Query, set: &StringSet) -> Query {
         let minimal = set.len() > MAX_MAXIMAL_COVER_BRANCHES;
         let mut or = Query::none();
         let mut spent = 0;
@@ -220,7 +262,7 @@ impl Analyzer<'_> {
         let needs_reduce = t.len() > MAX_SET || t.max_len() > BOUNDARY_GROW;
         if force || needs_reduce {
             let q = mem::replace(&mut info.match_, Query::all());
-            info.match_ = self.and_grams(q, &t);
+            info.match_ = self.and_grams(q, &t, order);
         }
         if needs_reduce {
             reduce_set(&mut t, order);
@@ -350,7 +392,10 @@ fn reduce_set(t: &mut StringSet, order: Order) {
     loop {
         truncate_to(t, order, keep);
         t.clean(order);
-        if t.len() <= target || keep == 0 {
+        // Never truncate non-empty strings to empty: a set of single bytes
+        // may overshoot the target (bounded by 256), but an artifact ""
+        // would nullify every later cross and sever the seam for good.
+        if t.len() <= target || keep <= 1 {
             break;
         }
         keep -= 1;

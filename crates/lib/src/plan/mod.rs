@@ -8,17 +8,26 @@
 mod analyze;
 mod combine;
 mod info;
+mod options;
 mod query;
 mod strings;
 
 use core::fmt;
 
+use regex_syntax::hir::Hir;
 use sngram_types::WeightTable;
 
+use crate::error::QueryError;
 use crate::gram::Gram;
-use crate::pattern::Pattern;
+use crate::pattern::{self, Pattern};
 use analyze::Analyzer;
 use query::{Op, Query};
+
+pub use options::{PlanCase, PlanOptions, PlanSyntax};
+
+/// Nest limit matching `grep-regex`'s translator, so any pattern the
+/// verifier accepts also parses here.
+const VERIFIER_NEST_LIMIT: u32 = 250;
 
 /// A conservative boolean query over sparse-gram presence.
 ///
@@ -60,8 +69,65 @@ pub enum QueryPlan {
 /// yields [`QueryPlan::All`] (the caller decides whether to scan or reject),
 /// and an impossible pattern yields [`QueryPlan::None`].
 pub(crate) fn query(table: &WeightTable, pattern: &Pattern) -> QueryPlan {
+    query_hir(table, pattern.hir())
+}
+
+/// Decompose one or more patterns under the verifier's match options.
+///
+/// The patterns are escaped (for fixed strings), OR-joined, and parsed with
+/// the same flags the verifying engine uses — including engine-rule smart
+/// case — so the plan can never assume narrower semantics than the match
+/// run that follows. Inversion yields [`QueryPlan::All`]: every document may
+/// hold a non-matching line.
+pub(crate) fn query_with<P: AsRef<str>>(
+    table: &WeightTable,
+    patterns: &[P],
+    opts: PlanOptions,
+) -> Result<QueryPlan, QueryError> {
+    if opts.invert || patterns.is_empty() {
+        return Ok(QueryPlan::All);
+    }
+    let mut parts = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        let pattern = pattern.as_ref();
+        match opts.syntax {
+            PlanSyntax::Regex => parts.push(format!("(?:{pattern})")),
+            PlanSyntax::FixedStrings => {
+                parts.push(format!("(?:{})", regex_syntax::escape(pattern)));
+            },
+        }
+    }
+    let joined = parts.join("|");
+    pattern::check_length(&joined)?;
+    let hir = parse_joined(&joined, opts)?;
+    Ok(query_hir(table, &hir))
+}
+
+/// Parse the joined pattern with the flags the verifying engine uses.
+fn parse_joined(joined: &str, opts: PlanOptions) -> Result<Hir, QueryError> {
+    let insensitive = match opts.case {
+        PlanCase::Sensitive => false,
+        PlanCase::Insensitive => true,
+        PlanCase::Smart => options::smart_case_insensitive(joined),
+    };
+    regex_syntax::ParserBuilder::new()
+        .nest_limit(VERIFIER_NEST_LIMIT)
+        .octal(false)
+        .utf8(false)
+        .multi_line(true)
+        .case_insensitive(insensitive)
+        .dot_matches_new_line(opts.dotall)
+        .crlf(opts.crlf)
+        .unicode(opts.unicode)
+        .build()
+        .parse(joined)
+        .map_err(|err| QueryError::InvalidRegex(Box::new(err)))
+}
+
+/// Fold an already-parsed HIR into a plan.
+fn query_hir(table: &WeightTable, hir: &Hir) -> QueryPlan {
     let analyzer = Analyzer::new(table);
-    let mut info = analyzer.analyze(pattern.hir());
+    let mut info = analyzer.analyze(hir);
     analyzer.simplify(&mut info, true);
     analyzer.add_exact(&mut info);
     to_plan(info.match_)
@@ -209,7 +275,11 @@ mod tests {
         assert_eq!(plan_of("^abc"), plan_of("abc"));
         assert_eq!(plan_of("abc$"), plan_of("abc"));
         assert_eq!(plan_of(r"\babc"), plan_of("abc"));
-        assert_eq!(plan_of(r"ab\bc"), plan_of("abc"));
+        // A satisfiable interior boundary adds nothing to the plan; an
+        // unsatisfiable one (like `ab\bc`) proves the pattern matches
+        // nothing and plans to None instead.
+        assert_eq!(plan_of(r"ab\b-cd"), plan_of("ab-cd"));
+        assert_eq!(plan_of(r"ab\bc"), QueryPlan::None);
     }
 
     #[test]
@@ -288,6 +358,93 @@ mod tests {
         assert_eq!(plan_of(".").to_string(), "+");
         assert_eq!(plan_of(r"[^\s\S]").to_string(), "-");
         assert!(plan_of("(a+hello|b+world)").to_string().contains('|'));
+    }
+
+    mod options_spec {
+        //! `query_with` must build plans from exactly the verifier's
+        //! semantics: engine-rule smart case, fixed-string escaping,
+        //! OR-joined multiple patterns, and All for inversion.
+
+        use super::{plan_of, table};
+        use crate::plan::{PlanCase, PlanOptions, PlanSyntax, QueryPlan, query_with};
+
+        fn with(opts: PlanOptions, patterns: &[&str]) -> QueryPlan {
+            query_with(&table(), patterns, opts).expect("patterns plan")
+        }
+
+        #[test]
+        fn smart_case_folds_when_uppercase_only_in_escapes() {
+            // grep-regex treats \W as class, not literal: the verifier
+            // matches insensitively, so the plan must too.
+            let smart = with(
+                PlanOptions {
+                    case: PlanCase::Smart,
+                    ..PlanOptions::default()
+                },
+                &[r"maxfile\Wsize"],
+            );
+            let insensitive = with(
+                PlanOptions {
+                    case: PlanCase::Insensitive,
+                    ..PlanOptions::default()
+                },
+                &[r"maxfile\Wsize"],
+            );
+            assert_eq!(smart, insensitive);
+        }
+
+        #[test]
+        fn smart_case_stays_sensitive_on_uppercase_literals() {
+            let smart = with(
+                PlanOptions {
+                    case: PlanCase::Smart,
+                    ..PlanOptions::default()
+                },
+                &["MaxFile"],
+            );
+            let sensitive = with(PlanOptions::default(), &["MaxFile"]);
+            assert_eq!(smart, sensitive);
+        }
+
+        #[test]
+        fn fixed_strings_escape_metacharacters() {
+            let fixed = with(
+                PlanOptions {
+                    syntax: PlanSyntax::FixedStrings,
+                    ..PlanOptions::default()
+                },
+                &["max.*size"],
+            );
+            assert_eq!(fixed, plan_of(r"max\.\*size"));
+        }
+
+        #[test]
+        fn invert_plans_everything() {
+            let inverted = with(
+                PlanOptions {
+                    invert: true,
+                    ..PlanOptions::default()
+                },
+                &["max_file_size"],
+            );
+            assert_eq!(inverted, QueryPlan::All);
+        }
+
+        #[test]
+        fn multiple_patterns_join_as_alternation() {
+            let joined = with(PlanOptions::default(), &["max_file", "min_file"]);
+            assert_eq!(joined, plan_of("(?:max_file)|(?:min_file)"));
+        }
+
+        #[test]
+        fn non_unicode_byte_patterns_parse() {
+            let opts = PlanOptions {
+                unicode: false,
+                ..PlanOptions::default()
+            };
+            let plan = query_with(&table(), &[r"foobar\xFF"], opts).expect("bytes plan");
+            assert!(!matches!(plan, QueryPlan::All));
+        }
     }
 
     #[test]

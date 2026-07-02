@@ -71,6 +71,11 @@ impl Query {
         self.grams.len() == 1 && self.sub.is_empty()
     }
 
+    /// Total grams in this query tree: the cost cloning it replicates.
+    pub fn weight(&self) -> usize {
+        self.grams.len() + self.sub.iter().map(Self::weight).sum::<usize>()
+    }
+
     fn is(&self, op: Op) -> bool {
         self.op == op
     }

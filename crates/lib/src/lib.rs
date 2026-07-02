@@ -44,7 +44,7 @@ pub use extract::StreamScanner;
 pub use gram::Gram;
 pub use hashing::hash_bytes;
 pub use pattern::Pattern;
-pub use plan::QueryPlan;
+pub use plan::{PlanCase, PlanOptions, PlanSyntax, QueryPlan};
 
 use sngram_types::{Content, WeightTable};
 
@@ -70,6 +70,27 @@ pub fn scan(table: &WeightTable, content: &Content<'_>, emit: impl FnMut(usize, 
 #[must_use]
 pub fn query(table: &WeightTable, pattern: &Pattern) -> QueryPlan {
     plan::query(table, pattern)
+}
+
+/// Decompose one or more patterns into a [`QueryPlan`] under the verifying
+/// engine's match options.
+///
+/// Prefer this over [`query`] whenever the engine that verifies candidates
+/// is configured with anything beyond default Rust-regex semantics: the
+/// options carry case mode (including engine-rule smart case), fixed-string
+/// interpretation, Unicode mode, and inversion, so the plan is built from
+/// exactly the semantics the verifier will apply.
+///
+/// # Errors
+///
+/// Returns [`QueryError`] when the joined patterns exceed the length limit
+/// or fail to parse.
+pub fn query_with<P: AsRef<str>>(
+    table: &WeightTable,
+    patterns: &[P],
+    opts: &PlanOptions,
+) -> Result<QueryPlan, QueryError> {
+    plan::query_with(table, patterns, *opts)
 }
 
 #[cfg(test)]

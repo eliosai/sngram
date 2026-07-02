@@ -47,6 +47,22 @@ const PATTERNS: &[(&str, &str)] = &[
     ("fn_def", r"fn \w+\("),
     ("struct_field_vis", r"pub(\(crate\))? \w+:"),
     ("sql_containment", "grams @> ARRAY"),
+    // Planner blowup pins: nested bounded repetition (budget-capped),
+    // long case-folded runs (cross caps), wide-OR implication checks, and
+    // the wide-class repetition path.
+    ("nested_rep_deep", r"((((((abc|abd){4}){4}){4}){4}){4}){4}"),
+    (
+        "ci_long_run",
+        r"(?i)abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+    ),
+    (
+        "alt_wildcard_wide",
+        r"(aa000.*bb000|aa001.*bb001|aa002.*bb002|aa003.*bb003|aa004.*bb004|aa005.*bb005)",
+    ),
+    (
+        "hex_uuid",
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    ),
 ];
 
 fn bench_pattern_parse(c: &mut Criterion) {

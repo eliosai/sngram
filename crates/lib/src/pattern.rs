@@ -38,7 +38,7 @@ impl Pattern {
     }
 }
 
-const fn check_length(regex: &str) -> Result<(), QueryError> {
+pub(crate) const fn check_length(regex: &str) -> Result<(), QueryError> {
     if regex.len() > MAX_PATTERN_LEN {
         return Err(QueryError::PatternTooLong {
             len: regex.len(),

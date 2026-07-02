@@ -165,10 +165,12 @@ fn exact_repetition_matches_expanded_plan() {
 
 #[test]
 fn min_repetition_keeps_expanded_prefix() {
+    // The expanded copies must bind to the following literal: "aab" only
+    // exists when at least two expanded copies sit adjacent to "bcd".
     let rendered = plan_of("a{3,}bcd").to_string();
     assert!(
-        rendered.contains("aaa"),
-        "expected expanded minimum copies in {rendered}"
+        rendered.contains("aab"),
+        "expected the repeat run bound to the literal in {rendered}"
     );
 }
 
@@ -204,6 +206,33 @@ fn plus_seam_is_covered() {
 }
 
 #[test]
+fn wide_class_pair_keeps_the_trailing_seam() {
+    // Two enumerated classes cross to 52x52 strings; truncating the
+    // boundary set all the way to empty strings would sever the seam to
+    // "lock" and admit any document with "read" and "lock" fragments.
+    assert_rejects("read[a-zA-Z][a-zA-Z]lock", b"readb lock held");
+}
+
+#[test]
+fn open_repetition_keeps_multi_copy_seam() {
+    // x{n,} expands as x+ then full copies, so the copies sit adjacent to
+    // the following literal: a one-copy suffix window ("abcd") admits
+    // documents lacking the repeated run entirely.
+    assert_rejects("a{5,}bcd", b"aaaaaaa then abcd");
+}
+
+#[test]
+fn budget_reaches_the_pattern_tail() {
+    // A long case-folded pattern must keep some constraint on its tail;
+    // spending the whole gram budget on the head admits any document
+    // holding only the head.
+    assert_rejects(
+        "(?i)trace_event_raw_event_sched_switch",
+        b"trace_event_raw_event noth",
+    );
+}
+
+#[test]
 fn gap_islands_are_both_required() {
     assert_rejects("sched.*clock", b"schedule the meeting");
     assert_rejects("sched.*clock", b"clock without the other word");
@@ -212,6 +241,25 @@ fn gap_islands_are_both_required() {
 #[test]
 fn unicode_case_fold_stays_constrained() {
     assert!(!matches!(plan_of("(?i)björn_qux"), QueryPlan::All));
+}
+
+#[test]
+fn impossible_look_contexts_plan_to_none() {
+    // These match nothing: every candidate would be a false positive, and
+    // the byte context around the assertion proves it at plan time.
+    assert!(matches!(plan_of(r"t\bhe"), QueryPlan::None));
+    assert!(matches!(plan_of(r"foo$bar"), QueryPlan::None));
+    assert!(matches!(plan_of(r"abc\Adef"), QueryPlan::None));
+    assert!(matches!(plan_of(r"kfree\B\("), QueryPlan::None));
+}
+
+#[test]
+fn satisfiable_look_contexts_stay_planned() {
+    assert!(!matches!(plan_of(r"\bkfree_skb\b"), QueryPlan::None));
+    assert!(!matches!(plan_of(r"^static_call"), QueryPlan::None));
+    assert!(!matches!(plan_of(r"module_exit$"), QueryPlan::None));
+    assert!(!matches!(plan_of(r"foo\B_bar"), QueryPlan::None));
+    assert!(!matches!(plan_of(r"end\.\bstart"), QueryPlan::None));
 }
 
 // --- plan size must stay bounded under combinatorial patterns ---
@@ -241,4 +289,14 @@ fn case_insensitive_long_pattern_keeps_plan_bounded() {
     let plan = plan_of("(?i)netif_receive_skb_list_internal");
     let count = plan_gram_count(&plan);
     assert!(count <= 16384, "plan ballooned to {count} grams");
+}
+
+#[test]
+fn nested_bounded_repetition_keeps_plan_bounded() {
+    // Each nesting level multiplies the expanded copies; without a cap on
+    // replicating the accumulated match query this is 4^depth grams and a
+    // 64-character pattern plans for seconds.
+    let plan = plan_of("((((((((abc|abd){4}){4}){4}){4}){4}){4}){4}){4}");
+    let count = plan_gram_count(&plan);
+    assert!(count <= 8192, "plan ballooned to {count} grams");
 }
