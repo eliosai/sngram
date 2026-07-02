@@ -1,0 +1,20 @@
+scripts/eg-fn-check.sh
+  s_a130935442d1aa::t_3716df48c53e42 1-37,39,41-64
+  s_a130935442d1aa::t_409a5abdcaba12 38,40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "cad48c6b1580cc92bf33bfddec7c6c592052e011",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
