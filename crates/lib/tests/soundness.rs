@@ -108,6 +108,14 @@ fn corpus() -> Vec<&'static [u8]> {
         b"static\tvoid  init and static void init with spaces".as_slice(),
         b"\xFF\xFEbinary\x00garbage\x80\x81 with high bytes".as_slice(),
         b"aaabcd abcd aaa bcd a{3}bcd literal braces".as_slice(),
+        // Wide-class boundary-byte seams: a real Greek/Cyrillic scalar
+        // abutting a literal must keep satisfying the plan, which now
+        // requires a <continuation-byte>literal (or literal<lead-byte>)
+        // window. The first byte of these scalars is a lead byte and the
+        // last a continuation byte, exactly the boundary bytes the wide
+        // class contributes.
+        "\u{3b1}term_var reads read\u{43b}lock and term_var\u{3a9} ok".as_bytes(),
+        "init\u{4dc}call fires the init\u{444}call path".as_bytes(),
     ]
 }
 
@@ -154,6 +162,12 @@ const PATTERNS: &[&str] = &[
     "v[0-9]+\\.[0-9]+",
     "[RT]X_RING|s[ck][bh]_buff",
     "\u{5e8f}\u{5217}",
+    // Wide unicode classes flanking literals: the boundary-byte seams must
+    // never drop a real scalar-plus-literal match.
+    r"\p{Greek}term_var",
+    r"term_var\p{Greek}",
+    r"read\p{Cyrillic}lock",
+    r"init\p{Cyrillic}call",
 ];
 
 #[test]

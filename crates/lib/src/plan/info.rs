@@ -67,18 +67,6 @@ impl RegexpInfo {
         }
     }
 
-    /// Describes a regexp matching any single character.
-    pub fn any_char() -> Self {
-        Self {
-            can_empty: false,
-            exact: None,
-            prefix: empty_member(),
-            suffix: empty_member(),
-            plus_base: None,
-            match_: Query::all(),
-        }
-    }
-
     /// Describes a regexp matching no string at all.
     pub const fn no_match() -> Self {
         Self {
