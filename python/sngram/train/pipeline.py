@@ -50,6 +50,8 @@ READ_GAP_WARN_S = 60.0
 STALL_AFTER_S = 180.0
 RETRY_BASE_S = 2.0
 RETRY_CAP_S = 60.0
+MEMORY_SOFT_LIMIT_BYTES = 5 * 10**9
+MEMORY_TRIM_INTERVAL_S = 5.0
 # early bootstrap mints (those below mint_every) before the steady cadence; with
 # the default mint_every=1TB the schedule is 100gb, 500gb, then every 1TB
 BOOTSTRAP_MINTS = [100 * 10**9, 500 * 10**9, 10**12]
@@ -237,6 +239,25 @@ def rss_bytes() -> int:
         return 0
 
 
+def memory_stats() -> dict[str, object]:
+    stats: dict[str, object] = {
+        "rss": rss_bytes(),
+        "arrow_bytes": 0,
+        "arrow_max": 0,
+        "arrow_backend": "unavailable",
+    }
+    try:
+        import pyarrow as pa
+
+        pool = pa.default_memory_pool()
+        stats["arrow_bytes"] = pool.bytes_allocated()
+        stats["arrow_max"] = pool.max_memory() or 0
+        stats["arrow_backend"] = pool.backend_name
+    except Exception:  # noqa: BLE001 - telemetry must never break training
+        pass
+    return stats
+
+
 def _release_arrow_pool() -> None:
     """Return pyarrow's freed-but-retained buffers to the OS (best effort)."""
     try:
@@ -245,6 +266,28 @@ def _release_arrow_pool() -> None:
         pa.default_memory_pool().release_unused()
     except Exception:  # noqa: BLE001 - purely advisory; never break a shard
         pass
+
+
+def _collect_python_memory() -> None:
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:  # noqa: BLE001 - purely advisory; never break a shard
+        pass
+
+
+def _trim_process_memory() -> bool:
+    """Ask glibc malloc to return free arenas to the OS (best effort)."""
+    if os.name != "posix":
+        return False
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6")
+        return bool(libc.malloc_trim(0))
+    except Exception:  # noqa: BLE001 - absent on non-glibc platforms
+        return False
 
 
 def _attach_read_heartbeat(fh, ws: WorkerState) -> None:
@@ -306,14 +349,32 @@ class _HeartbeatFile:
         return line
 
     def close(self) -> None:
-        self._fh.close()
+        fh = self._fh
+        if fh is None:
+            return
+        try:
+            response = getattr(fh, "response", None)
+            if response is not None:
+                response.close()
+            exit_stack = getattr(fh, "_exit_stack", None)
+            if exit_stack is not None:
+                exit_stack.close()
+            stream_buffer = getattr(fh, "_stream_buffer", None)
+            if stream_buffer is not None:
+                stream_buffer.clear()
+        finally:
+            try:
+                fh.close()
+            finally:
+                self._fh = None
 
     def __enter__(self):
         self._fh.__enter__()
         return self
 
     def __exit__(self, *exc):
-        return self._fh.__exit__(*exc)
+        self.close()
+        return False
 
     def __iter__(self):
         return self
@@ -506,6 +567,7 @@ class Trainer:
         self.last_checkpoint_at: float | None = None
         self.checkpoints_written = 0
         self.disk_free = 0
+        self._last_memory_trim = 0.0
         # convergence signal: KL from the previous mint (whose count vector lives
         # on self.state, so it survives resume). Once KL stops shrinking, stop.
         self.last_kl: float | None = None
@@ -1202,6 +1264,7 @@ class Trainer:
                     # hand this file's row-group buffers back to the OS so RSS
                     # resets between shards instead of creeping over a long run
                     _release_arrow_pool()
+                    self._maybe_trim_memory("shard", sid)
             except Exception as e:  # noqa: BLE001 - classified below, never fatal
                 # discard only the in-progress row group; committed row groups
                 # stay in flight and merge when the retry finishes the file
@@ -1240,7 +1303,7 @@ class Trainer:
         if "://" in url:
             fh = self._remote_fs().open(
                 url, mode="rb",
-                cache_type=SHARD_CACHE_TYPE, block_size=SHARD_BLOCK_SIZE,
+                cache_type="none", block_size=0,
             )
             if ws is not None:
                 return _HeartbeatFile(fh, ws)
@@ -1314,6 +1377,7 @@ class Trainer:
                 self._release_remote_stream(remote_acquired)
                 remote_acquired = False
                 _release_arrow_pool()
+                self._maybe_trim_memory("shard", sid)
             except Exception as e:  # noqa: BLE001 - classified below, never fatal
                 self._release_remote_stream(remote_acquired)
                 self._drop_in_flight(ws)
@@ -1408,6 +1472,28 @@ class Trainer:
             self.in_flight_bytes -= ws.shard_bytes
         ws.shard_bytes = 0
 
+    def _maybe_trim_memory(self, stage: str, shard: str | None = None) -> None:
+        before = rss_bytes()
+        if before < MEMORY_SOFT_LIMIT_BYTES:
+            return
+        now = time.monotonic()
+        if now - self._last_memory_trim < MEMORY_TRIM_INTERVAL_S:
+            return
+        self._last_memory_trim = now
+        _release_arrow_pool()
+        _collect_python_memory()
+        trimmed = _trim_process_memory()
+        after = rss_bytes()
+        self.events.log(
+            "memory_trim",
+            stage=stage,
+            shard=shard,
+            rss_before=before,
+            rss_after=after,
+            trimmed=trimmed,
+            memory=memory_stats(),
+        )
+
     def _remaining_cap_locked(self, task: ShardTask) -> int | None:
         caps: list[int] = []
         if (cap := self._family_cap(task.source.family)) is not None:
@@ -1435,6 +1521,8 @@ class Trainer:
             shard_cache_type=SHARD_CACHE_TYPE,
             shard_block_size=SHARD_BLOCK_SIZE,
             remote_streams=self.remote_streams,
+            memory_soft_limit=MEMORY_SOFT_LIMIT_BYTES,
+            memory_trim_interval_s=MEMORY_TRIM_INTERVAL_S,
             roster_hash=self.roster_hash,
             families=[
                 {"id": f.id, "weight": f.weight, "sources": len(f.sources)}
@@ -1503,6 +1591,7 @@ class Trainer:
                     errors=self.errors,
                     failed_shards=self.failed_shards,
                     rss=rss_bytes(),
+                    memory=memory_stats(),
                     wall_s=round(time.monotonic() - self.started_at, 1),
                     families=self._family_progress(),
                 )
@@ -1549,14 +1638,17 @@ class Trainer:
         with self._merge_lock:
             checkpoint.save(self._ckpt_dir, self.counter, self.state)
         free = shutil.disk_usage(self.mint_dir).free if self.mint_dir.exists() else 0
+        self._maybe_trim_memory("checkpoint")
         # status lives in the header (live); the JSONL keeps the full beat as
         # debug material — it's split into small segments, not throttled
         self.last_checkpoint_at = time.monotonic()
         self.checkpoints_written += 1
         self.disk_free = free
+        mem = memory_stats()
         self.events.log(
-            "checkpoint", bytes=self.durable_bytes(), rss=rss_bytes(),
+            "checkpoint", bytes=self.durable_bytes(), rss=mem["rss"],
             disk_free=free, in_flight_bytes=self.in_flight_bytes,
+            memory=mem,
             families=self._family_progress(),
         )
         if 0 < free < 5 * 10**9:

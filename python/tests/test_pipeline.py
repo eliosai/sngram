@@ -178,10 +178,16 @@ def test_run_logs_start_and_family_progress(tmp_path: Path):
     assert start["workers"] == 1
     assert start["queue_depth"] == 4
     assert start["batch_rows"] == 256
+    assert start["memory_soft_limit"] == 5 * 10**9
+    assert start["memory_trim_interval_s"] == 5.0
 
     checkpoint = [e for e in events if e["kind"] == "checkpoint"][-1]
     assert checkpoint["families"]["alpha"]["bytes"] == trainer.durable_bytes()
     assert checkpoint["families"]["alpha"]["done"] == 1
+    assert checkpoint["memory"]["rss"] >= 0
+    assert checkpoint["memory"]["arrow_bytes"] >= 0
+    assert checkpoint["memory"]["arrow_max"] >= checkpoint["memory"]["arrow_bytes"]
+    assert isinstance(checkpoint["memory"]["arrow_backend"], str)
 
     summary = next(e for e in events if e["kind"] == "summary")
     assert summary["families"]["alpha"]["bytes"] == trainer.durable_bytes()

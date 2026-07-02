@@ -518,6 +518,126 @@ def test_shard_read_uses_bounded_readahead_cache(tmp_path: Path, monkeypatch):
     trainer.events.close()
 
 
+def test_remote_json_reads_stream_without_readahead_cache(tmp_path: Path):
+    """Remote JSON gzip shards are sequential streams, so they must not retain a
+    64 MiB range cache per file like parquet readers do."""
+    import io
+
+    trainer = make_trainer(tmp_path, [])
+    captured: dict = {}
+
+    class FakeFS:
+        def open(self, url, mode="rb", **kw):
+            captured.update(kw)
+            captured["url"] = url
+            return io.BytesIO(b"")
+
+    trainer._fs = FakeFS()
+    fh = trainer._open_raw("hf://datasets/x/y@sha/github-dedup-000.json.gz")
+    fh.close()
+
+    assert captured["cache_type"] == "none"
+    assert captured["block_size"] == 0
+    trainer.events.close()
+
+
+def test_heartbeat_raw_stream_close_releases_remote_state(tmp_path: Path):
+    """Closing a heartbeat-wrapped remote stream closes streaming state eagerly
+    instead of waiting for Python object destruction."""
+
+    trainer = make_trainer(tmp_path, [])
+    ws = pl.WorkerState()
+    closed: list[str] = []
+
+    class FakeResponse:
+        def close(self):
+            closed.append("response")
+
+    class FakeExitStack:
+        def close(self):
+            closed.append("exit_stack")
+
+    class FakeRemote:
+        def __init__(self):
+            self.response = FakeResponse()
+            self._exit_stack = FakeExitStack()
+            self._stream_buffer = bytearray(b"cached")
+            self.closed = False
+
+        def read(self, *args, **kwargs):
+            return b""
+
+        def close(self):
+            self.closed = True
+            closed.append("file")
+
+    raw = FakeRemote()
+    wrapped = pl._HeartbeatFile(raw, ws)
+    wrapped.close()
+
+    assert closed == ["response", "exit_stack", "file"]
+    assert raw._stream_buffer == bytearray()
+    assert wrapped._fh is None
+    trainer.events.close()
+
+
+def test_checkpoint_trims_memory_above_soft_limit(tmp_path: Path, monkeypatch):
+    """A long run should actively return freed buffers once RSS crosses the
+    training soft cap, and leave a log event proving it happened."""
+
+    trainer = make_trainer(tmp_path, [])
+    calls: list[str] = []
+    gb = 10**9
+    rss_values = iter([6 * gb, 4 * gb])
+
+    monkeypatch.setattr(pl, "rss_bytes", lambda: next(rss_values, 4 * gb))
+    monkeypatch.setattr(pl, "_release_arrow_pool", lambda: calls.append("arrow"))
+    monkeypatch.setattr(pl, "_collect_python_memory", lambda: calls.append("gc"))
+    monkeypatch.setattr(pl, "_trim_process_memory", lambda: calls.append("malloc") or True)
+
+    trainer._checkpoint()
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "bins" / "train-events.jsonl").read_text().splitlines()
+    ]
+    trim = next(e for e in events if e["kind"] == "memory_trim")
+    assert calls == ["arrow", "gc", "malloc"]
+    assert trim["stage"] == "checkpoint"
+    assert trim["rss_before"] == 6 * gb
+    assert trim["rss_after"] == 4 * gb
+    trainer.events.close()
+
+
+def test_json_shard_attempts_memory_trim_after_close(tmp_path: Path, monkeypatch):
+    """Sequential JSON shards should run the memory gate after the file closes,
+    so a ballooning stream does not wait for the next checkpoint."""
+
+    path = tmp_path / "rows.json"
+    path.write_text('{"content":"abc"}\n{"content":"def"}\n')
+    fam = Family(
+        id="json",
+        sources=(
+            Source(
+                "json", "local", "content",
+                format="json",
+                data_files=str(path),
+            ),
+        ),
+    )
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        Trainer,
+        "_maybe_trim_memory",
+        lambda self, stage, shard=None: calls.append((stage, shard)),
+    )
+
+    run_trainer(tmp_path, [fam], workers=1)
+
+    assert ("shard", "json/local#0") in calls
+
+
 def test_remote_stream_limit_defaults_and_env(tmp_path: Path, monkeypatch):
     trainer = make_trainer(tmp_path, [], workers=16)
     assert trainer.remote_streams == 4
