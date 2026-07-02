@@ -1,7 +1,7 @@
 //! Query planning from eg patterns to Tantivy sparse-gram queries.
 
 use anyhow::{Context, bail};
-use sngram::{Pattern, QueryPlan};
+use sngram::QueryPlan;
 use sngram_types::WeightTable;
 use tantivy::{
     Term,
@@ -12,11 +12,14 @@ use tantivy::{
 use crate::flags::HiArgs;
 
 pub(super) fn query_plan(args: &HiArgs, table: &WeightTable) -> anyhow::Result<QueryPlan> {
-    let source = planning_regex(args)?;
-    let pattern = Pattern::new(&source).with_context(|| {
-        format!("indexed query planner could not parse {source:?}; use --no-index")
+    let patterns = args.patterns();
+    if patterns.is_empty() {
+        bail!("indexed search requires at least one pattern");
+    }
+    let opts = args.plan_options();
+    let plan = sngram::query_with(table, patterns, &opts).with_context(|| {
+        format!("indexed query planner could not parse {patterns:?}; use --no-index")
     })?;
-    let plan = sngram::query(table, &pattern);
     if matches!(plan, QueryPlan::All) {
         bail!("indexed query has no sparse n-gram constraints; use --no-index");
     }
@@ -48,32 +51,6 @@ pub(super) fn plan_to_query(field: Field, plan: &QueryPlan) -> anyhow::Result<Bo
             Ok(union_query(clauses))
         },
     }
-}
-
-fn planning_regex(args: &HiArgs) -> anyhow::Result<String> {
-    let patterns = args.patterns();
-    if patterns.is_empty() {
-        bail!("indexed search requires at least one pattern");
-    }
-    let case_insensitive = args.indexed_case_insensitive();
-    let mut parts = Vec::with_capacity(patterns.len());
-    for pattern in patterns {
-        let source = if args.fixed_strings() {
-            regex_syntax::escape(pattern)
-        } else {
-            pattern.clone()
-        };
-        if case_insensitive {
-            parts.push(format!("(?i:{source})"));
-        } else {
-            parts.push(format!("(?:{source})"));
-        }
-    }
-    Ok(if parts.len() == 1 {
-        parts.remove(0)
-    } else {
-        parts.join("|")
-    })
 }
 
 fn term_query(field: Field, hash: u64) -> Box<dyn Query> {

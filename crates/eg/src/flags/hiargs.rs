@@ -372,21 +372,26 @@ impl HiArgs {
         &self.index
     }
 
-    /// Returns true when patterns should be treated as fixed strings.
-    pub(crate) fn fixed_strings(&self) -> bool {
-        self.fixed_strings
-    }
-
-    /// Returns true when index planning should use case-insensitive constraints.
-    pub(crate) fn indexed_case_insensitive(&self) -> bool {
-        match self.case {
-            CaseMode::Sensitive => false,
-            CaseMode::Insensitive => true,
-            CaseMode::Smart => self
-                .patterns
-                .patterns
-                .iter()
-                .all(|pattern| !pattern.chars().any(char::is_uppercase)),
+    /// The planner options mirroring [`Self::matcher_rust`]'s configuration,
+    /// so the gram plan is built from exactly the semantics the verifying
+    /// matcher applies. Smart case in particular resolves inside the planner
+    /// with grep-regex's literal-aware rule.
+    pub(crate) fn plan_options(&self) -> sngram::PlanOptions {
+        sngram::PlanOptions {
+            syntax: if self.fixed_strings {
+                sngram::PlanSyntax::FixedStrings
+            } else {
+                sngram::PlanSyntax::Regex
+            },
+            case: match self.case {
+                CaseMode::Sensitive => sngram::PlanCase::Sensitive,
+                CaseMode::Insensitive => sngram::PlanCase::Insensitive,
+                CaseMode::Smart => sngram::PlanCase::Smart,
+            },
+            unicode: !self.no_unicode,
+            dotall: self.multiline && self.multiline_dotall,
+            crlf: self.crlf,
+            invert: false, // inverted search is rejected before planning
         }
     }
 
@@ -413,11 +418,6 @@ impl HiArgs {
     /// Returns true when indexed scanning may use mmap.
     pub(crate) fn index_mmap(&self) -> bool {
         self.index_mmap
-    }
-
-    /// Returns true when Unicode regex semantics are disabled.
-    pub(crate) fn no_unicode(&self) -> bool {
-        self.no_unicode
     }
 
     /// Return a fingerprint for arguments that affect the indexed file set or

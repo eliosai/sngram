@@ -418,7 +418,6 @@ fn indexed_transformed_input_modes_error_without_scan_fallback() {
         ],
         vec!["--index=auto", "--pre=cat", "constrained needle", root],
         vec!["--index=auto", "-z", "constrained needle", root],
-        vec!["--index=auto", "--no-unicode", "constrained needle", root],
     ] {
         let output = eg(&args);
         let stderr = String::from_utf8(output.stderr).unwrap();
@@ -430,6 +429,37 @@ fn indexed_transformed_input_modes_error_without_scan_fallback() {
         );
         assert!(stderr.contains("use --no-index"), "{stderr}");
     }
+}
+
+#[test]
+fn non_search_modes_ignore_the_index() {
+    // --files and --type-list never search content; the default index mode
+    // must not reject them.
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), "alpha\n").unwrap();
+    let root = fixture.root.to_str().unwrap();
+
+    let output = eg(&["--files", root]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(Some(0), output.status.code());
+    assert!(stdout.contains("sample.txt"), "{stdout}");
+
+    let output = eg(&["--type-list"]);
+    assert_eq!(Some(0), output.status.code());
+}
+
+#[test]
+fn indexed_no_unicode_matches_through_the_index() {
+    // The planner parses with the verifier's unicode mode, so --no-unicode
+    // is supported rather than banned.
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), "alpha constrained needle\n").unwrap();
+    let root = fixture.root.to_str().unwrap();
+
+    let output = eg(&["--index=auto", "--no-unicode", "constrained needle", root]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(Some(0), output.status.code());
+    assert!(stdout.contains("constrained needle"), "{stdout}");
 }
 
 #[test]

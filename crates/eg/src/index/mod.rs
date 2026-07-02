@@ -159,9 +159,6 @@ fn ensure_supported(args: &HiArgs, mode: SearchMode) -> anyhow::Result<()> {
     if args.search_zip() {
         bail!("indexed search does not support compressed archive search yet; use --no-index");
     }
-    if args.no_unicode() {
-        bail!("indexed search does not support --no-unicode yet; use --no-index");
-    }
     Ok(())
 }
 
