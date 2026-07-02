@@ -1,0 +1,46 @@
+python/tests/test_pipeline.py
+  s_e6cf9f02ed0ab3::t_5ca35fd2576c4f 220-272,304-331
+  s_a130935442d1aa::t_d2170954dcb34f 332-333
+python/sngram/train/pipeline.py
+  s_e6cf9f02ed0ab3::t_6eda03b1abb0a4 1310-1312,1320,1325-1327,1456-1457
+  s_e6cf9f02ed0ab3::t_1ef50ca1ad04ea 218,224-226,1086-1090,1102-1106,1116-1118,1120
+  s_e6cf9f02ed0ab3::t_da2dd96fdfa0c5 426-475
+  s_e6cf9f02ed0ab3::t_e1d5528a85079f 1635,1660-1668,1676
+  s_e6cf9f02ed0ab3::t_d1b32fb97f41fe 608-609,760-771,799,818,821,865
+  s_e6cf9f02ed0ab3::t_b05f29c21ef005 1119
+python/tests/test_config.py
+  s_e6cf9f02ed0ab3::t_2310e4595a4280 14-15,127-129,134,137-145,161-165,172-183
+  s_a130935442d1aa::t_cfe301da66639a 184-185
+docs/distr.md
+  s_e6cf9f02ed0ab3::t_29657f0a391631 8-10,16-18,25-28,32-35,37,45,60,69,99
+python/sngram/train/config.py
+  s_e6cf9f02ed0ab3::t_ea207caa6a3c9d 43,45,48-50,52-54,58-61,76-78,83-84,117,123,133-134,140-141,146,152-153,159-160,167,173-174,176,178-188,190-239,244-245,250,256-257,266,282,285-286,291
+  s_e6cf9f02ed0ab3::t_9b6838281a638f 44,46-47,51,55-57
+  s_e6cf9f02ed0ab3::t_1130bd7ecfdfb7 79
+python/tests/test_planner.py
+  s_e6cf9f02ed0ab3::t_2e8acac07da183 7,338-343
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "37fb58ab6a18852fcbe8aed6d2df8ca6c5fbf0b1",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    },
+    "s_e6cf9f02ed0ab3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ea3-28fc-7120-abc2-b88b6dcc6df8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
