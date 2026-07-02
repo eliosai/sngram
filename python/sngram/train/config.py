@@ -40,6 +40,25 @@ CJK_LANGS = {"cmn_Hani", "jpn_Jpan", "kor_Hang"}
 
 REQUIRES_HF_TOKEN = {"bigcode/starcoderdata"}
 
+DOC_PATH_RE = (
+    r"(?i:(^|/)(readme|changelog|changes|contributing|contributors|authors|"
+    r"license|copying|notice)(\.[^/]*)?$|"
+    r"(^|/)(docs?|documentation|examples?|samples?|tutorials?|notebooks?)(/|$)|"
+    r"\.(md|markdown|rst|adoc|asciidoc|txt|ipynb)$)"
+)
+
+CONFIG_PATH_RE = (
+    r"(?i:((^|/)(dockerfile[^/]*|docker-compose[^/]*|makefile|cmakelists\.txt|"
+    r"cargo\.lock|go\.sum|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|"
+    r"pyproject\.toml|requirements[^/]*\.txt|pom\.xml|build\.gradle|"
+    r"gradle\.properties)$|"
+    r"(^|/)\.github/workflows/|"
+    r"\.(json|ya?ml|toml|xml|ini|cfg|conf|properties|lock|mk|cmake|"
+    r"proto|graphql|tf|tfvars|env|editorconfig|gitignore|dockerignore)$))"
+)
+
+DOC_OR_CONFIG_PATH_RE = f"(?:{DOC_PATH_RE})|(?:{CONFIG_PATH_RE})"
+
 
 @dataclass(frozen=True)
 class Source:
@@ -54,10 +73,15 @@ class Source:
     # fallback for repos the standard loader can't stream (script datasets):
     # a hf:// parquet glob loaded through the generic parquet builder
     data_files: str | None = None
+    path_field: str | None = None
+    include_path_regex: str | None = None
+    exclude_path_regex: str | None = None
+    name: str | None = None
 
     @property
     def id(self) -> str:
-        return f"{self.family}/{self.config}" if self.config else f"{self.family}/{self.repo}"
+        key = self.name or self.config or self.repo
+        return f"{self.family}/{key}"
 
 
 @dataclass(frozen=True)
@@ -90,13 +114,13 @@ def _multilingual_caps() -> dict[str, int]:
 def default_families() -> list[Family]:
     """The 15 TB Linux-filesystem training blend.
 
-    Code-dominant (>=50%), with technical text/docs/logs, English prose, and a
+    Code-dominant (~70%), with technical text/docs/logs, English prose, and a
     small multilingual coverage slice. Weights are target shares of counted
     bytes; the planner holds them while each source's data lasts.
     """
 
     return [
-        # ---- pure code: 11.25 TB / 75% -------------------------------------
+        # ---- pure code: 10.50 TB / 70% -------------------------------------
         Family(
             id="code-github-2025",
             weight=_weight(2_300 * GB),
@@ -106,79 +130,131 @@ def default_families() -> list[Family]:
                 Source(
                     "code-github-2025", "nick007x/github-code-2025", "content",
                     cap_bytes=2_300 * GB,
+                    path_field="file_path",
+                    exclude_path_regex=DOC_OR_CONFIG_PATH_RE,
                 ),
             ),
         ),
         Family(
             id="code-clippy",
-            weight=_weight(8_300 * GB),
-            cap_bytes=8_300 * GB,
+            weight=_weight(6_990 * GB),
+            cap_bytes=6_990 * GB,
             bucket="pure-code",
             sources=(
                 Source(
                     "code-clippy", "CodedotAI/code_clippy_github", "content",
-                    cap_bytes=8_300 * GB,
+                    cap_bytes=6_990 * GB,
                     format="json",
                     data_files=(
                         "hf://datasets/CodedotAI/code_clippy_github/"
                         "github-dedup-*.json.gz"
                     ),
+                    path_field="file_path",
+                    exclude_path_regex=DOC_OR_CONFIG_PATH_RE,
                 ),
             ),
         ),
         Family(
             id="code-stack-v2-high",
-            weight=_weight(200 * GB),
-            cap_bytes=200 * GB,
+            weight=_weight(110 * GB),
+            cap_bytes=110 * GB,
             bucket="pure-code",
             sources=(
                 Source(
                     "code-stack-v2-high",
                     "M1keR/the-stack-v2-dedup-filtered-500-stars-100-forks-contents",
                     "text",
-                    cap_bytes=200 * GB,
+                    cap_bytes=110 * GB,
                 ),
             ),
         ),
         Family(
             id="config-markup",
-            weight=_weight(450 * GB),
-            cap_bytes=450 * GB,
+            weight=_weight(1_100 * GB),
+            cap_bytes=1_100 * GB,
             bucket="pure-code",
-            sources=tuple(
+            sources=(
                 Source(
-                    "config-markup", "bigcode/starcoderdata", "content",
-                    config=c, cap_bytes=cap,
-                    data_files=f"hf://datasets/bigcode/starcoderdata/{c}/*.parquet",
-                )
-                for c, cap in zip(
-                    (
-                        "markdown", "html", "json", "yaml", "css", "sql",
-                        "shell", "makefile", "dockerfile", "cmake",
-                        "restructuredtext", "tex", "protocol-buffer",
-                        "powershell", "batchfile", "xslt",
+                    "config-markup", "nick007x/github-code-2025", "content",
+                    name="github2025-config", cap_bytes=200 * GB,
+                    path_field="file_path", include_path_regex=CONFIG_PATH_RE,
+                ),
+                Source(
+                    "config-markup", "CodedotAI/code_clippy_github", "content",
+                    name="code-clippy-config", cap_bytes=795 * GB,
+                    format="json",
+                    data_files=(
+                        "hf://datasets/CodedotAI/code_clippy_github/"
+                        "github-dedup-*.json.gz"
                     ),
-                    _split_caps(450 * GB, 16),
-                )
+                    path_field="file_path", include_path_regex=CONFIG_PATH_RE,
+                ),
+                *tuple(
+                    Source(
+                        "config-markup", "bigcode/starcoderdata", "content",
+                        config=c, cap_bytes=cap,
+                        data_files=f"hf://datasets/bigcode/starcoderdata/{c}/*.parquet",
+                    )
+                    for c, cap in zip(
+                        (
+                            "markdown", "html", "json", "yaml", "css", "sql",
+                            "shell", "makefile", "dockerfile", "cmake",
+                            "restructuredtext", "tex", "protocol-buffer",
+                            "powershell", "batchfile", "xslt",
+                        ),
+                        _split_caps(105 * GB, 16),
+                    )
+                ),
             ),
         ),
-        # ---- code/text blend: 3.00 TB / 20% --------------------------------
+        # ---- code/text blend: 3.60 TB / 24% --------------------------------
+        Family(
+            id="blend-github2025-docs",
+            weight=_weight(200 * GB),
+            cap_bytes=200 * GB,
+            bucket="blend",
+            sources=(
+                Source(
+                    "blend-github2025-docs", "nick007x/github-code-2025", "content",
+                    cap_bytes=200 * GB,
+                    path_field="file_path", include_path_regex=DOC_PATH_RE,
+                ),
+            ),
+        ),
+        Family(
+            id="blend-code-clippy-docs",
+            weight=_weight(3_000 * GB),
+            cap_bytes=3_000 * GB,
+            bucket="blend",
+            sources=(
+                Source(
+                    "blend-code-clippy-docs", "CodedotAI/code_clippy_github", "content",
+                    cap_bytes=3_000 * GB,
+                    format="json",
+                    data_files=(
+                        "hf://datasets/CodedotAI/code_clippy_github/"
+                        "github-dedup-*.json.gz"
+                    ),
+                    path_field="file_path", include_path_regex=DOC_PATH_RE,
+                ),
+            ),
+        ),
         Family(
             id="blend-opc",
-            weight=_weight(265 * GB),
-            cap_bytes=265 * GB,
+            weight=_weight(230 * GB),
+            cap_bytes=230 * GB,
             bucket="blend",
             sources=(
                 Source(
                     "blend-opc", "OpenCoder-LLM/opc-fineweb-code-corpus", "text",
-                    cap_bytes=265 * GB,
+                    cap_bytes=230 * GB,
                 ),
             ),
         ),
         Family(
             id="blend-extras",
-            weight=_weight(2_690 * GB),
-            cap_bytes=2_690 * GB,
+            weight=_weight(125 * GB),
+            cap_bytes=125 * GB,
             bucket="blend",
             sources=tuple(
                 Source(
@@ -187,7 +263,7 @@ def default_families() -> list[Family]:
                 )
                 for c, cap in zip(
                     ("documentation", "issues", "stackoverflow", "owm"),
-                    _split_caps(2_690 * GB, 4),
+                    _split_caps(125 * GB, 4),
                 )
             ),
         ),
@@ -203,16 +279,16 @@ def default_families() -> list[Family]:
                 ),
             ),
         ),
-        # ---- English docs: 0.30 TB / 2% ------------------------------------
+        # ---- English docs: 0.45 TB / 3% ------------------------------------
         Family(
             id="english-finepdfs",
-            weight=_weight(300 * GB),
-            cap_bytes=300 * GB,
+            weight=_weight(450 * GB),
+            cap_bytes=450 * GB,
             bucket="english-docs",
             sources=(
                 Source(
                     "english-finepdfs", "HuggingFaceFW/finepdfs", "text",
-                    config="eng_Latn", cap_bytes=300 * GB,
+                    config="eng_Latn", cap_bytes=450 * GB,
                 ),
             ),
         ),

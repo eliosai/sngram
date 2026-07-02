@@ -11,6 +11,8 @@ from __future__ import annotations
 from sngram.train import config
 from sngram.train.config import (
     CJK_LANGS,
+    CONFIG_PATH_RE,
+    DOC_PATH_RE,
     REQUIRES_HF_TOKEN,
     TRAIN_TARGET_BYTES,
     WEB_LANGS,
@@ -122,18 +124,25 @@ def test_bucket_caps_match_distribution_doc_exactly():
     for family in default_families():
         buckets[family.bucket] = buckets.get(family.bucket, 0) + family.cap_bytes
     assert buckets == {
-        "pure-code": 11_250_000_000_000,
-        "blend": 3_000_000_000_000,
-        "english-docs": 300_000_000_000,
+        "pure-code": 10_500_000_000_000,
+        "blend": 3_600_000_000_000,
+        "english-docs": 450_000_000_000,
         "multilingual": 450_000_000_000,
     }
 
 
-def test_code_is_at_least_half_the_blend():
+def test_code_is_about_seventy_percent_of_the_blend():
     fams = default_families()
     total = sum(f.weight for f in fams)
-    code = sum(f.weight for f in fams if f.id.startswith("code-")) / total
-    assert code >= 0.50, f"code share {code:.2%} < 50%"
+    code = sum(f.weight for f in fams if f.bucket == "pure-code") / total
+    assert abs(code - 0.70) < 1e-9, f"code share {code:.2%} != 70%"
+
+
+def test_code_text_blend_is_large_enough_to_matter():
+    fams = default_families()
+    total = sum(f.weight for f in fams)
+    blend = sum(f.weight for f in fams if f.bucket == "blend") / total
+    assert abs(blend - 0.24) < 1e-9, f"blend share {blend:.2%} != 24%"
 
 
 def test_multilingual_is_a_minor_slice():
@@ -149,10 +158,29 @@ def test_family_ids_unique():
     assert len(ids) == len(set(ids))
 
 
+def test_source_ids_unique():
+    ids = [s.id for s in all_sources()]
+    assert len(ids) == len(set(ids))
+
+
 def test_source_family_matches_owning_family():
     for f in default_families():
         for s in f.sources:
             assert s.family == f.id, f"{s.id}: source.family {s.family!r} != {f.id!r}"
+
+
+def test_path_filtered_sources_declare_metadata_field():
+    for s in all_sources():
+        if s.include_path_regex or s.exclude_path_regex:
+            assert s.path_field == "file_path", s.id
+
+
+def test_github2025_is_used_across_filtered_buckets():
+    github_sources = [s for s in all_sources() if s.repo == "nick007x/github-code-2025"]
+    assert sum(s.cap_bytes for s in github_sources) == 2_700_000_000_000
+    assert any(s.exclude_path_regex for s in github_sources)
+    assert any(s.include_path_regex == DOC_PATH_RE for s in github_sources)
+    assert any(s.include_path_regex == CONFIG_PATH_RE for s in github_sources)
 
 
 def test_hf_token_uses_environment(monkeypatch):

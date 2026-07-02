@@ -215,11 +215,15 @@ def roster_hash(families: list[Family], target: int, mint_every: int) -> str:
                         "id": s.id,
                         "family": s.family,
                         "repo": s.repo,
+                        "name": s.name,
                         "config": s.config,
                         "text_field": s.text_field,
                         "cap_bytes": s.cap_bytes,
                         "format": s.format,
                         "data_files": s.data_files,
+                        "path_field": s.path_field,
+                        "include_path_regex": s.include_path_regex,
+                        "exclude_path_regex": s.exclude_path_regex,
                     }
                     for s in f.sources
                 ],
@@ -419,6 +423,56 @@ def _prefix_values_to_bytes(values: list[object], limit: int) -> list[str]:
     return out
 
 
+def _path_allowed(source: Source, path: str) -> bool:
+    if source.include_path_regex and not re.search(source.include_path_regex, path):
+        return False
+    if source.exclude_path_regex and re.search(source.exclude_path_regex, path):
+        return False
+    return True
+
+
+def _select_text_column(batch, field: str):
+    import pyarrow as pa
+
+    idx = batch.schema.get_field_index(field)
+    if idx < 0:
+        raise ValueError(
+            f"column [{field!r}] not in the batch. "
+            f"columns in the batch: {batch.schema.names}."
+        )
+    return pa.record_batch([batch.column(idx)], names=[field])
+
+
+def _filter_arrow_batch(batch, source: Source):
+    """Apply an optional path regex filter and return a text-only batch."""
+    if not source.path_field:
+        return _select_text_column(batch, source.text_field)
+    path_idx = batch.schema.get_field_index(source.path_field)
+    if path_idx < 0:
+        raise ValueError(
+            f"path column [{source.path_field!r}] not in the batch. "
+            f"columns in the batch: {batch.schema.names}."
+        )
+    paths = batch.column(path_idx).to_pylist()
+    mask = [isinstance(p, str) and _path_allowed(source, p) for p in paths]
+    if not any(mask):
+        return None
+    filtered = batch.filter(mask)
+    return _select_text_column(filtered, source.text_field)
+
+
+def _json_row_allowed(source: Source, obj: dict[str, object]) -> bool:
+    if not source.path_field:
+        return True
+    path = obj.get(source.path_field)
+    if not isinstance(path, str):
+        raise ValueError(
+            f"path column [{source.path_field!r}] not in json object. "
+            f"columns in the object: {sorted(obj)}."
+        )
+    return _path_allowed(source, path)
+
+
 def _resolved_files(ds) -> list[str]:
     """The ordered parquet file URLs behind a streaming `datasets` dataset.
 
@@ -551,6 +605,8 @@ class Trainer:
         self._family_failed: dict[str, int] = {}
         self._source_failed: dict[str, int] = {}
         self.errors = 0
+        self._logged_family_done: set[str] = set()
+        self._logged_source_cap_reached: set[str] = set()
         # per-family blend feedback (bytes + completed shards) lives on
         # self.state so it survives resume; it is mutated only under the merge
         # lock, alongside the counter merge and mark_done, so a checkpoint sees
@@ -701,6 +757,18 @@ class Trainer:
             and self._source_inflight(sid, completed, dispatched, failed) > 0
         )
 
+    def _log_family_done_once(self, fid: str) -> None:
+        if fid in self._logged_family_done:
+            return
+        self._logged_family_done.add(fid)
+        self.events.log("family_done", family=fid)
+
+    def _log_source_cap_reached_once(self, sid: str) -> None:
+        if sid in self._logged_source_cap_reached:
+            return
+        self._logged_source_cap_reached.add(sid)
+        self.events.log("source_cap_reached", source=sid)
+
     # ------------------------------------------------------------- planner
 
     def _plan(self) -> None:
@@ -728,7 +796,7 @@ class Trainer:
             source_dispatched = resume_dispatched(self.state.source_done, source_order)
             for fid in order:
                 if ahead[fid] is None:
-                    self.events.log("family_done", family=fid)
+                    self._log_family_done_once(fid)
             while not self.stop.is_set():
                 with self._merge_lock:
                     counted = dict(self.state.family_bytes)
@@ -747,10 +815,10 @@ class Trainer:
                         sid = ahead[fid].source.id
                         if source_counted.get(sid, 0) < (self._source_caps.get(sid) or 10**100):
                             break
-                        self.events.log("source_cap_reached", source=sid)
+                        self._log_source_cap_reached_once(sid)
                         ahead[fid] = next(gens[fid], None)
                     if ahead.get(fid) is None:
-                        self.events.log("family_done", family=fid)
+                        self._log_family_done_once(fid)
                 live = [
                     fid for fid in order
                     if ahead.get(fid) is not None
@@ -794,7 +862,7 @@ class Trainer:
                 task = ahead[fid]
                 ahead[fid] = next(gens[fid], None)  # refill the prefetch slot
                 if ahead[fid] is None:
-                    self.events.log("family_done", family=fid)
+                    self._log_family_done_once(fid)
                 dispatched[fid] += 1  # count it now so the next pick sees in-flight
                 source_dispatched[task.source.id] += 1
                 while not self.stop.is_set():
@@ -1015,6 +1083,11 @@ class Trainer:
                     f"{source.id}: missing {source.text_field!r}; "
                     f"columns={sorted(obj)}"
                 )
+            if source.path_field and source.path_field not in obj:
+                raise ValueError(
+                    f"{source.id}: missing path field {source.path_field!r}; "
+                    f"columns={sorted(obj)}"
+                )
             return
 
         if "://" not in url:
@@ -1026,6 +1099,11 @@ class Trainer:
                     f"{source.id}: missing {source.text_field!r}; "
                     f"columns={pf.schema_arrow.names}"
                 )
+            if source.path_field and source.path_field not in pf.schema_arrow.names:
+                raise ValueError(
+                    f"{source.id}: missing path field {source.path_field!r}; "
+                    f"columns={pf.schema_arrow.names}"
+                )
             return
 
         pf, fh = self._open_parquet(url)
@@ -1033,6 +1111,11 @@ class Trainer:
             if source.text_field not in pf.schema_arrow.names:
                 raise ValueError(
                     f"{source.id}: missing {source.text_field!r}; "
+                    f"columns={pf.schema_arrow.names}"
+                )
+            if source.path_field and source.path_field not in pf.schema_arrow.names:
+                raise ValueError(
+                    f"{source.id}: missing path field {source.path_field!r}; "
                     f"columns={pf.schema_arrow.names}"
                 )
         finally:
@@ -1224,6 +1307,9 @@ class Trainer:
                     # iter_batches call => only the current row group is resident,
                     # so memory stays bounded no matter how large the shard.
                     cap_stop = False
+                    columns = [field]
+                    if task.source.path_field and task.source.path_field != field:
+                        columns.append(task.source.path_field)
                     for rg in range(next_rg, pf.num_row_groups):
                         if self.stop.is_set():
                             self._drop_in_flight(ws)  # abandoned: nothing merged
@@ -1231,11 +1317,14 @@ class Trainer:
                         rg_tally = sngram.LocalTally()
                         uncommitted = 0
                         for batch in pf.iter_batches(
-                            batch_size=BATCH_ROWS, columns=[field], row_groups=[rg]
+                            batch_size=BATCH_ROWS, columns=columns, row_groups=[rg]
                         ):
                             if self.stop.is_set():
                                 self._drop_in_flight(ws)
                                 return
+                            batch = _filter_arrow_batch(batch, task.source)
+                            if batch is None:
+                                continue
                             remaining = self._remaining_cap_for_worker(task, ws)
                             batch_tally, n, capped = self._count_arrow_with_cap(
                                 batch, remaining
@@ -1364,6 +1453,8 @@ class Trainer:
                                 f"column [{task.source.text_field!r}] not in json object. "
                                 f"columns in the object: {sorted(obj)}."
                             )
+                        if not _json_row_allowed(task.source, obj):
+                            continue
                         value = obj[task.source.text_field]
                         if isinstance(value, str):
                             batch.append(value)
@@ -1541,6 +1632,7 @@ class Trainer:
 
         last_ckpt = time.monotonic()
         finished = False
+        short_exhausted = False
         try:
             while not self.stop.is_set():
                 await asyncio.sleep(0.25)
@@ -1565,6 +1657,15 @@ class Trainer:
                 # so this cannot race a worker between dequeue and execution
                 if self.planner_done.is_set() and self.queue.unfinished_tasks == 0:
                     self.events.log("exhausted", bytes=self.durable_bytes())
+                    if self._cap_mode() and self.durable_bytes() < self.target:
+                        short_exhausted = True
+                        self._bump("errors")
+                        self.events.log(
+                            "error",
+                            stage="exhausted_short",
+                            bytes=self.durable_bytes(),
+                            target=self.target,
+                        )
                     finished = True
                     break
         finally:
@@ -1572,7 +1673,7 @@ class Trainer:
             await asyncio.gather(*futures, return_exceptions=True)
             pool.shutdown(wait=True)
             self._mint_if_due()
-            if finished:
+            if finished and not short_exhausted:
                 # only a run that reached its end mints "final"; an interrupted
                 # or crashed run checkpoints and resumes instead
                 self._mint("final")

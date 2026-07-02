@@ -217,6 +217,59 @@ def test_run_preflights_all_sources_before_counting(tmp_path: Path):
     assert trainer.durable_bytes() == 0
 
 
+def test_parquet_source_path_filter_counts_only_matching_rows(tmp_path: Path):
+    d = tmp_path / "filtered"
+    d.mkdir()
+    pq.write_table(
+        pa.table(
+            {
+                "content": pa.array(["readme text", "code body"], type=pa.large_string()),
+                "file_path": pa.array(["README.md", "src/lib.rs"], type=pa.large_string()),
+            }
+        ),
+        d / "rows.parquet",
+    )
+    family = Family(
+        id="docs",
+        sources=(
+            Source(
+                "docs", "local", "content",
+                data_files=str(d / "*.parquet"),
+                path_field="file_path",
+                include_path_regex=r"README",
+            ),
+        ),
+    )
+    trainer = run_trainer(tmp_path, [family], workers=1)
+
+    assert trainer.durable_bytes() == len("readme text")
+    assert trainer.state.family_bytes["docs"] == len("readme text")
+
+
+def test_json_source_path_filter_counts_only_matching_rows(tmp_path: Path):
+    path = tmp_path / "rows.json"
+    path.write_text(
+        '{"content":"doc text","file_path":"docs/guide.md"}\n'
+        '{"content":"code text","file_path":"src/main.rs"}\n'
+    )
+    family = Family(
+        id="docs",
+        sources=(
+            Source(
+                "docs", "local", "content",
+                format="json",
+                data_files=str(path),
+                path_field="file_path",
+                include_path_regex=r"docs/",
+            ),
+        ),
+    )
+    trainer = run_trainer(tmp_path, [family], workers=1)
+
+    assert trainer.durable_bytes() == len("doc text")
+    assert trainer.state.family_bytes["docs"] == len("doc text")
+
+
 def test_source_with_less_text_than_cap_exhausts_without_overrun(tmp_path: Path):
     glob = write_fixture(tmp_path / "small", "small", ["x" * 1000] * 100, files=1)
     family = Family(
@@ -246,6 +299,36 @@ def test_source_with_less_text_than_cap_exhausts_without_overrun(tmp_path: Path)
     assert trainer.durable_bytes() == 100_000
     assert trainer.state.family_bytes["small"] == 100_000
     assert trainer.state.source_bytes["small/local"] == 100_000
+
+
+def test_capped_short_exhaustion_does_not_mint_final(tmp_path: Path):
+    glob = write_fixture(tmp_path / "short", "short", ["x" * 1000] * 10, files=1)
+    family = Family(
+        id="short",
+        weight=200_000,
+        cap_bytes=200_000,
+        sources=(Source("short", "local", "content", data_files=glob, cap_bytes=200_000),),
+    )
+    trainer = Trainer(
+        families=[family],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    asyncio.run(trainer.run())
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "bins" / "train-events.jsonl").read_text().splitlines()
+    ]
+
+    assert trainer.durable_bytes() == 10_000
+    assert not (tmp_path / "bins" / "final_weights.bin").exists()
+    assert "final" not in trainer.state.mints_done
+    assert any(e.get("stage") == "exhausted_short" for e in events)
 
 
 def test_log_failure_after_merge_does_not_double_count_shard_as_failed(tmp_path: Path):
