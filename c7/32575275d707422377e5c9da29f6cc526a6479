@@ -1,0 +1,26 @@
+crates/eg/src/flags/hiargs.rs
+  s_a130935442d1aa::t_4f966bbb85af55 375-394
+crates/eg/src/index/planner.rs
+  s_a130935442d1aa::t_e886c90a7c1c9f 4,15-21
+crates/eg/tests/phase1.rs
+  s_a130935442d1aa::t_8ae17be57fe7b1 434,452-458,460-462
+  s_a130935442d1aa::t_9d3bae62d0b4a1 459
+  s_a130935442d1aa::t_a8ac1ba2dc4d31 435-451,463
+  s_a130935442d1aa::t_8b9dff88323fee 464
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "c732575275d707422377e5c9da29f6cc526a6479",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
