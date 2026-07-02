@@ -1,0 +1,43 @@
+crates/lib/src/plan/combine.rs
+  s_a130935442d1aa::t_7122e7d79c0beb 138-141,143-149,151,154-155,162,167,197,206
+  s_a130935442d1aa::t_9da53ec7ebabc4 268-276,403-416
+  s_a130935442d1aa::t_41a08ff0d31734 156-161,163-164,168,171-173,175,178-179,181-182,190-194,196,198-203,417
+  s_a130935442d1aa::t_ba9613c9399dc8 165-166
+  s_a130935442d1aa::t_9f0df69d09fc1a 180
+  s_a130935442d1aa::t_babc61023b1d6b 204-205,418-419
+crates/lib/src/plan/strings.rs
+  s_a130935442d1aa::t_5115cb49676a8d 41-45
+crates/lib/src/plan/mod.rs
+  s_a130935442d1aa::t_ba93e2d856c242 134
+crates/lib/src/plan/analyze.rs
+  s_a130935442d1aa::t_ba93e2d856c242 63-66,75,95-104,231,233
+  s_a130935442d1aa::t_1722ac4ec2de11 232,262-271
+  s_a130935442d1aa::t_5f128a58b21bf3 160-161,169,324-329,332-333,335-349,351-392,395-396,429-433,435-448,454,462-463
+  s_a130935442d1aa::t_39326578961b7c 239-247,261,461
+  s_a130935442d1aa::t_5115cb49676a8d 350,458-460,464
+  s_a130935442d1aa::t_3bce354a0fcb6f 450-452
+  s_a130935442d1aa::t_f4d6a833b1f118 449
+scripts/fp-queries.tsv
+  s_a130935442d1aa::t_9f0df69d09fc1a 188-195
+crates/lib/tests/precision.rs
+  s_a130935442d1aa::t_592627934b747e 285-292
+  s_a130935442d1aa::t_4219815c8ab71f 246-250
+  s_a130935442d1aa::t_173b831df784a8 315-325
+  s_a130935442d1aa::t_8dbbd7e1ca4b57 231-245,251-262,284,314
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "6fd9848ee8433e3091bd6b3f6c4cc99c333a993a",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
