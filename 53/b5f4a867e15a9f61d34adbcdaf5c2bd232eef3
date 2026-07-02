@@ -1,0 +1,22 @@
+crates/lib/src/plan/analyze.rs
+  s_a130935442d1aa::t_7164f7f6c5f1b2 119-124,159-161
+benches/src/query.rs
+  s_a130935442d1aa::t_fcdfdcb9cf74e8 91-103
+  s_a130935442d1aa::t_fe052620533e8b 104-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "53b5f4a867e15a9f61d34adbcdaf5c2bd232eef3",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
