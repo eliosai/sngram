@@ -38,6 +38,11 @@ impl StringSet {
         self.0.push(s);
     }
 
+    /// Keep only the strings `f` accepts, preserving order.
+    pub fn retain(&mut self, f: impl FnMut(&Gram) -> bool) {
+        self.0.retain(f);
+    }
+
     /// Number of strings in the set.
     #[must_use]
     pub fn len(&self) -> usize {

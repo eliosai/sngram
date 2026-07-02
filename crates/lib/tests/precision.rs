@@ -229,6 +229,38 @@ fn budget_reaches_the_pattern_tail() {
 }
 
 #[test]
+fn budget_reaches_a_sixty_char_tail() {
+    // Long enough that the budget gate closes mid-pattern: the final flush
+    // of the pattern's own edges must still land, or a document holding
+    // only the first two thirds is admitted.
+    assert_rejects(
+        "(?i)very_long_function_name_with_many_parts_and_then_some_more_tail",
+        b"very_long_function_name_with_many_parts_",
+    );
+}
+
+#[test]
+fn long_literal_after_wide_class_is_fully_covered() {
+    // The class multiplies the exact set; fitting the flush must not
+    // shorten a long literal whose real covers already fit the budget.
+    // The document holds the literal's first 60 bytes (the truncated
+    // window) and its last 8 bytes (the spill stub) but not the middle.
+    let lit = "the_quick_brown_fox_jumped_over_the_lazy_dog_while_the_cat_watched_from_the_windowsill_yes";
+    let doc = format!("Q{} filler {}", &lit[..60], &lit[lit.len() - 8..]);
+    assert_rejects(&format!("[!-~]{lit}"), doc.as_bytes());
+}
+
+#[test]
+fn min_two_repetition_keeps_both_seams() {
+    // x{2,} must carry two copies on BOTH edges: this document holds
+    // "initxyxy" and "xydone" but never "xyxydone".
+    assert_rejects(
+        "init(xy){2,}done",
+        b"fooxyxy initxyxy lhsxyxy and abdone xydone qzdone end",
+    );
+}
+
+#[test]
 fn gap_islands_are_both_required() {
     assert_rejects("sched.*clock", b"schedule the meeting");
     assert_rejects("sched.*clock", b"clock without the other word");
@@ -250,6 +282,15 @@ fn impossible_look_contexts_plan_to_none() {
 }
 
 #[test]
+fn looks_filter_adjacent_class_members() {
+    // A surviving assertion still rules out class members: after word "o",
+    // \b kills the word member "x" of [x+], so only "foo+bar" can match.
+    assert_rejects(r"foo\b[x+]bar", b"fooxbar but never the other");
+    // ^ after \s forces the whitespace byte to be a newline.
+    assert_rejects("(?m)foo\\s^bar", b"foo bar and foo\nbaz");
+}
+
+#[test]
 fn satisfiable_look_contexts_stay_planned() {
     assert!(!matches!(plan_of(r"\bkfree_skb\b"), QueryPlan::None));
     assert!(!matches!(plan_of(r"^static_call"), QueryPlan::None));
@@ -268,6 +309,18 @@ fn plan_gram_count(plan: &QueryPlan) -> usize {
             grams.len() + sub.iter().map(plan_gram_count).sum::<usize>()
         },
     }
+}
+
+#[test]
+fn maximal_covers_respect_the_budget() {
+    // Few-branch sets take maximal covers; the flush accounting must use
+    // their real size, not an estimate calibrated for minimal covers, or
+    // one flush overshoots the whole budget and starves what follows.
+    let plan = plan_of(
+        "(?i:very_long_function_name_with_many_parts).*[a-h]another_extremely_long_trailing_literal_block_that_should_be_covered_maximally_here_nowz",
+    );
+    let count = plan_gram_count(&plan);
+    assert!(count <= 4608, "plan overshot the budget: {count} grams");
 }
 
 #[test]

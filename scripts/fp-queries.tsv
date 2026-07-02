@@ -185,6 +185,14 @@ multiline_lit	request_irq	-U
 multiline_span	pgtable\);\n\}	-U
 crlf_anchor	request_irq$	--crlf
 
+# --- round-2 reviewer findings: budget gate, cover accounting, min=2 seams ---
+ci_tail_starved_60	(?i)very_long_function_name_with_many_parts_and_then_some_more_tail
+fit_narrow_class_head	[!-~]the_quick_brown_fox_jumped_over_the_lazy_dog_while_the_cat_watched_from_the_windowsill_yes
+maxcover_budget_blow	(?i:very_long_function_name_with_many_parts).*[a-h]another_extremely_long_trailing_literal_block_that_should_be_covered_maximally_here_nowz
+rep_min2_two_sided	init(xy){2,}done
+look_word_class	foo\b[x+]bar
+greek_byte_seam	\p{Greek}term_var
+
 # --- known-unsupported (should stay graceful, recorded not crashed) ---
 unsup_dotstar	.*
 unsup_wordplus	\w+

@@ -39,24 +39,6 @@ const MAX_MAXIMAL_COVER_BRANCHES: usize = 8;
 /// then flush every few characters instead of every character.
 const REGROW_TARGET: usize = MAX_SET / 4;
 
-/// A conservative gram-count estimate for flushing `set`: roughly one gram
-/// per trigram of each string under minimal covers. Maximal covers (taken
-/// for few-branch sets) can exceed this by a small constant factor, which
-/// is why plan-size pins allow slack over the budget.
-fn flush_estimate(set: &StringSet) -> usize {
-    set.len()
-        .saturating_mul(set.max_len().div_ceil(MIN_LEN) + 1)
-}
-
-/// Shorten `set`'s strings from the far end until its flush estimate fits
-/// `cap`; truncation merges strings that shared the dropped bytes.
-fn fit_flush(set: &mut StringSet, order: Order, cap: usize) {
-    while flush_estimate(set) > cap && set.max_len() > MIN_LEN {
-        truncate_to(set, order, set.max_len() - 1);
-        set.clean(order);
-    }
-}
-
 impl Analyzer<'_> {
     /// The summary for `xy` given the summaries of `x` and `y`. Consumes both
     /// match queries rather than cloning them.
@@ -153,40 +135,51 @@ impl Analyzer<'_> {
         info.match_ = self.and_grams(q, &info.suffix, Order::Suffix);
     }
 
-    /// `q` AND the OR over each string's covering grams. A string shorter than
-    /// a gram, or one that covers to nothing, leaves `q` unconstrained, as
-    /// does an exhausted [`super::analyze::PLAN_GRAM_BUDGET`].
+    /// `q` AND the OR over each string's covering grams. A string shorter
+    /// than a gram, or one that covers to nothing, leaves `q` unconstrained,
+    /// as does an exhausted [`super::analyze::PLAN_GRAM_BUDGET`] outside the
+    /// final flush.
     ///
-    /// A lone string gets the maximal cover; a many-branch set gets each
-    /// string's minimal cover, since the OR over branches dilutes what the
-    /// redundant interior grams would add and every gram costs a lookup.
-    /// One flush may spend at most half the remaining budget (floored, see
-    /// [`Analyzer::flush_cap`]) — `order` says which end of the strings to
-    /// shorten when it must fit — so the head of a long pattern can never
-    /// starve its tail of constraints. `order` must match the set's kind:
-    /// shortening in that direction must preserve guaranteed containment,
-    /// so prefix-like sets (including exact sets) shorten from the tail and
-    /// suffix sets from the head.
+    /// A flush may spend at most half the remaining budget (floored, see
+    /// [`Analyzer::flush_cap`]), measured on the REAL covers: a few-branch
+    /// set tries maximal covers first, falls back to each string's minimal
+    /// cover, and only then shortens the windows to fit — `order` says which
+    /// end to drop, and must match the set's kind so shortening preserves
+    /// guaranteed containment (prefix-like sets, including exact sets,
+    /// shorten from the tail; suffix sets from the head).
     pub fn and_grams(&self, q: Query, set: &StringSet, order: Order) -> Query {
-        if set.is_empty() || set.min_len() < MIN_LEN || !self.within_budget() {
+        if set.is_empty() || set.min_len() < MIN_LEN || !self.may_flush() {
             return q;
         }
-        if flush_estimate(set) > self.flush_cap() {
-            let mut fitted = set.clone();
-            fit_flush(&mut fitted, order, self.flush_cap());
-            if fitted.is_empty() || fitted.min_len() < MIN_LEN {
+        let cap = self.flush_cap();
+        if set.len() <= MAX_MAXIMAL_COVER_BRANCHES {
+            if let Some(covers) = self.branch_covers(set, false, cap) {
+                return self.or_covers(q, covers);
+            }
+        }
+        if let Some(covers) = self.branch_covers(set, true, cap) {
+            return self.or_covers(q, covers);
+        }
+        let mut fitted = set.clone();
+        while fitted.max_len() > MIN_LEN {
+            let keep = fitted.max_len() - 1;
+            truncate_to(&mut fitted, order, keep);
+            fitted.clean(order);
+            if fitted.min_len() < MIN_LEN {
                 return q;
             }
-            return self.cover_or(q, &fitted);
+            if let Some(covers) = self.branch_covers(&fitted, true, cap) {
+                return self.or_covers(q, covers);
+            }
         }
-        self.cover_or(q, set)
+        q
     }
 
-    /// AND into `q` the OR over each string's covers, spending the budget.
-    fn cover_or(&self, q: Query, set: &StringSet) -> Query {
-        let minimal = set.len() > MAX_MAXIMAL_COVER_BRANCHES;
-        let mut or = Query::none();
-        let mut spent = 0;
+    /// The covers of each string in `set` — maximal or minimal — or `None`
+    /// when a string covers to nothing or the total exceeds `cap`.
+    fn branch_covers(&self, set: &StringSet, minimal: bool, cap: usize) -> Option<Vec<StringSet>> {
+        let mut covers = Vec::with_capacity(set.len());
+        let mut total = 0;
         for s in set.as_slice() {
             let grams = if minimal {
                 self.minimal_cover_set(s)
@@ -194,8 +187,23 @@ impl Analyzer<'_> {
                 self.cover_set(s)
             };
             if grams.is_empty() {
-                return q;
+                return None;
             }
+            total += grams.len();
+            if total > cap {
+                return None;
+            }
+            covers.push(grams);
+        }
+        Some(covers)
+    }
+
+    /// AND into `q` the OR over already-built branch covers, spending the
+    /// budget by their exact size.
+    fn or_covers(&self, q: Query, covers: Vec<StringSet>) -> Query {
+        let mut or = Query::none();
+        let mut spent = 0;
+        for grams in covers {
             spent += grams.len();
             or = or.or(Query::grams(Op::And, grams));
         }
@@ -257,6 +265,15 @@ impl Analyzer<'_> {
     fn simplify_set(&self, info: &mut RegexpInfo, order: Order, force: bool) {
         let mut t = take_set(info, order);
         t.clean(order);
+        if !self.may_flush() {
+            // Spent budget, not finalizing: no flush can land, so the sets
+            // exist only to chain context to the pattern's end for the
+            // final flush and the look proofs. Keep them skeletal so the
+            // remaining fold costs next to nothing per character.
+            reduce_set_skeletal(&mut t, order);
+            put_set(info, order, t);
+            return;
+        }
         if t.len() > MAX_FLUSH_SET {
             // A wide class ballooned the set in one step; covering every
             // string would balloon the plan the same way. Shrink first and
@@ -380,6 +397,23 @@ fn spill_exact(info: &mut RegexpInfo, exact: &StringSet) {
         let k = BOUNDARY_KEEP.min(s.len());
         info.prefix.push(Gram::from(&s[..k]));
         info.suffix.push(Gram::from(&s[s.len() - k..]));
+    }
+}
+
+/// Post-budget shrink: a handful of short stubs is all the final flush and
+/// the look proofs need, and small sets keep the remaining per-character
+/// cross products cheap.
+fn reduce_set_skeletal(t: &mut StringSet, order: Order) {
+    const SKELETAL_KEEP: usize = BOUNDARY_KEEP / 2;
+    const SKELETAL_COUNT: usize = 16;
+    let mut keep = SKELETAL_KEEP.min(t.max_len());
+    loop {
+        truncate_to(t, order, keep);
+        t.clean(order);
+        if t.len() <= SKELETAL_COUNT || keep <= 1 {
+            break;
+        }
+        keep -= 1;
     }
 }
 

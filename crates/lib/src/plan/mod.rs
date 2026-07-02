@@ -131,6 +131,7 @@ fn parse_joined(joined: &str, opts: PlanOptions) -> Result<Hir, QueryError> {
 fn query_hir(table: &WeightTable, hir: &Hir) -> QueryPlan {
     let analyzer = Analyzer::new(table);
     let mut info = analyzer.analyze(hir);
+    analyzer.begin_final_flush();
     analyzer.simplify(&mut info, true);
     analyzer.add_exact(&mut info);
     to_plan(info.match_)

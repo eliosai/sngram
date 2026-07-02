@@ -60,6 +60,10 @@ pub struct Analyzer<'a> {
     /// plus repetition-expansion replications — capped by
     /// [`PLAN_GRAM_BUDGET`].
     flushed: core::cell::Cell<usize>,
+    /// Whether the final flush is underway: the whole pattern's own edges
+    /// flush even on a spent budget (bounded by the flush-cap floor), so a
+    /// long pattern's tail is never left entirely unconstrained.
+    finalizing: core::cell::Cell<bool>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -68,6 +72,7 @@ impl<'a> Analyzer<'a> {
         Self {
             table,
             flushed: core::cell::Cell::new(0),
+            finalizing: core::cell::Cell::new(false),
         }
     }
 
@@ -85,6 +90,16 @@ impl<'a> Analyzer<'a> {
     /// Record grams a flush added toward [`PLAN_GRAM_BUDGET`].
     pub fn spend(&self, grams: usize) {
         self.flushed.set(self.flushed.get().saturating_add(grams));
+    }
+
+    /// Whether a flush may proceed: within budget, or finalizing.
+    pub(super) fn may_flush(&self) -> bool {
+        self.within_budget() || self.finalizing.get()
+    }
+
+    /// Enter the final flush of the whole pattern's edges.
+    pub(crate) fn begin_final_flush(&self) {
+        self.finalizing.set(true);
     }
 
     /// Grams the plan may still add before hitting [`PLAN_GRAM_BUDGET`].
@@ -116,12 +131,6 @@ impl<'a> Analyzer<'a> {
 
     /// Analyze `hir`, returning its conservative summary.
     pub fn analyze(&self, hir: &Hir) -> RegexpInfo {
-        if !self.within_budget() {
-            // A saturated budget means no flush can commit grams anyway;
-            // skipping the fold trades nothing but the walk's cost. The
-            // over-approximation only widens the plan.
-            return RegexpInfo::any_match();
-        }
         let mut info = match hir.kind() {
             HirKind::Empty | HirKind::Look(_) => return RegexpInfo::empty_string(),
             HirKind::Capture(c) => return self.analyze(&c.sub),
@@ -148,19 +157,16 @@ impl<'a> Analyzer<'a> {
                 pending.push(*look);
                 continue;
             }
-            let info = self.analyze(sub);
-            if looks_blocked(&mut pending, acc.as_ref(), Some(&info)) {
+            let mut info = self.analyze(sub);
+            if looks_blocked(&mut pending, acc.as_mut(), Some(&mut info)) {
                 return RegexpInfo::no_match();
             }
             acc = Some(match acc {
                 None => info,
                 Some(prev) => self.concat(prev, info),
             });
-            if !self.within_budget() {
-                return acc.unwrap_or_else(RegexpInfo::any_match);
-            }
         }
-        if looks_blocked(&mut pending, acc.as_ref(), None) {
+        if looks_blocked(&mut pending, acc.as_mut(), None) {
             return RegexpInfo::no_match();
         }
         acc.unwrap_or_else(RegexpInfo::empty_string)
@@ -222,12 +228,23 @@ impl<'a> Analyzer<'a> {
     fn expand_from(&self, base: &RegexpInfo, min: u32, exact_count: bool) -> RegexpInfo {
         let copies = self.affordable_copies(base, min.min(MAX_REPEAT_EXPAND));
         let whole = exact_count && copies == min;
-        let demote_at = if copies == 1 { 1 } else { 2 };
+        if min == 2 && !whole && copies == 2 {
+            return self.split_min_two(base);
+        }
         self.spend(
             base.match_
                 .weight()
                 .saturating_mul(copies.saturating_sub(1) as usize),
         );
+        let mut info = self.concat_copies(base, copies, whole);
+        self.simplify(&mut info, false);
+        info
+    }
+
+    /// Concatenate `copies` of `base`, demoting the second (or only) copy
+    /// to the one-or-more form unless the count is whole.
+    fn concat_copies(&self, base: &RegexpInfo, copies: u32, whole: bool) -> RegexpInfo {
+        let demote_at = if copies == 1 { 1 } else { 2 };
         let mut info: Option<RegexpInfo> = None;
         for i in 1..=copies {
             let full_copy = i != demote_at || whole;
@@ -241,9 +258,17 @@ impl<'a> Analyzer<'a> {
                 Some(acc) => self.concat(acc, part),
             });
         }
-        let mut info = info.unwrap_or_else(RegexpInfo::any_match);
-        self.simplify(&mut info, false);
-        info
+        info.unwrap_or_else(RegexpInfo::any_match)
+    }
+
+    /// `x{2,}` as the exact split `x{2} | x{3,}`: middle demotion needs
+    /// three copies to keep two on each edge, so each branch carries two
+    /// copies on both edges and seams span the repeat run either way.
+    fn split_min_two(&self, base: &RegexpInfo) -> RegexpInfo {
+        let two = self.power(base, 2);
+        let mut three = self.expand_from(base, 3, false);
+        self.flush_sets(&mut three);
+        self.alternate(two, three)
     }
 
     /// `x` concatenated with itself `k` times; zero copies match only the
@@ -296,21 +321,79 @@ fn demote_plus(mut info: RegexpInfo) -> RegexpInfo {
 }
 
 /// Whether any assertion pending between `left` and `right` is provably
-/// unsatisfiable; the pending list is consumed either way. `None` on a side
-/// means the pattern edge, where any byte may precede or follow.
+/// unsatisfiable; the pending list is consumed either way. Along the way
+/// each assertion FILTERS the adjacent sets: a member whose boundary byte
+/// fails the assertion against every byte of the other side cannot occur in
+/// a match at this junction, so it drops out — and a set filtered to
+/// nothing proves the whole concatenation empty. `None` on a side means the
+/// pattern edge, where any byte may precede or follow.
 fn looks_blocked(
     pending: &mut Vec<Look>,
-    left: Option<&RegexpInfo>,
-    right: Option<&RegexpInfo>,
+    mut left: Option<&mut RegexpInfo>,
+    mut right: Option<&mut RegexpInfo>,
 ) -> bool {
-    if pending.is_empty() {
+    for look in pending.drain(..) {
+        let left_bytes = left.as_deref().and_then(last_bytes);
+        let right_bytes = right.as_deref().and_then(first_bytes);
+        if let (Some(info), Some(lb)) = (right.as_deref_mut(), &left_bytes) {
+            let keep = |b: u8| lb.iter().any(|&l| look_possible(look, Some(l), Some(b)));
+            if filter_first_members(info, keep) {
+                return true;
+            }
+        }
+        if let (Some(info), Some(rb)) = (left.as_deref_mut(), &right_bytes) {
+            let keep = |b: u8| rb.iter().any(|&r| look_possible(look, Some(b), Some(r)));
+            if filter_last_members(info, keep) {
+                return true;
+            }
+        }
+        if !cross_possible(look, left_bytes.as_deref(), right_bytes.as_deref()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `look` can hold for at least one adjacent byte pair; a `None`
+/// side stands for every possible byte (or the haystack edge).
+fn cross_possible(look: Look, left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(lb), None) => lb.iter().any(|&l| look_possible(look, Some(l), None)),
+        (None, Some(rb)) => rb.iter().any(|&r| look_possible(look, None, Some(r))),
+        (Some(lb), Some(rb)) => lb
+            .iter()
+            .any(|&l| rb.iter().any(|&r| look_possible(look, Some(l), Some(r)))),
+    }
+}
+
+/// Drop `info`'s exact/prefix members whose FIRST byte fails `keep`;
+/// returns true when a known non-empty set filtered to nothing (no match
+/// can pass the junction). Empty-string members have no first byte at this
+/// junction and always survive.
+fn filter_first_members(info: &mut RegexpInfo, keep: impl Fn(u8) -> bool) -> bool {
+    let set = match info.exact.as_mut() {
+        Some(exact) => exact,
+        None => &mut info.prefix,
+    };
+    if set.is_empty() {
         return false;
     }
-    let left = left.and_then(last_bytes);
-    let right = right.and_then(first_bytes);
-    pending
-        .drain(..)
-        .any(|look| look_impossible(look, left.as_deref(), right.as_deref()))
+    set.retain(|m| m.as_bytes().first().is_none_or(|&b| keep(b)));
+    set.is_empty()
+}
+
+/// Symmetric to [`filter_first_members`] for exact/suffix LAST bytes.
+fn filter_last_members(info: &mut RegexpInfo, keep: impl Fn(u8) -> bool) -> bool {
+    let set = match info.exact.as_mut() {
+        Some(exact) => exact,
+        None => &mut info.suffix,
+    };
+    if set.is_empty() {
+        return false;
+    }
+    set.retain(|m| m.as_bytes().last().is_none_or(|&b| keep(b)));
+    set.is_empty()
 }
 
 /// The complete set of bytes a match of `info` can end with, or `None` when
@@ -343,50 +426,43 @@ fn boundary_bytes<'a>(members: impl Iterator<Item = Option<&'a u8>>) -> Option<V
     if bytes.is_empty() { None } else { Some(bytes) }
 }
 
-/// Whether `look` fails for every combination of adjacent bytes. `None`
-/// means the byte on that side is unknown (or absent, at the pattern edge),
-/// which keeps the assertion possible. Sound to under-report: a missed
-/// impossibility only costs candidates.
-fn look_impossible(look: Look, left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
+/// Whether `look` can hold between one concrete byte pair. `None` means
+/// the byte is absent (pattern edge next to the haystack boundary) or
+/// unknown; unknown keeps the assertion possible. Sound to over-report:
+/// a spurious `true` only costs candidates.
+fn look_possible(look: Look, left: Option<u8>, right: Option<u8>) -> bool {
     match look {
-        // Text anchors fail whenever any byte provably sits on the wrong
-        // side of them.
-        Look::Start => left.is_some(),
-        Look::End => right.is_some(),
-        // Line anchors fail when every adjacent byte is not a terminator.
-        Look::StartLF => left.is_some_and(|bytes| bytes.iter().all(|&b| b != b'\n')),
-        Look::EndLF => right.is_some_and(|bytes| bytes.iter().all(|&b| b != b'\n')),
-        Look::StartCRLF => {
-            left.is_some_and(|bytes| bytes.iter().all(|&b| b != b'\n' && b != b'\r'))
+        // Text anchors: no byte may sit on the anchored side.
+        Look::Start => left.is_none(),
+        Look::End => right.is_none(),
+        // Line anchors: the adjacent byte, if any, must be a terminator.
+        Look::StartLF => left.is_none_or(|b| b == b'\n'),
+        Look::EndLF => right.is_none_or(|b| b == b'\n'),
+        Look::StartCRLF => left.is_none_or(|b| b == b'\n' || b == b'\r'),
+        Look::EndCRLF => right.is_none_or(|b| b == b'\n' || b == b'\r'),
+        // Word boundaries: ASCII wordness must differ (or agree for the
+        // negation). Non-ASCII bytes have unknown wordness; a missing byte
+        // is a non-word boundary side.
+        Look::WordAscii | Look::WordUnicode => match (word_of(left), word_of(right)) {
+            (Some(l), Some(r)) => l != r,
+            _ => true,
         },
-        Look::EndCRLF => right.is_some_and(|bytes| bytes.iter().all(|&b| b != b'\n' && b != b'\r')),
-        // A word boundary fails when both sides are always the same
-        // wordness; its negation fails when they always differ. Non-ASCII
-        // bytes have unknown wordness and keep the assertion possible.
-        Look::WordAscii | Look::WordUnicode => words_agree(left, right, |l, r| l == r),
-        Look::WordAsciiNegate | Look::WordUnicodeNegate => words_agree(left, right, |l, r| l != r),
-        _ => false,
+        Look::WordAsciiNegate | Look::WordUnicodeNegate => match (word_of(left), word_of(right)) {
+            (Some(l), Some(r)) => l == r,
+            _ => true,
+        },
+        _ => true,
     }
 }
 
-/// Whether every (left, right) byte pair has ASCII wordness related by
-/// `fail`, with both sides known and fully ASCII.
-fn words_agree(
-    left: Option<&[u8]>,
-    right: Option<&[u8]>,
-    fail: impl Fn(bool, bool) -> bool,
-) -> bool {
-    let (Some(left), Some(right)) = (left, right) else {
-        return false;
-    };
-    if left.iter().chain(right).any(|&b| !b.is_ascii()) {
-        return false;
+/// The ASCII wordness of an adjacent byte; `None` for unknown — a missing
+/// byte (the pattern edge may abut arbitrary haystack context) or a
+/// non-ASCII byte.
+const fn word_of(byte: Option<u8>) -> Option<bool> {
+    match byte {
+        Some(b) if b.is_ascii() => Some(is_word_byte(b)),
+        _ => None,
     }
-    left.iter().all(|&l| {
-        right
-            .iter()
-            .all(|&r| fail(is_word_byte(l), is_word_byte(r)))
-    })
 }
 
 const fn is_word_byte(b: u8) -> bool {
