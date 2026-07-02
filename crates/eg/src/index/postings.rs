@@ -2,11 +2,12 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, BinaryHeap},
+    collections::{BTreeSet, BinaryHeap, HashMap},
     fs::{self, File},
     io::{self, BufReader, BufWriter, Read, Write},
     mem,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
     time::Instant,
 };
@@ -524,7 +525,34 @@ fn count_plan_grams(plan: &QueryPlan) -> usize {
     }
 }
 
+/// Posting lists shared between plan nodes: case-folded plans repeat the
+/// same gram across many OR branches, so each unique gram is fetched and
+/// decoded once per query.
+type PostingCache = HashMap<u64, Rc<Vec<usize>>>;
+
 fn eval_plan(index: &PostingsIndex, plan: &QueryPlan) -> anyhow::Result<Vec<usize>> {
+    let mut cache = PostingCache::new();
+    eval_plan_cached(index, plan, &mut cache)
+}
+
+fn lookup_cached(
+    index: &PostingsIndex,
+    cache: &mut PostingCache,
+    hash: u64,
+) -> anyhow::Result<Rc<Vec<usize>>> {
+    if let Some(list) = cache.get(&hash) {
+        return Ok(Rc::clone(list));
+    }
+    let list = Rc::new(index.lookup(hash)?);
+    cache.insert(hash, Rc::clone(&list));
+    Ok(list)
+}
+
+fn eval_plan_cached(
+    index: &PostingsIndex,
+    plan: &QueryPlan,
+    cache: &mut PostingCache,
+) -> anyhow::Result<Vec<usize>> {
     match plan {
         QueryPlan::All => {
             anyhow::bail!("indexed query has no sparse n-gram constraints; use --no-index")
@@ -533,20 +561,20 @@ fn eval_plan(index: &PostingsIndex, plan: &QueryPlan) -> anyhow::Result<Vec<usiz
         QueryPlan::And { grams, sub } => {
             let mut lists = Vec::with_capacity(grams.len() + sub.len());
             for gram in grams {
-                lists.push(index.lookup(gram.hash())?);
+                lists.push(lookup_cached(index, cache, gram.hash())?);
             }
             for plan in sub {
-                lists.push(eval_plan(index, plan)?);
+                lists.push(Rc::new(eval_plan_cached(index, plan, cache)?));
             }
             intersect_all_sorted(index.doc_count, lists)
         },
         QueryPlan::Or { grams, sub } => {
             let mut acc = Vec::new();
             for gram in grams {
-                acc = union_sorted(acc, index.lookup(gram.hash())?);
+                acc = union_sorted_ref(&acc, &lookup_cached(index, cache, gram.hash())?);
             }
             for plan in sub {
-                acc = union_sorted(acc, eval_plan(index, plan)?);
+                acc = union_sorted_ref(&acc, &eval_plan_cached(index, plan, cache)?);
             }
             Ok(acc)
         },
@@ -555,13 +583,14 @@ fn eval_plan(index: &PostingsIndex, plan: &QueryPlan) -> anyhow::Result<Vec<usiz
 
 fn intersect_all_sorted(
     doc_count: usize,
-    mut lists: Vec<Vec<usize>>,
+    mut lists: Vec<Rc<Vec<usize>>>,
 ) -> anyhow::Result<Vec<usize>> {
-    lists.sort_by_key(Vec::len);
+    lists.sort_by_key(|list| list.len());
     let mut iter = lists.into_iter();
-    let Some(mut acc) = iter.next() else {
+    let Some(first) = iter.next() else {
         return Ok((0..doc_count).collect());
     };
+    let mut acc = first.as_ref().clone();
     for list in iter {
         acc = intersect_sorted(&acc, &list);
         if acc.is_empty() {
@@ -590,6 +619,10 @@ fn intersect_sorted(left: &[usize], right: &[usize]) -> Vec<usize> {
 }
 
 fn union_sorted(left: Vec<usize>, right: Vec<usize>) -> Vec<usize> {
+    union_sorted_ref(&left, &right)
+}
+
+fn union_sorted_ref(left: &[usize], right: &[usize]) -> Vec<usize> {
     let mut out = Vec::with_capacity(left.len() + right.len());
     let mut i = 0;
     let mut j = 0;
