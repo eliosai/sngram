@@ -155,6 +155,36 @@ cs_alt_of_concat	a+hello|b+world
 cs_quest_tail	(bbbb)a?
 cs_concat_groups	(abcd)(efgh)
 
+# --- reviewer-derived: open repetition seams, look contexts, wide pairs ---
+rep_min_open	a{5,}bcd
+rep_group_open	(ab){2,}c
+rep_group_open_long	(abc){2,}def
+rep_adjacent_exact	a{2}b{2}
+plus_seam_ci	mem+set	-i
+plus_seam_left_ctx	rea+d_lock
+look_impossible_wb	t\bhe
+look_impossible_end	foo$bar
+look_impossible_nonword	kfree\B\(
+wide_pair_mid	read[a-zA-Z][a-zA-Z]lock
+wide_pair_63	init[0-9a-zA-Z_][0-9a-zA-Z_]call
+wide_single_ctl	dev[a-zA-Z]attr
+ci_budget_tail	trace_event_raw_event_sched_switch	-i
+ci_budget_tail_inline	(?i)netif_receive_skb_list_internal
+lazy_gap	sched.*?clock
+lazy_plus	request.+?irq
+opt_chain	get_?user_?pages_?fast
+alt_len_skew	kfree|unregister_netdevice_notifier
+
+# --- verifier-semantics flags: smart case, no-unicode, multiline, crlf ---
+smart_lower	mutex_lock	-S
+smart_escape_class	mutex\Wlock	-S
+smart_upper	CONFIG_PREEMPT	-S
+byte_esc_elf	(?-u)\x7fELF	--no-unicode
+no_unicode_lit	request_irq	--no-unicode
+multiline_lit	request_irq	-U
+multiline_span	pgtable\);\n\}	-U
+crlf_anchor	request_irq$	--crlf
+
 # --- known-unsupported (should stay graceful, recorded not crashed) ---
 unsup_dotstar	.*
 unsup_wordplus	\w+

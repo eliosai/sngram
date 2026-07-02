@@ -569,13 +569,18 @@ fn eval_plan_cached(
             intersect_all_sorted(index.doc_count, lists)
         },
         QueryPlan::Or { grams, sub } => {
+            // Concatenate every branch then sort+dedup once: folding the
+            // union pairwise re-walks the accumulator per branch, quadratic
+            // in branch count for the wide ORs case-folded plans build.
             let mut acc = Vec::new();
             for gram in grams {
-                acc = union_sorted_ref(&acc, &lookup_cached(index, cache, gram.hash())?);
+                acc.extend_from_slice(&lookup_cached(index, cache, gram.hash())?);
             }
             for plan in sub {
-                acc = union_sorted_ref(&acc, &eval_plan_cached(index, plan, cache)?);
+                acc.extend(eval_plan_cached(index, plan, cache)?);
             }
+            acc.sort_unstable();
+            acc.dedup();
             Ok(acc)
         },
     }
