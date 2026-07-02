@@ -1,0 +1,36 @@
+crates/lib/src/plan/analyze.rs
+  s_a130935442d1aa::t_6e0895f34ea687 44-55
+  s_a130935442d1aa::t_cc9098948836dc 543-546,552
+  s_a130935442d1aa::t_a90ec33e5e21c2 484-493,497-501,512-518,530,538,547-551,553,559-560,571-572,586-693,695-706,708-722
+  s_a130935442d1aa::t_f01f8c0cc6b112 707
+  s_a130935442d1aa::t_d310d60eb2fcf9 727-731
+  s_a130935442d1aa::t_496e4a5ec7271f 773-780
+  s_a130935442d1aa::t_d515d4d0f8e2ff 819
+  s_a130935442d1aa::t_3396c651997515 735,745-746,748-756
+  s_a130935442d1aa::t_982771aa2a8246 723-726,732-734,736-744,747,757-764,783-789,791-818,820-826
+  s_a130935442d1aa::t_8d413f8f8fad59 694
+  s_a130935442d1aa::t_216953ac3a4403 765-772,781-782,790
+crates/lib/tests/precision.rs
+  s_a130935442d1aa::t_f2e6716fa68759 215-242
+  s_a130935442d1aa::t_66164251786545 69-72,75
+crates/lib/tests/soundness.rs
+  s_a130935442d1aa::t_28d5f0e39a2e83 111-116
+  s_a130935442d1aa::t_939decec0ce942 117-118
+  s_a130935442d1aa::t_629da821443f6a 165-170
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "9bacaf846ac0b4edc7c094890b876582885e1fe3",
+  "prompts": {},
+  "sessions": {
+    "s_a130935442d1aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be5b4e93-7df4-4896-bee2-5ca366ecc15e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
