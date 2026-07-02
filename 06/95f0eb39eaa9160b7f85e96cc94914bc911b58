@@ -1,0 +1,22 @@
+python/sngram/train/config.py
+  s_e6cf9f02ed0ab3::t_235b7b28f634d6 152,190,238
+python/tests/test_config.py
+  s_e6cf9f02ed0ab3::t_fd553ea1ba5bce 175-176,187-193
+  s_e6cf9f02ed0ab3::t_cf9ef8cad87ea6 194-195
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "0695f0eb39eaa9160b7f85e96cc94914bc911b58",
+  "prompts": {},
+  "sessions": {
+    "s_e6cf9f02ed0ab3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ea3-28fc-7120-abc2-b88b6dcc6df8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
