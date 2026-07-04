@@ -38,15 +38,36 @@ impl StringSet {
         self.0.push(s);
     }
 
+    /// Keep only the strings `f` accepts, preserving order.
+    pub fn retain(&mut self, f: impl FnMut(&Gram) -> bool) {
+        self.0.retain(f);
+    }
+
+    /// The ASCII-case-folded image of the set, deduplicated.
+    #[must_use]
+    pub fn fold_ascii(&self) -> Self {
+        let mut folded: Vec<Gram> = self
+            .0
+            .iter()
+            .map(|s| {
+                let bytes: Vec<u8> = s.as_bytes().iter().map(u8::to_ascii_lowercase).collect();
+                Gram::from(bytes.as_slice())
+            })
+            .collect();
+        folded.sort_unstable();
+        folded.dedup();
+        Self(folded)
+    }
+
     /// Number of strings in the set.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 
     /// Whether the set is empty.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -74,11 +95,19 @@ impl StringSet {
         self.0.iter().map(|g| g.len()).max().unwrap_or(0)
     }
 
+    /// Total bytes held by all strings in the set.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.0.iter().map(|g| g.len()).sum()
+    }
+
     /// Sort by `order` and remove duplicates, in place.
     pub fn clean(&mut self, order: Order) {
         match order {
             Order::Prefix => self.0.sort_unstable(),
-            Order::Suffix => self.0.sort_unstable_by(|a, b| cmp_suffix(a.as_bytes(), b.as_bytes())),
+            Order::Suffix => self
+                .0
+                .sort_unstable_by(|a, b| cmp_suffix(a.as_bytes(), b.as_bytes())),
         }
         self.0.dedup();
     }
@@ -134,7 +163,7 @@ fn cmp_suffix(a: &[u8], b: &[u8]) -> core::cmp::Ordering {
         ia -= 1;
         ib -= 1;
         match a[ia].cmp(&b[ib]) {
-            core::cmp::Ordering::Equal => {}
+            core::cmp::Ordering::Equal => {},
             other => return other,
         }
     }

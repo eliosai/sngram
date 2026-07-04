@@ -1,4 +1,4 @@
-msrv = "1.85"
+msrv = "1.96"
 
 # Complexity
 too-many-lines-threshold = 25

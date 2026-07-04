@@ -1,12 +1,10 @@
 //! Pre-trained sparse n-gram weight tables, embedded at compile time.
 //!
 //! Enable one or more table features to embed the official 0.5 tables:
-//! `500gb`, `1tb`, `2tb`, `3tb`, `4tb`, or `5tb`.
+//! `500gb`, `1tb`, `2tb`, `3tb`, `4tb`, `5tb`, or `10tb`.
 //!
 //! Use [`available`] and [`get`] when a caller accepts a table name at runtime.
 //! Use [`weights`] when the crate is compiled with exactly one table feature.
-
-use std::fmt;
 
 pub use sngram_types::{TABLE_BINARY_SIZE, TableError, WeightTable};
 
@@ -15,7 +13,7 @@ pub use sngram_types::{TABLE_BINARY_SIZE, TableError, WeightTable};
 pub struct BuiltinTable {
     id: &'static str,
     training_bytes: u64,
-    bytes: &'static [u8; TABLE_BINARY_SIZE],
+    bytes: &'static [u8],
     fingerprint: u64,
 }
 
@@ -40,9 +38,9 @@ impl BuiltinTable {
         self.fingerprint
     }
 
-    /// Raw table bytes in the `SPNG` table format.
+    /// Raw table bytes in the `SPNG` table format, v1 or v2.
     #[must_use]
-    pub const fn bytes(self) -> &'static [u8; TABLE_BINARY_SIZE] {
+    pub const fn bytes(self) -> &'static [u8] {
         self.bytes
     }
 
@@ -58,44 +56,21 @@ impl BuiltinTable {
 }
 
 /// Errors from selecting a single default embedded table.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum WeightsError {
     /// No table feature was enabled.
+    #[error("no sngram weight table feature is enabled")]
     NoTableEnabled,
     /// More than one table feature was enabled.
+    #[error("{count} sngram weight table features are enabled")]
     MultipleTablesEnabled {
         /// Number of embedded tables.
         count: usize,
     },
     /// The embedded table failed validation.
-    InvalidTable(TableError),
-}
-
-impl fmt::Display for WeightsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoTableEnabled => f.write_str("no sngram weight table feature is enabled"),
-            Self::MultipleTablesEnabled { count } => {
-                write!(f, "{count} sngram weight table features are enabled")
-            },
-            Self::InvalidTable(err) => write!(f, "invalid embedded sngram weight table: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for WeightsError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::InvalidTable(err) => Some(err),
-            Self::NoTableEnabled | Self::MultipleTablesEnabled { .. } => None,
-        }
-    }
-}
-
-impl From<TableError> for WeightsError {
-    fn from(value: TableError) -> Self {
-        Self::InvalidTable(value)
-    }
+    #[error("invalid embedded sngram weight table: {0}")]
+    InvalidTable(#[from] TableError),
 }
 
 /// Return the embedded tables enabled for this build.
@@ -107,7 +82,7 @@ pub const fn available() -> &'static [BuiltinTable] {
 /// Return an embedded table by id.
 ///
 /// Matching is exact and ASCII-case-sensitive. Accepted ids are the same as
-/// the Cargo feature names: `500gb`, `1tb`, `2tb`, `3tb`, `4tb`, `5tb`.
+/// the Cargo feature names: `500gb`, `1tb`, `2tb`, `3tb`, `4tb`, `5tb`, `10tb`.
 #[must_use]
 pub fn get(id: &str) -> Option<BuiltinTable> {
     available().iter().copied().find(|table| table.id == id)
@@ -162,17 +137,19 @@ pub const fn fingerprint_bytes(bytes: &[u8]) -> u64 {
 }
 
 #[cfg(feature = "500gb")]
-const BYTES_500GB: &[u8; TABLE_BINARY_SIZE] = include_bytes!("../../../bins/500gb_weights.bin");
+const BYTES_500GB: &[u8] = include_bytes!("../data/500gb_weights.bin");
 #[cfg(feature = "1tb")]
-const BYTES_1TB: &[u8; TABLE_BINARY_SIZE] = include_bytes!("../../../bins/1tb_weights.bin");
+const BYTES_1TB: &[u8] = include_bytes!("../data/1tb_weights.bin");
 #[cfg(feature = "2tb")]
-const BYTES_2TB: &[u8; TABLE_BINARY_SIZE] = include_bytes!("../../../bins/2tb_weights.bin");
+const BYTES_2TB: &[u8] = include_bytes!("../data/2tb_weights.bin");
 #[cfg(feature = "3tb")]
-const BYTES_3TB: &[u8; TABLE_BINARY_SIZE] = include_bytes!("../../../bins/3tb_weights.bin");
+const BYTES_3TB: &[u8] = include_bytes!("../data/3tb_weights.bin");
 #[cfg(feature = "4tb")]
-const BYTES_4TB: &[u8; TABLE_BINARY_SIZE] = include_bytes!("../../../bins/4tb_weights.bin");
+const BYTES_4TB: &[u8] = include_bytes!("../data/4tb_weights.bin");
 #[cfg(feature = "5tb")]
-const BYTES_5TB: &[u8; TABLE_BINARY_SIZE] = include_bytes!("../../../bins/5tb_weights.bin");
+const BYTES_5TB: &[u8] = include_bytes!("../data/5tb_weights.bin");
+#[cfg(feature = "10tb")]
+const BYTES_10TB: &[u8] = include_bytes!("../data/10tb_weights.bin");
 
 #[cfg(feature = "500gb")]
 /// Official 500 GB sparse n-gram weight table.
@@ -228,6 +205,15 @@ pub const TABLE_5TB: BuiltinTable = BuiltinTable {
     fingerprint: fingerprint_bytes(BYTES_5TB),
 };
 
+#[cfg(feature = "10tb")]
+/// Official 10 TB sparse n-gram weight table.
+pub const TABLE_10TB: BuiltinTable = BuiltinTable {
+    id: "10tb",
+    training_bytes: 10_000_000_000_000,
+    bytes: BYTES_10TB,
+    fingerprint: fingerprint_bytes(BYTES_10TB),
+};
+
 const AVAILABLE: &[BuiltinTable] = &[
     #[cfg(feature = "500gb")]
     TABLE_500GB,
@@ -241,6 +227,8 @@ const AVAILABLE: &[BuiltinTable] = &[
     TABLE_4TB,
     #[cfg(feature = "5tb")]
     TABLE_5TB,
+    #[cfg(feature = "10tb")]
+    TABLE_10TB,
 ];
 
 #[cfg(test)]
@@ -250,7 +238,7 @@ mod tests {
     #[test]
     fn available_tables_are_valid() {
         for table in available() {
-            assert_eq!(table.bytes().len(), TABLE_BINARY_SIZE);
+            assert!(table.bytes().len() >= TABLE_BINARY_SIZE);
             assert_eq!(table.fingerprint(), fingerprint_bytes(table.bytes()));
             table.load().unwrap();
         }

@@ -928,6 +928,14 @@ class Trainer:
         if cached is not None:
             return cached
 
+        if source.data_files and "://" not in source.data_files:
+            urls = sorted(glob.glob(source.data_files))
+            if not urls:
+                raise FileNotFoundError(f"local parquet glob not found: {source.data_files}")
+            with self._ds_lock:
+                self._ds_cache[source.id] = urls
+            return urls
+
         from datasets import load_dataset
 
         rev = self._source_revision(source)
@@ -1883,8 +1891,8 @@ class Trainer:
             raise
         loop = asyncio.get_running_loop()
         pool = ThreadPoolExecutor(max_workers=self.workers + 1, thread_name_prefix="sngram")
-        futures = [loop.run_in_executor(pool, self._plan)]
-        futures += [loop.run_in_executor(pool, self._worker, i) for i in range(self.workers)]
+        futures = [pool.submit(self._plan)]
+        futures += [pool.submit(self._worker, i) for i in range(self.workers)]
 
         last_ckpt = time.monotonic()
         finished = False
@@ -1926,8 +1934,10 @@ class Trainer:
                     break
         finally:
             self.stop.set()
-            await asyncio.gather(*futures, return_exceptions=True)
-            pool.shutdown(wait=True)
+            pool.shutdown(wait=True, cancel_futures=True)
+            for future in futures:
+                if future.done() and (exc := future.exception()) is not None:
+                    self.events.log("error", stage="thread", error=err_text(exc))
             self._mint_if_due()
             if finished and not short_exhausted:
                 # only a run that reached its end mints "final"; an interrupted

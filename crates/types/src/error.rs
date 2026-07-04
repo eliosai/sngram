@@ -20,4 +20,16 @@ pub enum TableError {
         /// Checksum computed from data.
         actual: u32,
     },
+
+    /// Data ends before a complete header or field.
+    #[error("truncated table data: {0} bytes")]
+    Truncated(usize),
+
+    /// Header carries a version this build does not read.
+    #[error("unsupported table version: {0}")]
+    InvalidVersion(u32),
+
+    /// Provenance block is malformed or not UTF-8.
+    #[error("invalid provenance block")]
+    InvalidProvenance,
 }

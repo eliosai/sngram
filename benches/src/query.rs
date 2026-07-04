@@ -4,7 +4,8 @@
     clippy::missing_panics_doc,
     clippy::indexing_slicing,
     clippy::cast_possible_truncation,
-    clippy::unwrap_used
+    clippy::unwrap_used,
+    clippy::expect_used
 )]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -47,6 +48,31 @@ const PATTERNS: &[(&str, &str)] = &[
     ("fn_def", r"fn \w+\("),
     ("struct_field_vis", r"pub(\(crate\))? \w+:"),
     ("sql_containment", "grams @> ARRAY"),
+    // Planner blowup pins: nested bounded repetition (budget-capped),
+    // long case-folded runs (cross caps), wide-OR implication checks, and
+    // the wide-class repetition path.
+    ("nested_rep_deep", r"((((((abc|abd){4}){4}){4}){4}){4}){4}"),
+    (
+        "ci_long_run",
+        r"(?i)abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+    ),
+    (
+        "alt_wildcard_wide",
+        r"(aa000.*bb000|aa001.*bb001|aa002.*bb002|aa003.*bb003|aa004.*bb004|aa005.*bb005)",
+    ),
+    (
+        "hex_uuid",
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    ),
+    ("anchor_indent_define", r"^[ \t]*#define CONFIG"),
+    ("anchor_trailing_ws", r"EXPORT_SYMBOL\(\w+\);[ \t]*$"),
+    ("wide_mixed_unicode_left", r"[A-Za-z\p{Greek}]term_var"),
+    ("wide_mixed_branch_mix", r"read[A-Za-z\p{Cyrillic}]lock"),
+    ("unicode_word_boundary", r"\bµs\b"),
+    (
+        "uuid_hex",
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+    ),
 ];
 
 fn bench_pattern_parse(c: &mut Criterion) {
@@ -69,6 +95,22 @@ fn bench_query(c: &mut Criterion) {
             continue;
         };
         group.bench_with_input(BenchmarkId::new("query", name), &pattern, |b, p| {
+            b.iter(|| sngram::query(&table, p));
+        });
+    }
+
+    // Maximum-length case-folded runs: the analyzer must go idle once the
+    // plan budget saturates instead of folding the rest of the pattern.
+    let long_runs = [
+        ("ci_max_run", format!("(?i){}", "a".repeat(4000))),
+        (
+            "ci_max_varied",
+            format!("(?i){}", "abcdefghijklmnop".repeat(250)),
+        ),
+    ];
+    for (name, pat) in &long_runs {
+        let pattern = Pattern::new(pat).expect("long pattern parses");
+        group.bench_with_input(BenchmarkId::new("query", *name), &pattern, |b, p| {
             b.iter(|| sngram::query(&table, p));
         });
     }

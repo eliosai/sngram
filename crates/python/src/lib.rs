@@ -78,11 +78,7 @@ fn scan(py: Python<'_>, table: &PyWeightTable, data: &[u8]) -> Vec<(usize, usize
 ///
 /// Zero-copy view from Python: `np.frombuffer(buf, dtype=np.uint64)`.
 #[pyfunction]
-fn scan_hashes<'py>(
-    py: Python<'py>,
-    table: &PyWeightTable,
-    data: &[u8],
-) -> Bound<'py, PyBytes> {
+fn scan_hashes<'py>(py: Python<'py>, table: &PyWeightTable, data: &[u8]) -> Bound<'py, PyBytes> {
     let table = &table.inner;
     let bytes: Vec<u8> = py.detach(|| {
         let mut out = Vec::new();
@@ -111,7 +107,10 @@ pub struct PyQueryPlan {
     /// 64-bit index keys of `grams`, same order
     gram_hashes: Vec<u64>,
     /// sub-plans (all must hold under "and", any under "or")
-    #[allow(clippy::use_self, reason = "pyclass get_all macro cannot name Self here")]
+    #[allow(
+        clippy::use_self,
+        reason = "pyclass get_all macro cannot name Self here"
+    )]
     sub: Vec<Py<PyQueryPlan>>,
     /// codesearch-style rendering of the whole plan
     expr: String,
@@ -295,9 +294,11 @@ impl PyBigramCounter {
             )));
         }
         for (i, chunk) in counts.chunks_exact(8).enumerate() {
-            let n = u64::from_le_bytes(chunk.try_into().map_err(|_| {
-                PyValueError::new_err("snapshot chunk conversion failed")
-            })?);
+            let n = u64::from_le_bytes(
+                chunk
+                    .try_into()
+                    .map_err(|_| PyValueError::new_err("snapshot chunk conversion failed"))?,
+            );
             if n > 0 {
                 #[allow(clippy::cast_possible_truncation, reason = "i < 65536")]
                 self.inner.add((i >> 8) as u8, (i & 0xFF) as u8, n);

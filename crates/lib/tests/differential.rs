@@ -18,8 +18,12 @@ const MAX_LEN: usize = 100;
 const STACK_CAP: usize = 128;
 
 /// Reference hull: emit every (start, end) where the border pairs outweigh
-/// all interior pairs, lengths within MIN_LEN..=MAX_LEN, with the same
+/// all interior pairs, lengths within `MIN_LEN..=MAX_LEN`, with the same
 /// bounded-stack eviction as production.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the frozen reference stays one literal transcription"
+)]
 fn reference_scan(table: &WeightTable, content: &[u8], emit: &mut impl FnMut(usize, usize)) {
     if content.len() < MIN_LEN {
         return;
@@ -64,12 +68,18 @@ fn reference_scan(table: &WeightTable, content: &[u8], emit: &mut impl FnMut(usi
 struct Lcg(u64);
 
 impl Lcg {
-    fn next_u32(&mut self) -> u32 {
+    const fn next_u32(&mut self) -> u32 {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         (self.0 >> 33) as u32
+    }
+
+    /// Low byte of the next draw.
+    #[allow(clippy::cast_possible_truncation, reason = "masked to one byte")]
+    const fn next_byte(&mut self) -> u8 {
+        (self.next_u32() & 0xFF) as u8
     }
 }
 
@@ -106,31 +116,33 @@ fn tables() -> Vec<(String, WeightTable)> {
             }),
         ));
     }
-    // heavy plateaus: only 4 distinct weights
-    out.push((
-        "plateau4".to_owned(),
-        build_table(|a, b| crc32fast::hash(&[a, b]) % 4),
-    ));
-    // extreme plateaus: only 2 distinct weights
-    out.push((
-        "plateau2".to_owned(),
-        build_table(|a, b| crc32fast::hash(&[a, b]) % 2),
-    ));
-    // constant table: every weight equal — pure plateau
-    out.push(("const".to_owned(), build_table(|_, _| 7)));
-    // strictly decreasing weights along an ascending byte run: the scan stack
-    // grows past STACK_CAP and forces eviction
-    out.push((
-        "monotonic".to_owned(),
-        build_table(|a, b| {
-            if b == a.wrapping_add(1) {
-                1_000_000 - u32::from(a)
-            } else {
-                u32::from(a) ^ u32::from(b)
-            }
-        }),
-    ));
+    out.extend(edge_tables());
     out
+}
+
+/// Plateau and stack-overflow tables: the hull algorithm's hard regimes.
+fn edge_tables() -> Vec<(String, WeightTable)> {
+    vec![
+        (
+            "plateau4".to_owned(),
+            build_table(|a, b| crc32fast::hash(&[a, b]) % 4),
+        ),
+        (
+            "plateau2".to_owned(),
+            build_table(|a, b| crc32fast::hash(&[a, b]) % 2),
+        ),
+        ("const".to_owned(), build_table(|_, _| 7)),
+        (
+            "monotonic".to_owned(),
+            build_table(|a, b| {
+                if b == a.wrapping_add(1) {
+                    1_000_000 - u32::from(a)
+                } else {
+                    u32::from(a) ^ u32::from(b)
+                }
+            }),
+        ),
+    ]
 }
 
 fn inputs() -> Vec<(String, Vec<u8>)> {
@@ -140,23 +152,30 @@ fn inputs() -> Vec<(String, Vec<u8>)> {
     for len in 0..200usize {
         out.push((
             format!("rand_{len}"),
-            (0..len).map(|_| rng.next_u32() as u8).collect(),
+            (0..len).map(|_| rng.next_byte()).collect(),
         ));
     }
     // longer random strings
     for len in [501usize, 999, 2000] {
         out.push((
             format!("rand_{len}"),
-            (0..len).map(|_| rng.next_u32() as u8).collect(),
+            (0..len).map(|_| rng.next_byte()).collect(),
         ));
     }
     // small-alphabet random (drives plateaus + deep pops)
     for len in [300usize, 2000] {
         out.push((
             format!("alpha4_{len}"),
-            (0..len).map(|_| b'a' + (rng.next_u32() % 4) as u8).collect(),
+            (0..len).map(|_| b'a' + (rng.next_byte() % 4)).collect(),
         ));
     }
+    out.extend(structured_inputs());
+    out
+}
+
+/// Runs, ascents, plateaus, and code-like periodic content.
+fn structured_inputs() -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     // uniform bytes, runs longer than MAX_LEN
     out.push(("uniform_300".to_owned(), vec![b'a'; 300]));
     // two long runs
@@ -164,10 +183,12 @@ fn inputs() -> Vec<(String, Vec<u8>)> {
     runs.extend(vec![b'b'; 150]);
     out.push(("runs_150_150".to_owned(), runs));
     // strictly ascending bytes (with the monotonic table: stack overflow)
-    out.push((
-        "ascending_1000".to_owned(),
-        (0..1000usize).map(|i| (i % 256) as u8).collect(),
-    ));
+    let mut ascending = Vec::with_capacity(1000);
+    for _ in 0..4 {
+        ascending.extend(0u8..=255);
+    }
+    ascending.truncate(1000);
+    out.push(("ascending_1000".to_owned(), ascending));
     out.push(("ascending_1_200".to_owned(), (1u8..=200).collect()));
     // plateau-heavy periodic content
     out.push(("abab_400".to_owned(), b"ab".repeat(200)));
@@ -210,8 +231,13 @@ fn scan_matches_reference_exactly() {
                 expected.push((s, e, direct_hash(&content[s..e])));
             });
             let mut got = Vec::new();
-            sngram::scan(&table, &Content::new(&content), |s, e, h| got.push((s, e, h)));
-            assert_eq!(got, expected, "scan diverged on table={tname} input={iname}");
+            sngram::scan(&table, &Content::new(&content), |s, e, h| {
+                got.push((s, e, h));
+            });
+            assert_eq!(
+                got, expected,
+                "scan diverged on table={tname} input={iname}"
+            );
             cases += 1;
         }
     }
@@ -257,12 +283,7 @@ fn stream_scanner_matches_reference_under_any_chunking() {
                 expected.push((bytes, h));
             });
             for (cname, chunks) in chunkings(&content, &mut rng) {
-                let mut got: Vec<(Vec<u8>, u64)> = Vec::new();
-                let mut scanner = StreamScanner::new(&table);
-                for chunk in &chunks {
-                    scanner.push(chunk, |g, h| got.push((g.to_vec(), h)));
-                }
-                scanner.finish();
+                let got = run_chunks(&table, &chunks);
                 assert_eq!(
                     got, expected,
                     "stream diverged on table={tname} input={iname} chunking={cname}"
@@ -272,6 +293,17 @@ fn stream_scanner_matches_reference_under_any_chunking() {
         }
     }
     eprintln!("stream differential cases passed: {cases}");
+}
+
+/// Stream the chunks through a fresh scanner, collecting every emission.
+fn run_chunks(table: &WeightTable, chunks: &[Vec<u8>]) -> Vec<(Vec<u8>, u64)> {
+    let mut got: Vec<(Vec<u8>, u64)> = Vec::new();
+    let mut scanner = StreamScanner::new(table);
+    for chunk in chunks {
+        scanner.push(chunk, |g, h| got.push((g.to_vec(), h)));
+    }
+    scanner.finish();
+    got
 }
 
 #[test]
@@ -291,19 +323,8 @@ fn stream_scanner_resets_between_documents() {
     assert_eq!(first, second, "finish() must fully reset scanner state");
 }
 
-#[test]
-fn eviction_path_is_exercised() {
-    // sanity: the monotonic table + ascending input must overflow the stack,
-    // so the differential suite genuinely covers the eviction branch
-    let table = build_table(|a, b| {
-        if b == a.wrapping_add(1) {
-            1_000_000 - u32::from(a)
-        } else {
-            u32::from(a) ^ u32::from(b)
-        }
-    });
-    let content: Vec<u8> = (0u8..=200).collect();
-    let mut depth = 0usize;
+/// Deepest uncapped hull-stack depth the content drives the table to.
+fn max_hull_depth(table: &WeightTable, content: &[u8]) -> usize {
     let mut max_depth = 0usize;
     let mut stack: Vec<(usize, u32)> = Vec::new();
     for i in 0..content.len() - 1 {
@@ -318,9 +339,24 @@ fn eviction_path_is_exercised() {
             }
         }
         stack.push((i, w));
-        depth = stack.len();
-        max_depth = max_depth.max(depth);
+        max_depth = max_depth.max(stack.len());
     }
+    max_depth
+}
+
+#[test]
+fn eviction_path_is_exercised() {
+    // sanity: the monotonic table + ascending input must overflow the stack,
+    // so the differential suite genuinely covers the eviction branch
+    let table = build_table(|a, b| {
+        if b == a.wrapping_add(1) {
+            1_000_000 - u32::from(a)
+        } else {
+            u32::from(a) ^ u32::from(b)
+        }
+    });
+    let content: Vec<u8> = (0u8..=200).collect();
+    let max_depth = max_hull_depth(&table, &content);
     assert!(
         max_depth > STACK_CAP,
         "test table must overflow the {STACK_CAP}-entry stack (got {max_depth})"

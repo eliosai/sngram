@@ -27,28 +27,33 @@ match; the real regex then verifies the candidates.
 
 ## API
 
-```rust
-use sngram::{query, scan, Gram, Pattern, QueryPlan};
+```rust,no_run
+use sngram::{query, scan, Pattern};
 use sngram_types::{Content, WeightTable};
 
-let table = WeightTable::from_bytes(&std::fs::read("bins/5tb_weights.bin")?)?;
-let doc = Content::new(b"fn max_file_size() -> u64 { 0 }");
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read("crates/weights/data/5tb_weights.bin")?;
+    let table = WeightTable::from_bytes(&bytes)?;
+    let doc = Content::new(b"fn max_file_size() -> u64 { 0 }");
 
-// index side: each gram arrives with its 64-bit index key
-scan(table, &doc, |start, end, hash| {
-    let _gram = &doc.as_bytes()[start..end];
-    let _key = hash; // store this in your inverted index
-});
+    // index side: each gram arrives with its 64-bit index key
+    scan(&table, &doc, |start, end, hash| {
+        let _gram = &doc.as_bytes()[start..end];
+        let _key = hash; // store this in your inverted index
+    });
 
-// query side: a regex becomes a boolean gram query; Gram::hash() yields
-// the same key scan emitted for the same bytes
-let plan = query(table, &Pattern::new(r"max_\w+_size").unwrap());
+    // query side: a regex becomes a boolean gram query; Gram::hash() yields
+    // the same key scan emitted for the same bytes
+    let plan = query(&table, &Pattern::new(r"max_\w+_size")?);
+    let _ = plan;
+    Ok(())
+}
 ```
 
 `query` is infallible: a pattern too broad to prefilter yields `QueryPlan::All`
 (scan everything, or reject it), an impossible one yields `QueryPlan::None`.
 
-```rust
+```rust,ignore
 pub enum QueryPlan {
     All,
     None,
@@ -76,13 +81,16 @@ window, so you can index large content straight from a reader without buffering
 it whole. It emits exactly the grams and hashes `scan` would over the
 concatenation. Reuse one scanner across documents — `finish()` resets it.
 
-```rust
+```rust,no_run
 use sngram::StreamScanner;
+use sngram_types::WeightTable;
 
-let mut scanner = StreamScanner::new(table);
-scanner.push(b"fn max_file", |_gram, _hash| { /* insert into your index */ });
-scanner.push(b"_size() {}", |_gram, _hash| { /* ... */ });
-scanner.finish();
+fn index(table: &WeightTable) {
+    let mut scanner = StreamScanner::new(table);
+    scanner.push(b"fn max_file", |_gram, _hash| { /* insert into your index */ });
+    scanner.push(b"_size() {}", |_gram, _hash| { /* ... */ });
+    scanner.finish();
+}
 ```
 
 Enable the `stream` feature for `StreamScanner::index_reader`, which drives the

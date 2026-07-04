@@ -12,11 +12,11 @@
 //! strictly greater than all internal weights are emitted as
 //! sparse n-grams. These go into an inverted index keyed by hash.
 //!
-//! **Querying** (per regex): the pattern is parsed into an AST,
-//! fixed literal substrings are extracted (both prefix and suffix),
-//! and each literal is decomposed into a minimal covering set of
-//! sparse n-grams (a subset of the index set). These are looked up
-//! in the inverted index.
+//! **Querying** (per regex): the pattern's HIR is folded into a
+//! conservative boolean query over gram presence. Literals cover to
+//! the grams the scan is guaranteed to emit for them (maximal for a
+//! lone literal, minimal per branch for wide variant sets), which are
+//! looked up in the inverted index.
 //!
 //! # Choosing an API
 //!
@@ -25,7 +25,9 @@
 //!   into an inverted index costs nothing extra.
 //! - [`StreamScanner`] — the same extraction over chunked input with bounded
 //!   memory; emits each gram's bytes and hash as it closes.
-//! - [`query`] — decomposes a regex into covering grams for index lookup.
+//! - [`query_with`] — decomposes patterns under the verifying engine's
+//!   match options (case, fixed strings, unicode, inversion); prefer this.
+//! - [`query`] — decomposes a bare regex with default semantics.
 //! - `learn` module (feature `learn`) — bigram counters for training fresh weight tables
 
 pub mod error;
@@ -38,14 +40,22 @@ mod extract;
 mod gram;
 mod hashing;
 
-#[doc(inline)]
-pub use extract::StreamScanner;
 pub use error::QueryError;
+#[doc(inline)]
+pub use extract::{ScanOptions, StreamScanner};
 pub use gram::Gram;
+pub use hashing::{HashKey, hash_bytes, hash_bytes_keyed};
 pub use pattern::Pattern;
-pub use plan::QueryPlan;
+pub use plan::{
+    DfStats, GramSpace, IndexFormat, PlanCase, PlanOptions, PlanSyntax, PlannedQuery, QueryPlan,
+};
 
 use sngram_types::{Content, WeightTable};
+
+/// Compiles the README's examples as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
 
 /// Zero-allocation scan. Calls `emit(start, end, hash)` per gram.
 ///
@@ -62,6 +72,42 @@ pub fn scan(table: &WeightTable, content: &Content<'_>, emit: impl FnMut(usize, 
     extract::scan(table, content.as_bytes(), emit);
 }
 
+/// Panic-free [`scan`]: rejects 4 GiB+ content instead of asserting.
+///
+/// # Errors
+///
+/// Returns [`error::ScanError::TooLarge`] when `content` is 4 GiB or larger;
+/// feed such inputs through [`StreamScanner`], which has no size limit.
+// TODO: make this the default scan no try variant, make sure we do not assert
+pub fn try_scan(
+    table: &WeightTable,
+    content: &Content<'_>,
+    emit: impl FnMut(usize, usize, u64),
+) -> Result<(), error::ScanError> {
+    // TODO: how much does this cost?
+    let len = content.as_bytes().len();
+    if u32::try_from(len).is_err() {
+        return Err(error::ScanError::TooLarge { len });
+    }
+    extract::scan(table, content.as_bytes(), emit);
+    Ok(())
+}
+
+/// Scan under explicit [`ScanOptions`], emitting each gram's bytes and hash.
+///
+/// The options select the hash space (deployment key, folded twin space) and
+/// the virtual line sentinels; index build and query planning must use the
+/// same options or lookups miss.
+// TODO: merge this into a singlular scan. Have the default take opts.
+pub fn scan_with(
+    table: &WeightTable,
+    content: &Content<'_>,
+    opts: ScanOptions,
+    emit: impl FnMut(&[u8], u64),
+) {
+    extract::scan_with(table, content.as_bytes(), opts, emit);
+}
+
 /// Decompose a regex pattern into a sparse-gram [`QueryPlan`] for index lookup.
 ///
 /// Infallible: a too-broad pattern yields [`QueryPlan::All`] and an impossible
@@ -69,6 +115,52 @@ pub fn scan(table: &WeightTable, content: &Content<'_>, emit: impl FnMut(usize, 
 #[must_use]
 pub fn query(table: &WeightTable, pattern: &Pattern) -> QueryPlan {
     plan::query(table, pattern)
+}
+
+/// Decompose one or more patterns into a [`QueryPlan`] under the verifying
+/// engine's match options.
+///
+/// Prefer this over [`query`] whenever the engine that verifies candidates
+/// is configured with anything beyond default Rust-regex semantics: the
+/// options carry case mode (including engine-rule smart case), fixed-string
+/// interpretation, Unicode mode, and inversion, so the plan is built from
+/// exactly the semantics the verifier will apply.
+///
+/// # Errors
+///
+/// Returns [`QueryError`] when the joined patterns exceed the length limit
+/// or fail to parse.
+// TODO: merge this into a singlular query. Have the default take opts.
+pub fn query_with<P: AsRef<str>>(
+    table: &WeightTable,
+    patterns: &[P],
+    opts: PlanOptions,
+) -> Result<QueryPlan, QueryError> {
+    plan::query_with(table, patterns, opts)
+}
+
+/// Decompose patterns against an index's physical format.
+///
+/// Beyond [`query_with`], the format unlocks two precision features the index
+/// must have been built with (see [`ScanOptions`]): a folded twin space turns
+/// case-insensitive queries into single folded-space plans instead of
+/// variant explosions, and line sentinels let edge anchors (`^`/`$`) demand
+/// terminator-bridging grams instead of planning as if unanchored. The
+/// returned [`PlannedQuery::space`] says which space to hash the plan's
+/// grams into.
+///
+/// # Errors
+///
+/// Returns [`QueryError`] when the joined patterns exceed the length limit
+/// or fail to parse.
+// TODO: merge this into a singlular plan. Have the default take opts.
+pub fn plan_query<P: AsRef<str>>(
+    table: &WeightTable,
+    patterns: &[P],
+    opts: PlanOptions,
+    format: IndexFormat,
+) -> Result<PlannedQuery, QueryError> {
+    plan::plan_query(table, patterns, opts, format)
 }
 
 #[cfg(test)]
@@ -407,5 +499,4 @@ mod tests {
         });
         assert_eq!(from_reader, from_scan);
     }
-
 }

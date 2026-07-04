@@ -1,0 +1,318 @@
+# eg false-positive query corpus. Columns: label<TAB>pattern<TAB>flags
+# Run: EG_BIN=target/release/eg QUERIES=scripts/fp-queries.tsv scripts/eg-fp-rates.sh <corpus> <out.tsv>
+# Tuned for a Linux kernel checkout but generic enough for any C-heavy corpus.
+
+# --- exact literals: rare, medium, common, long ---
+lit_rare	sched_clock
+lit_rare2	usb_submit_urb
+lit_medium	request_irq
+lit_common	kfree
+lit_very_common	static int
+lit_long	EXPORT_SYMBOL_GPL
+lit_long_rare	DEFINE_PER_CPU_SHARED_ALIGNED
+lit_config	CONFIG_PREEMPT
+lit_everything	Everything
+lit_punct_arrow	->owner
+lit_punct_call	kzalloc\(
+lit_deref_chain	dev->name
+lit_spaces	out of memory
+lit_short_min	EXP
+lit_numeric	4096
+lit_hex	0xdeadbeef
+lit_string_esc	\\n\\t
+lit_include	#include <linux/module.h>
+lit_comment	/* fallthrough */	-F
+
+# --- fixed strings (-F) with regex metachars ---
+fixed_parens	kfree(skb)	-F
+fixed_dotstar	a.*b	-F
+fixed_brackets	arr[0]	-F
+fixed_plus	i++	-F
+
+# --- case-insensitive literals ---
+ci_max_file_size	max_file_size	-i
+ci_sched_clock	sched_clock	-i
+ci_config	CONFIG_PREEMPT	-i
+ci_error_msg	Out Of Memory	-i
+ci_gpl	EXPORT_SYMBOL_GPL	-i
+ci_kelvin_fold	kobject_get	-i
+ci_long_s_fold	subsys_initcall	-i
+ci_short	xhci	-i
+ci_mixed_flag	(?i)NetDev_Priv
+ci_inline_scoped	(?i:readl)_relaxed
+
+# --- case-insensitive + word boundary ---
+ci_word	mutex_lock	-i -w
+word_lit	kfree	-w
+word_short	err	-w
+
+# --- small character classes ---
+class_dash	sched[_-]clock
+class_digit	skb[0-9]
+class_hexdig	reg[0-7]
+class_upper_pair	[RT]X_RING
+class_multi	m[ae]x_size
+class_two_slots	s[ck][bh]_buff
+class_negated_wide	ab[^cde]fgh
+class_at_start	[xyz]table_entry
+class_at_end	netdev_priv[0-9(]
+
+# --- alternations ---
+alt_two_rare	sched_clock|sched-clock
+alt_grouped	(max|min)_file_size
+alt_rare_common	usb_submit_urb|kfree
+alt_three	(kmalloc|kzalloc|kcalloc)
+alt_long_islands	EXPORT_SYMBOL|EXPORT_SYMBOL_GPL
+alt_nested	((raw_)?spin|mutex)_lock
+alt_suffix	netif_(rx|tx)
+alt_case_class	[Kk]config|[Mm]akefile
+alt_many	(open|close|read|write|ioctl)_file
+
+# --- optional parts ---
+opt_prefix	(?:un)?likely\(
+opt_mid	get_?user_pages
+opt_suffix	pci_dev(_put)?
+opt_class	__?builtin_expect
+
+# --- bounded repetition ---
+rep_exact3	x{3}
+rep_char_exact	=={2}
+rep_group	(ab){3}
+rep_min2	ff{2,}
+rep_hex8	0x[0-9a-f]{8}
+rep_range	e{2,4}print
+rep_zero_one_class	[0-9]{0,3}ms
+
+# --- gap queries (island co-occurrence; FP floor expected) ---
+gap_dotstar	sched.*clock
+gap_dotplus	request.+irq
+gap_word	max_\w+_size
+gap_space	static\s+void\s+init
+gap_two_long	usb_submit.*usb_free
+gap_bounded	foo.{0,20}bar
+gap_include	#include.*linux/sched
+gap_three_islands	for_each.*entry.*list
+gap_class_star	kern[a-z]*builds
+
+# --- anchors and boundaries (invisible to grams) ---
+anchor_start	^static DEFINE_MUTEX
+anchor_end	MODULE_LICENSE\("GPL"\);$
+anchor_multi	^#define CONFIG
+boundary_both	\bkfree_skb\b
+look_neg	kfree(?-u:\B)_skb
+
+# --- literal + class + repetition seams ---
+seam_plus_lit	init\w+register
+seam_digit_ms	[0-9]+msecs
+seam_version	v[0-9]+\.[0-9]+
+seam_lit_plus	mem+set
+seam_plusgroup	(foo)+bar
+seam_star_lit	z*alloc_page
+seam_dot_single	kmal.oc
+seam_class_bridge	dma[_-]mapping[_-]error
+
+# --- escaped metacharacters ---
+esc_parens	do_exit\(code\)
+esc_brackets	page\[i\]
+esc_dollar	\$\(CC\)
+esc_braces	\{ 0 \}
+esc_star	\*pos
+esc_backslash	printk\("\\n"\)
+
+# --- unicode ---
+uni_utf8_lit	Björn
+uni_arrow	→
+uni_ci_fold	björn	-i
+uni_emoji_dash	序列
+uni_class	caf[éè]
+
+# --- escaped control chars in source text ---
+nl_esc_in_lit	\\0
+
+# --- long tail: realistic developer greps ---
+dev_todo	TODO|FIXME
+dev_derive	__attribute__\(\(packed\)\)
+dev_null_check	if \(!ptr\)
+dev_return_err	return -EINVAL;
+dev_fn_sig	static inline int
+dev_printk	printk\(KERN_ERR
+dev_ratelimit	printk_ratelimit\(\)
+dev_memcpy_sized	memcpy\(.*sizeof
+dev_kmalloc_flags	kmalloc\(.*GFP_KERNEL
+dev_container_of	container_of\(ptr
+dev_list_head	LIST_HEAD\(
+dev_module_init	module_init\(.*_init\)
+dev_ifdef	#ifdef CONFIG_SMP
+dev_barrier	smp_mb__after_atomic
+dev_percpu	this_cpu_ptr
+dev_rcu	rcu_read_lock_held
+dev_unlikely_null	unlikely\(!\w
+dev_cast_void	\(void \*\)dev
+
+# --- multiple patterns / regression shapes from codesearch tests ---
+cs_nested_alt	(z*abcdefz*)(z*(ghijk|lmnop)z*)
+cs_alt_of_concat	a+hello|b+world
+cs_quest_tail	(bbbb)a?
+cs_concat_groups	(abcd)(efgh)
+
+# --- reviewer-derived: open repetition seams, look contexts, wide pairs ---
+rep_min_open	a{5,}bcd
+rep_group_open	(ab){2,}c
+rep_group_open_long	(abc){2,}def
+rep_adjacent_exact	a{2}b{2}
+plus_seam_ci	mem+set	-i
+plus_seam_left_ctx	rea+d_lock
+look_impossible_wb	t\bhe
+look_impossible_end	foo$bar
+look_impossible_nonword	kfree\B\(
+wide_pair_mid	read[a-zA-Z][a-zA-Z]lock
+wide_pair_63	init[0-9a-zA-Z_][0-9a-zA-Z_]call
+wide_single_ctl	dev[a-zA-Z]attr
+ci_budget_tail	trace_event_raw_event_sched_switch	-i
+ci_budget_tail_inline	(?i)netif_receive_skb_list_internal
+lazy_gap	sched.*?clock
+lazy_plus	request.+?irq
+opt_chain	get_?user_?pages_?fast
+alt_len_skew	kfree|unregister_netdevice_notifier
+
+# --- verifier-semantics flags: smart case, no-unicode, multiline, crlf ---
+smart_lower	mutex_lock	-S
+smart_escape_class	mutex\Wlock	-S
+smart_upper	CONFIG_PREEMPT	-S
+byte_esc_elf	(?-u)\x7fELF	--no-unicode
+no_unicode_lit	request_irq	--no-unicode
+multiline_lit	request_irq	-U
+multiline_span	pgtable\);\n\}	-U
+crlf_anchor	request_irq$	--crlf
+
+# --- round-2 reviewer findings: budget gate, cover accounting, min=2 seams ---
+ci_tail_starved_60	(?i)very_long_function_name_with_many_parts_and_then_some_more_tail
+fit_narrow_class_head	[!-~]the_quick_brown_fox_jumped_over_the_lazy_dog_while_the_cat_watched_from_the_windowsill_yes
+maxcover_budget_blow	(?i:very_long_function_name_with_many_parts).*[a-h]another_extremely_long_trailing_literal_block_that_should_be_covered_maximally_here_nowz
+rep_min2_two_sided	init(xy){2,}done
+look_word_class	foo\b[x+]bar
+greek_byte_seam	\p{Greek}term_var
+
+# --- audit sentinels: numeric/hex/version (largest non-floor FP class) ---
+ver_semver	v[0-9]+\.[0-9]+\.[0-9]+
+rep_ip_octet	([0-9]{1,3}\.){3}[0-9]
+hex_addr16	0x[0-9a-fA-F]{16}
+num_mask	0xff\b
+num_bit_shift	1UL << [0-9]+
+
+# --- audit sentinels: bounded-rep expansion cap ---
+bounded_rep5	x{5}
+rep_cap5_lit	ab{5}cd
+rep_word_ops	\w{4,8}_ops
+
+# --- audit sentinels: crlf/anchor floors ---
+crlf_export_end	EXPORT_SYMBOL$	--crlf
+crlf_define_start	^#define CONFIG	--crlf
+
+# --- audit sentinels: deep alternations ---
+alt_gfp	GFP_(KERNEL|ATOMIC|NOWAIT|NOFS|NOIO|USER)
+alt_irqf	IRQF_(SHARED|ONESHOT|TRIGGER_HIGH|TRIGGER_LOW|NO_SUSPEND)
+alt_reg_nested	((un)?register|(de)?activate)_netdev
+
+# --- audit sentinels: realistic developer greps ---
+fnptr_decl	int \(\*\w+\)\(
+fnptr_const_ops	static const struct \w+_operations
+field_skb_data	skb->data
+field_cast_sock	\(struct sock \*\)
+pf_ps	%pS
+pf_hex08	0x%08x
+pf_err_fmt	pr_err\("%s:
+err_alt	-E(INVAL|NOMEM|BUSY|AGAIN)
+err_ptr	ERR_PTR\(-E
+phrase_spdx	SPDX-License-Identifier: GPL
+phrase_signed_off	Signed-off-by:
+
+# --- audit sentinels: smart case and non-ASCII ---
+smart_lower_fn	spin_lock_irqsave	-S
+smart_long_lower	netif_receive_skb_core	-S
+smart_struct	TaskStruct	-S
+uni_micro	µs
+uni_cjk	中文
+path_include	include/linux/netdevice\.h
+
+# --- audit sentinels: gap floors ---
+gap_lock_unlock	spin_lock.*spin_unlock
+gap_static_return	static.*return -E
+
+# --- known-unsupported (should stay graceful, recorded not crashed) ---
+unsup_dotstar	.*
+unsup_wordplus	\w+
+unsup_anychar	.
+unsup_short	ab
+unsup_class_only	[a-z]+
+unsup_negclass	[^x]+
+unsup_anchor_only	^
+unsup_short_gap	a.b
+unsup_alt_mixed	kfree|ab
+# --- production-readiness additions: numeric/hex/version (largest non-floor FP class) ---
+ver_semver	v[0-9]+\.[0-9]+\.[0-9]+
+rep_ip_octet	[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}
+hex_addr16	0x[0-9a-f]{16}
+num_mask	0x[0-9a-fA-F]{8}
+num_bit_shift	1 << [0-9]+
+# --- bounded-rep cap sentinels ---
+rep_x5	x{5}
+rep_ab5cd	ab{5}cd
+
+# --- nullable anchor bridges: optional indentation/trailing space can sever sentinel-to-literal seams ---
+anchor_indent_define	^[ \t]*#define CONFIG
+anchor_indent_static	^[ \t]*static inline
+anchor_trailing_ws	EXPORT_SYMBOL\(\w+\);[ \t]*$
+anchor_crlf_trailing_ws	EXPORT_SYMBOL\(\w+\);[ \t]*$	--crlf
+
+# --- wide mixed classes: ASCII plus Unicode boundary sets can collapse and admit bare literals ---
+wide_mixed_unicode_left	[A-Za-z\p{Greek}]term_var
+wide_mixed_unicode_mid	read[A-Za-z\p{Cyrillic}]lock
+# Branch-correlation sentinel: a merged wide class must not let different class bytes satisfy opposite seams.
+wide_mixed_branch_mix	read[A-Za-z\p{Cyrillic}]lock
+
+# --- structured IDs: large bounded classes should stay constrained without plan blowups ---
+uuid_hex	[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}
+mac_addr	[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}
+
+# --- folded-space class/seam stress ---
+ci_ascii_class_irq	READ[A-Z]lock_IRQ	-i
+ci_scoped_alt	(?i:(read|write|cmpxchg)_once)
+
+# --- harness sentinels: transparent scan fallback must not produce negative FP metrics ---
+harness_scan_fallback	.*
+harness_common_fallback	static int
+rep_word_ops	\w{4,8}_ops
+# --- CRLF/anchor floor sentinels ---
+anchor_export_crlf	EXPORT_SYMBOL$	--crlf
+anchor_define_crlf	^#define CONFIG	--crlf
+anchor_export_eol	EXPORT_SYMBOL\(\w+\);$
+anchor_define_bol	^#define CONFIG_[A-Z_]+
+# --- deep alternations ---
+alt_gfp	GFP_(KERNEL|ATOMIC|NOWAIT|NOFS|NOIO|USER)
+alt_irqf	IRQF_(SHARED|ONESHOT|TRIGGER_RISING|TRIGGER_FALLING|NO_SUSPEND)
+alt_netdev	((un)?register|(de)?activate)_netdev
+# --- realistic dev greps ---
+dev_fnptr	int \(\*\w+\)\(
+dev_ops_struct	static const struct \w+_operations
+dev_skb_data	skb->data
+dev_sock_cast	\(struct sock \*\)
+dev_pS	%pS	-F
+dev_hex_fmt	0x%08x	-F
+dev_pr_err	pr_err\("%s:
+dev_errno	-E(INVAL|NOMEM|BUSY|AGAIN)
+dev_err_ptr	ERR_PTR\(-E
+dev_spdx	SPDX-License-Identifier: GPL	-F
+dev_signed_off	Signed-off-by:	-F
+# --- smart case and non-ascii ---
+smart_spinlock	spin_lock_irqsave	-S
+smart_netif	netif_receive_skb_core	-S
+smart_taskstruct	TaskStruct	-S
+# Outer Unicode word-boundary edge: positive gram plans need indexed boundary context to reject word-prefixed occurrences.
+unicode_word_boundary_edge	\bµs\b
+nonascii_micro	µs
+nonascii_cjk	中文
+path_netdevice	include/linux/netdevice\.h
+# --- gap floor sentinels ---
+gap_spinlock_pair	spin_lock.*spin_unlock
+gap_static_err	static.*return -E

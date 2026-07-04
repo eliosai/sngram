@@ -18,10 +18,26 @@ pub struct RegexpInfo {
     /// The exact, finite set of matching strings, when one exists.
     /// `None` means use [`Self::prefix`] and [`Self::suffix`] instead.
     pub exact: Option<StringSet>,
-    /// Possible match prefixes (used only when `exact` is `None`).
+    /// Match prefixes (used only when `exact` is `None`). Exhaustive: every
+    /// match STARTS with some member; a `""` member means the first byte is
+    /// unknown. Look-around pruning reads first bytes from this, so dropping
+    /// members is unsound.
     pub prefix: StringSet,
-    /// Possible match suffixes (used only when `exact` is `None`).
+    /// Match suffixes (used only when `exact` is `None`). Exhaustive: every
+    /// match ENDS with some member; a `""` member means the last byte is
+    /// unknown. Look-around pruning reads last bytes from this, so dropping
+    /// members is unsound.
     pub suffix: StringSet,
+    /// When `Some(E)`, this info is a *pure* one-or-more repetition `E+` of the
+    /// small exact set `E` (both edges an open `E`-run), freshly produced by
+    /// [`super::analyze::demote_plus`]. It carries no constraint of its own —
+    /// `prefix`/`suffix` already equal `E` and stay exhaustive — but lets the
+    /// enclosing [`Analyzer::concat`] tighten the seam where the run abuts a
+    /// neighbour (see `plus_prefix`/`plus_suffix`). It is a transient hint: the
+    /// concat that consumes it bakes the tightened window into `prefix`/`suffix`
+    /// and leaves the result's `plus_base` `None`, so every other combinator
+    /// (alternation, a further concat, `blank`) clears it by construction.
+    pub plus_base: Option<StringSet>,
     /// A query every match must satisfy, beyond prefix/suffix.
     pub match_: Query,
 }
@@ -34,6 +50,7 @@ impl RegexpInfo {
             exact: None,
             prefix: StringSet::new(),
             suffix: StringSet::new(),
+            plus_base: None,
             match_: Query::all(),
         }
     }
@@ -45,17 +62,7 @@ impl RegexpInfo {
             exact: None,
             prefix: empty_member(),
             suffix: empty_member(),
-            match_: Query::all(),
-        }
-    }
-
-    /// Describes a regexp matching any single character.
-    pub fn any_char() -> Self {
-        Self {
-            can_empty: false,
-            exact: None,
-            prefix: empty_member(),
-            suffix: empty_member(),
+            plus_base: None,
             match_: Query::all(),
         }
     }
@@ -67,6 +74,7 @@ impl RegexpInfo {
             exact: None,
             prefix: StringSet::new(),
             suffix: StringSet::new(),
+            plus_base: None,
             match_: Query::none(),
         }
     }
@@ -78,6 +86,7 @@ impl RegexpInfo {
             exact: Some(StringSet::of(Gram::empty())),
             prefix: StringSet::new(),
             suffix: StringSet::new(),
+            plus_base: None,
             match_: Query::all(),
         }
     }
@@ -92,13 +101,15 @@ impl RegexpInfo {
             exact: Some(StringSet::of(Gram::from(bytes))),
             prefix: StringSet::new(),
             suffix: StringSet::new(),
+            plus_base: None,
             match_: Query::all(),
         }
     }
 }
 
 /// A set holding only the empty string, the identity for prefix/suffix cross
-/// products (`"" + s == s`).
+/// products (`"" + s == s`) and the "boundary byte unknown" sentinel for
+/// look-around pruning, distinct from `can_empty`.
 fn empty_member() -> StringSet {
     StringSet::of(Gram::empty())
 }

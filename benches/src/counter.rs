@@ -2,7 +2,9 @@
     missing_docs,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::cast_possible_truncation
+    clippy::cast_possible_truncation,
+    clippy::excessive_nesting,
+    clippy::indexing_slicing
 )]
 
 //! Benchmarks the real training ingest path: `LocalTally::count_buffer` is the
@@ -28,7 +30,11 @@ fn mixed(size: usize) -> Vec<u8> {
     src.iter()
         .map(|&b| {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            if state % 5 == 0 { (state >> 24) as u8 } else { b }
+            if state.is_multiple_of(5) {
+                (state >> 24) as u8
+            } else {
+                b
+            }
         })
         .collect()
 }
@@ -41,17 +47,13 @@ fn bench_count_buffer(c: &mut Criterion) {
     for &size in SIZES {
         for (name, data) in [("code", source_code(size)), ("mixed", mixed(size))] {
             group.throughput(Throughput::Bytes(size as u64));
-            group.bench_with_input(
-                BenchmarkId::new(name, size),
-                &data,
-                |b, d| {
-                    let mut tally = LocalTally::new();
-                    b.iter(|| {
-                        tally.count_buffer(black_box(d));
-                        black_box(tally.bytes())
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(name, size), &data, |b, d| {
+                let mut tally = LocalTally::new();
+                b.iter(|| {
+                    tally.count_buffer(black_box(d));
+                    black_box(tally.bytes())
+                });
+            });
         }
     }
     group.finish();

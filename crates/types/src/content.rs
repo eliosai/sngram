@@ -5,6 +5,7 @@
 pub struct Content<'a>(&'a [u8]);
 
 const BINARY_SIGS: &[&[u8]] = &[
+    b"SPNG",
     b"\x7fELF",
     b"MZ",
     b"\xfe\xed\xfa\xce",
@@ -45,36 +46,43 @@ const BINARY_SIGS: &[&[u8]] = &[
 ];
 
 impl<'a> Content<'a> {
+    /// Wrap borrowed bytes as content.
     #[must_use]
     pub const fn new(bytes: &'a [u8]) -> Self {
         Self(bytes)
     }
 
+    /// The wrapped bytes.
     #[must_use]
     pub const fn as_bytes(&self) -> &'a [u8] {
         self.0
     }
 
+    /// Content length in bytes.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Whether the content is empty.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Whether the content is longer than `max_bytes`.
     #[must_use]
     pub const fn exceeds(&self, max_bytes: usize) -> bool {
         self.0.len() > max_bytes
     }
 
+    /// Whether the content starts with a known binary file signature.
     #[must_use]
     pub fn has_binary_signature(&self) -> bool {
         BINARY_SIGS.iter().any(|sig| self.0.starts_with(sig))
     }
 
+    /// Control-byte sniff over the head: NULs or dense non-text bytes.
     #[allow(clippy::indexing_slicing, reason = "sample bounds checked by min")]
     #[must_use]
     pub fn is_likely_binary(&self) -> bool {
@@ -101,6 +109,12 @@ mod tests {
     #[test]
     fn detects_png() {
         let c = Content::new(b"\x89PNG\r\n\x1a\ndata");
+        assert!(c.has_binary_signature());
+    }
+
+    #[test]
+    fn detects_sngram_weight_table() {
+        let c = Content::new(b"SPNG\x01\x00\x00\x00rest");
         assert!(c.has_binary_signature());
     }
 

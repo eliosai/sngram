@@ -1,0 +1,40 @@
+elgrep (eg) !!VERSION!!
+Andrew Gallant <jamslam@gmail.com>
+
+elgrep (eg) recursively searches the current directory for lines matching a
+regex pattern. It builds on ripgrep and adds sparse n-gram indexed search.
+
+Use -h for short descriptions and --help for more details.
+
+Project home page: https://github.com/eliosai/sngram
+
+USAGE:
+  eg [OPTIONS] PATTERN [PATH ...]
+
+POSITIONAL ARGUMENTS:
+  <PATTERN>   A regular expression used for searching.
+  <PATH>...   A file or directory to search.
+
+INPUT OPTIONS:
+!!input!!
+
+SEARCH OPTIONS:
+!!search!!
+
+FILTER OPTIONS:
+!!filter!!
+
+OUTPUT OPTIONS:
+!!output!!
+
+OUTPUT MODES:
+!!output-modes!!
+
+LOGGING OPTIONS:
+!!logging!!
+
+SPARSE N-GRAM OPTIONS:
+!!sparse-ngram!!
+
+OTHER BEHAVIORS:
+!!other-behaviors!!
