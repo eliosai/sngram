@@ -1,0 +1,70 @@
+python/sngram/train/config.py
+  s_e6cf9f02ed0ab3::t_6dd0b97bf6aebb 118
+  s_e6cf9f02ed0ab3::t_741bff7af7e5e5 1-7,18-34,37-94,99-104,113-114,123,136-146,150,154-160,164-223,226
+python/sngram/cli.py
+  s_e6cf9f02ed0ab3::t_0ce6d80426d977 22
+python/tests/test_config.py
+  s_e6cf9f02ed0ab3::t_68518b677217dd 1,6-9,13-14,23-29,32-33,35-40,42,45-50,69-110
+  s_e6cf9f02ed0ab3::t_c5b22bc3dcc7c9 16,51-68
+python/tests/test_swh_pipeline.py
+  s_e6cf9f02ed0ab3::t_2d7cdc12269093 168-194
+  s_e6cf9f02ed0ab3::t_6b8e6ad71f0742 195-237
+  s_e6cf9f02ed0ab3::t_65ed4195789d4d 140-142
+  s_e6cf9f02ed0ab3::t_1ffc357ad37687 151-167
+  s_e6cf9f02ed0ab3::t_5ad1773dbebb45 1-139,143-150
+python/tests/test_checkpoint.py
+  s_e6cf9f02ed0ab3::t_f51a39fa9eb44e 24,49,64-67,74-77
+crates/weights/README.md
+  s_f704bf3c9e2e2d::t_7061734039f43b 4,6-11,13-18,21-26,29-31,34-36
+  s_e6cf9f02ed0ab3::t_998df8abcf7ec3 37
+python/tests/test_cli.py
+  s_e6cf9f02ed0ab3::t_0bb576f7078f2e 16,19-20,50
+python/tests/test_live_datasets.py
+  s_e6cf9f02ed0ab3::t_8e5394aeed86cc 1,16,21,25-32,34-38
+python/pyproject.toml
+  s_e6cf9f02ed0ab3::t_37bb62497a0f5b 20,24,43,47
+docs/distr.md
+  s_e6cf9f02ed0ab3::t_66fcce0a06e531 1,3,5,7,9-97
+crates/weights/src/lib.rs
+  s_f704bf3c9e2e2d::t_f7cb47a591020e 3-4,6-79,81-102,104-148,153-164,166-269,291-293
+  s_f704bf3c9e2e2d::t_6344bdcf86ecc9 80,165,290
+  s_f704bf3c9e2e2d::t_c72773d88a87c5 103,149-152
+  s_f704bf3c9e2e2d::t_26e5a15b84d8fa 270-289
+python/sngram/train/pipeline.py
+  s_e6cf9f02ed0ab3::t_593e8ce0df76ee 242-243
+  s_e6cf9f02ed0ab3::t_6dd0b97bf6aebb 753,772,775,819,1282
+  s_e6cf9f02ed0ab3::t_63f8fb05b57a3e 1521-1523,1642-1646
+  s_e6cf9f02ed0ab3::t_9a644efe72971f 1462-1464,1640-1641,1647-1648
+  s_e6cf9f02ed0ab3::t_234be40235fd93 130-141
+  s_e6cf9f02ed0ab3::t_400b44edf04adc 16,28,33,51-55
+  s_e6cf9f02ed0ab3::t_09430653e552ab 559,956-960,1033-1050
+  s_e6cf9f02ed0ab3::t_f2c399ac11faa2 1244-1246,1362-1461,1465-1520,1524-1591,1593-1639,1649-1659
+  s_e6cf9f02ed0ab3::t_344f7bb8f6df9b 1592
+  s_e6cf9f02ed0ab3::t_86f333929d8064 1660
+crates/weights/Cargo.toml
+  s_f704bf3c9e2e2d::t_bb1f0ee9ca5fc7 22-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cbd3f11ae5119abc47083bcd99c21d17420324d3",
+  "prompts": {},
+  "sessions": {
+    "s_e6cf9f02ed0ab3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ea3-28fc-7120-abc2-b88b6dcc6df8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    },
+    "s_f704bf3c9e2e2d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1ed7-888e-7ed1-aa58-28d6f2f8ee18",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
