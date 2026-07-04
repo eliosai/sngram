@@ -1,0 +1,145 @@
+crates/types/src/lib.rs
+  s_a55f99868da982::t_252922059f6d00 13
+  s_a55f99868da982::t_d98e4d8319c722 1,5-6,11
+  s_a55f99868da982::t_3d9bc689037e76 12
+crates/types/src/table.rs
+  s_a55f99868da982::t_646d003d9c7cbb 74-78
+  s_a55f99868da982::t_4286cc69c7081b 8-10,14,16-17
+  s_a55f99868da982::t_2905918bad2fc3 154-158
+  s_a55f99868da982::t_86cb862a08c88a 115,323-338,346-369,404
+  s_a55f99868da982::t_7bf16d235f94c8 207,246-255
+  s_a55f99868da982::t_a9e3b002913740 11-12,92-100,153,159-160,339-345
+  s_a55f99868da982::t_c0736ac515a07f 18,29-38,44,47,53,58,67-73,79-91,101-114,209-214,219-220,223-245,256-260,273
+  s_a55f99868da982::t_12b6cb0239396b 7
+  s_a55f99868da982::t_68edde233c9e8b 13
+  s_a55f99868da982::t_7b994e125306ce 116
+  s_a55f99868da982::t_eace55fab414d9 208
+  s_a55f99868da982::t_3b099d8ecf5c90 5,23,138,169,182,189
+crates/lib/src/plan/mod.rs
+  s_a55f99868da982::t_5948a586621bbb 360,369
+  s_a55f99868da982::t_55520774eb2d54 18,652
+crates/eg/src/index/manifest.rs
+  s_a55f99868da982::t_c61fc883005f5b 24-25
+  s_a55f99868da982::t_2f822e357c4cb6 177,185,273,279
+crates/lib/src/lib.rs
+  s_a55f99868da982::t_ee4f16be41f140 169,189-195,272-280
+  s_a55f99868da982::t_3d9bc689037e76 48
+python/.gitignore
+  s_a55f99868da982::t_28f35377a30ef9 3
+  s_a55f99868da982::t_7d7ca3279e4e55 2
+crates/lib/src/learn.rs
+  s_a55f99868da982::t_0d79eebf9604ef 14,239,247,249-256,258-262
+  s_a55f99868da982::t_b36bf3951424ac 583
+crates/eg/src/index/mod.rs
+  s_a55f99868da982::t_9fac3f308db481 83,91,108,135,148,164,359,383
+  s_a55f99868da982::t_2905918bad2fc3 112-114,371
+  s_a55f99868da982::t_50c11729dfd6f9 63-64,84,327-328,338,348,360,414
+crates/types/README.md
+  s_a55f99868da982::t_8a2692561dbcd9 17-18
+  s_a55f99868da982::t_8ffa0a42fdc606 10-15
+  s_a55f99868da982::t_3f1c308f595ed8 3,16,22-23
+crates/lib/tests/streaming.rs
+  s_a55f99868da982::t_0a6fe6bb7c6e07 13,17,23-29,35-43
+crates/lib/tests/differential.rs
+  s_a55f99868da982::t_e224d1f14d43e4 13,87
+crates/types/src/hashing.rs
+  s_a55f99868da982::t_ba3346db953062 10,12-15,42,89,98,153,208
+  s_a55f99868da982::t_7cd60f94b526bc 45-66,100,109,138,155,210
+  s_a55f99868da982::t_b3b6b4b84beecf 73
+  s_a55f99868da982::t_0aca56905ecdfe 7-8,19,24,67-68,70-71,156-160,172-176,183-189,195-198,211,222-223,231-232
+  s_a55f99868da982::t_b1cdf062238127 16,23,69,72,78,80-88,90-97,99,101,107,110-114,118,122-124
+  s_a55f99868da982::t_5e6e174623792b 229
+crates/eg/src/index/postings.rs
+  s_a55f99868da982::t_3f9236bdf69d10 61,75,79,195,207,215,219,221,225,232,240,243,306,317,324,346,357,362,390,398
+crates/eg/src/index/store.rs
+  s_a55f99868da982::t_0a59e68494d8b0 238,292
+  s_a55f99868da982::t_79afe60c10ed19 48,65-71,75,197,209-215,226-232,241-247,273
+.gitignore
+  s_a55f99868da982::t_4fb1c079ca1b3e 12
+crates/lib/src/plan/query.rs
+  s_a55f99868da982::t_a84df451a195ff 11-12,235,240,270,279,285,344
+crates/eg/Cargo.toml
+  s_a55f99868da982::t_7b171230ac3939 24
+crates/types/src/gram.rs
+  s_a55f99868da982::t_8a2692561dbcd9 5-6
+  s_a55f99868da982::t_3d9bc689037e76 15,87,93
+  s_a55f99868da982::t_ee4ab2cb3b9299 25,37,45,62,65,98-105,107-108,111-113,115-116,118-121,128
+  s_a55f99868da982::t_c3ed2d0f16113d 17,19-24,61,127,199-203
+  s_a55f99868da982::t_b3b6b4b84beecf 3-4,7-8,18,30-31,84,90,92,122-125
+  s_a55f99868da982::t_1e7ee84cd22ccd 97,110
+crates/weights/README.md
+  s_a55f99868da982::t_14910fbfc71923 12-18,20-21
+  s_a55f99868da982::t_01a018947d4666 29-30,33-35
+crates/lib/benches/src/query.rs
+  s_a55f99868da982::t_e4a6a9cb74890a 1-116
+crates/weights/Cargo.toml
+  s_a55f99868da982::t_01a018947d4666 17-19
+  s_a55f99868da982::t_78c66326d1849e 13
+  s_a55f99868da982::t_b6a04902b6730a 30-33,35-36
+crates/types/src/content.rs
+  s_a55f99868da982::t_74380dccdde7bd 3,7-9
+crates/lib/src/plan/info.rs
+  s_a55f99868da982::t_55520774eb2d54 11
+crates/lib/src/plan/combine.rs
+  s_a55f99868da982::t_55520774eb2d54 13-14
+crates/lib/src/plan/analyze.rs
+  s_a55f99868da982::t_cabbe82cd5945f 1216
+  s_a55f99868da982::t_55520774eb2d54 13
+README.md
+  s_a55f99868da982::t_7f9b2c8cd24487 70-72
+  s_a55f99868da982::t_a001a5b564fc39 110
+python/tests/test_config.py
+  s_a55f99868da982::t_e94ed7cf3b22cc 5,127-139
+python/sngram/train/config.py
+  s_a55f99868da982::t_a4eebcbafd643b 225-226,228-235,237-239,241-242,244-251
+  s_a55f99868da982::t_aaa4925faaa9fb 13
+crates/lib/benches/src/extract.rs
+  s_a55f99868da982::t_5a5803a58e61fa 1-227
+crates/lib/src/plan/strings.rs
+  s_a55f99868da982::t_55520774eb2d54 17
+crates/lib/src/extract.rs
+  s_a55f99868da982::t_3d9bc689037e76 644
+  s_a55f99868da982::t_7cd60f94b526bc 14,93,148,282-283,392
+  s_a55f99868da982::t_5e6e174623792b 145-147,149
+  s_a55f99868da982::t_cad4a82c90aab1 520
+crates/types/Cargo.toml
+  s_a55f99868da982::t_d98e4d8319c722 6
+docs/PRODUCTION_READINESS.md
+  s_a55f99868da982::t_b69d2b9956d698 1-348
+crates/weights/src/lib.rs
+  s_a55f99868da982::t_01a018947d4666 3,7-24,27-29,31-34,68-82,84-85
+  s_a55f99868da982::t_68a64c5284db8e 4-5
+  s_a55f99868da982::t_9ee8399d0c19f0 38-41,43-48,50-62
+  s_a55f99868da982::t_990f1bfaa31ca6 6
+crates/lib/tests/soundness.rs
+  s_a55f99868da982::t_8f6ba39b6f172b 17,22
+crates/weights/build.rs
+  s_a55f99868da982::t_38b2cec2276963 1-2
+  s_a55f99868da982::t_aa4676190a57d2 3-8
+  s_a55f99868da982::t_01a018947d4666 9-112,115-117
+  s_a55f99868da982::t_2905918bad2fc3 113-114
+crates/lib/tests/precision.rs
+  s_a55f99868da982::t_627def6879b899 22,27
+Cargo.lock
+  s_a55f99868da982::t_64e73b0ec1441b 1420,1469,1521
+Cargo.toml
+  s_a55f99868da982::t_05d4541320448d 3
+LICENSE
+  s_a55f99868da982::t_172e6902b93972 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "892f3441073dfeaf381a7edca391987d372cfdc8",
+  "prompts": {},
+  "sessions": {
+    "s_a55f99868da982": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f2dc4-b2e4-7182-96b5-730ef68fd424",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
