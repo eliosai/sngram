@@ -1,0 +1,200 @@
+python/sngram/train/pipeline.py
+  s_6c2e9467c401fa::t_f0da097c7a5f13 931-938,1894-1895,1937-1940
+scripts/eg-fp-rates.sh
+  s_6c2e9467c401fa::t_27527475808e17 1-152
+.gitignore
+  s_6c2e9467c401fa::t_8458fd1c99705a 1,3,5-6,8,10-11,13-17,19-22
+python/tests/test_pipeline.py
+  s_6c2e9467c401fa::t_7c93941098312c 4,54-79
+  s_6c2e9467c401fa::t_dd36ecb351a558 80-81
+Cargo.lock
+  s_6c2e9467c401fa::t_c45e5b27f95823 1-2216
+Cargo.toml
+  s_6c2e9467c401fa::t_f5573c8e4bc280 11,29
+PRODUCTION_READINESS.md
+  s_6c2e9467c401fa::t_0c7ef195fdaea7 1-347
+benches/src/counter.rs
+  s_6c2e9467c401fa::t_1225dc2e272841 5-7,33-37,50-56
+benches/src/extract.rs
+  s_6c2e9467c401fa::t_cbf656320e6374 7-10
+benches/src/query.rs
+  s_6c2e9467c401fa::t_d528bf3ecf3ecd 7-8,51-75,101-116
+clippy.toml
+  s_6c2e9467c401fa::t_3e4928bc571b0b 1
+crates/eg/Cargo.toml
+  s_6c2e9467c401fa::t_628c3564d87342 11-27,32-38
+crates/eg/IMPLEMENTATION_PLAN.md
+  s_6c2e9467c401fa::t_2134cdd385f4f1 1-117
+crates/eg/INDEX_HOT_PATH_NOTES.md
+  s_6c2e9467c401fa::t_a1c261f87de3f6 1-87
+crates/eg/RIPGREP_UPSTREAM.md
+  s_6c2e9467c401fa::t_4e9155f37b9f61 1-35
+crates/eg/src/flags/complete/bash.rs
+  s_6c2e9467c401fa::t_b3aae3b760b1fa 1-109
+crates/eg/src/flags/complete/encodings.sh
+  s_6c2e9467c401fa::t_519cc050322c25 1-29
+crates/eg/src/flags/complete/fish.rs
+  s_6c2e9467c401fa::t_2657fc023aeb2c 1-74
+crates/eg/src/flags/complete/mod.rs
+  s_6c2e9467c401fa::t_0905a297d25ed9 1-10
+crates/eg/src/flags/complete/powershell.rs
+  s_6c2e9467c401fa::t_7f3ef95edc563b 1-85
+crates/eg/src/flags/complete/prelude.fish
+  s_6c2e9467c401fa::t_536d977b3ccd51 1-31
+crates/eg/src/flags/complete/rg.zsh
+  s_6c2e9467c401fa::t_d67ec0102be537 1-691
+crates/eg/src/flags/complete/zsh.rs
+  s_6c2e9467c401fa::t_f6755e89c1eb4a 1-44
+crates/eg/src/flags/config.rs
+  s_6c2e9467c401fa::t_352e4983e5b457 1-171
+crates/eg/src/flags/defs.rs
+  s_6c2e9467c401fa::t_d9b67357a59035 1-8119
+crates/eg/src/flags/doc/help.rs
+  s_6c2e9467c401fa::t_b15e6be251f0bf 1-248
+crates/eg/src/flags/doc/man.rs
+  s_6c2e9467c401fa::t_25489bcfa7d3af 1-106
+crates/eg/src/flags/doc/mod.rs
+  s_6c2e9467c401fa::t_971bf67ed9c40d 1-53
+crates/eg/src/flags/doc/template.long.help
+  s_6c2e9467c401fa::t_fac12d7c34870c 1-63
+crates/eg/src/flags/doc/template.rg.1
+  s_6c2e9467c401fa::t_2b806aad26a57f 1-426
+crates/eg/src/flags/doc/template.short.help
+  s_6c2e9467c401fa::t_db1a058d9314ab 1-40
+crates/eg/src/flags/doc/version.rs
+  s_6c2e9467c401fa::t_56d01a30e30e57 1-179
+crates/eg/src/flags/hiargs.rs
+  s_6c2e9467c401fa::t_c6719373365b90 1-1609
+crates/eg/src/flags/lowargs.rs
+  s_6c2e9467c401fa::t_de9810fd3d386e 1-714
+crates/eg/src/flags/mod.rs
+  s_6c2e9467c401fa::t_4356778f672e16 1-300
+crates/eg/src/flags/parse.rs
+  s_6c2e9467c401fa::t_7088e2b4c64b41 1-469
+crates/eg/src/haystack.rs
+  s_6c2e9467c401fa::t_d6c3d92b3f5d31 1-197
+crates/eg/src/index/backend/mod.rs
+  s_6c2e9467c401fa::t_6b96d5babb97e7 1-4
+crates/eg/src/index/backend/tantivy.rs
+  s_6c2e9467c401fa::t_f598840c93836b 1-6
+crates/eg/src/index/backend/tantivy_ram.rs
+  s_6c2e9467c401fa::t_ab04cb47426c35 1-4
+crates/eg/src/index/classify.rs
+  s_6c2e9467c401fa::t_0b93002404b736 1-185
+crates/eg/src/index/config.rs
+  s_6c2e9467c401fa::t_75446935b15a4f 1-85
+crates/eg/src/index/location.rs
+  s_6c2e9467c401fa::t_d3a0bfba424502 1-170
+crates/eg/src/index/manifest.rs
+  s_6c2e9467c401fa::t_8edd76b3d67290 1-1191
+crates/eg/src/index/mod.rs
+  s_6c2e9467c401fa::t_9222071c43c1b5 1-858
+crates/eg/src/index/planner.rs
+  s_6c2e9467c401fa::t_85f22ad2473a76 1-98
+crates/eg/src/index/postings.rs
+  s_6c2e9467c401fa::t_02a17319e23fcb 1-1649
+crates/eg/src/index/store.rs
+  s_6c2e9467c401fa::t_acb05023968a87 1-600
+crates/eg/src/logger.rs
+  s_6c2e9467c401fa::t_cb056c0cb7714f 1-67
+crates/eg/src/main.rs
+  s_6c2e9467c401fa::t_83d5afed355e4d 1-503
+crates/eg/src/messages.rs
+  s_6c2e9467c401fa::t_c52c3d344ed058 1-139
+crates/eg/src/search.rs
+  s_6c2e9467c401fa::t_9f48f790bec53c 1-452
+crates/eg/src/upstream.rs
+  s_6c2e9467c401fa::t_f9a155f329328d 1-10
+crates/eg/tests/index_perf.rs
+  s_6c2e9467c401fa::t_76b89e2f7b930b 1-107
+crates/eg/tests/phase1.rs
+  s_6c2e9467c401fa::t_8ecc4b6c31aef4 1-1028
+crates/lib/Cargo.toml
+  s_6c2e9467c401fa::t_6341c2b933076a 30
+crates/lib/README.md
+  s_6c2e9467c401fa::t_fe1f4d1c4356b2 30-31,34-50,56,84,86,88-93
+crates/lib/src/error.rs
+  s_6c2e9467c401fa::t_39293431afe815 26-37
+crates/lib/src/extract.rs
+  s_6c2e9467c401fa::t_58701ab8cd9583 18-35,38-40,43-44,144-148,188-192,199-204,214-220,226-234,244,262-271,288,291-300,305-314,340-349,380,385-389,392,397-412,439,447-450,514-679
+crates/lib/src/gram.rs
+  s_6c2e9467c401fa::t_a5770fbc7fd5c0 48-55,88-93,97-104
+crates/lib/src/hashing.rs
+  s_6c2e9467c401fa::t_5604b9de0c90bc 40-70,85-88,90-101,106,109-116,123,130,137-147,151,178-222
+crates/lib/src/learn.rs
+  s_6c2e9467c401fa::t_f7cf84477283cf 14,50-54,60-64,119-123,148-151,206-209,242-243,247-329,333,335,339-340,343-344,349-360,495-496,504-505,507,513-520,524-528,533-550,553-555,588-698
+crates/lib/src/lib.rs
+  s_6c2e9467c401fa::t_5edac02631cf6c 15-19,28-30,44-45,47,49-51,55-59,75-110,120-165
+crates/lib/src/pattern.rs
+  s_6c2e9467c401fa::t_7b26a922c8bbf0 41,58-94
+crates/lib/src/plan/analyze.rs
+  s_6c2e9467c401fa::t_fa08ad7f7d7040 8-11,18,21-27,29-40,42-48,51-79,84-102,106-113,121-168,174-175,177-178,184-392,394-408,411-449,452-544,546,549-552,555,559-563,569-576,580-581,586-916,918-922,924-928,936-987,991-997,1009-1010,1017-1018,1022-1033,1038-1039,1050-1051,1065-1361
+crates/lib/src/plan/combine.rs
+  s_6c2e9467c401fa::t_4a451862c483d7 5-9,16,21-41,45-46,48-51,58,63,70-74,94-132,134-136,139-152,155-190,192-196,198-202,204-251,254,258-259,268-287,296,299-300,304-309,312-330,333-353,363,367,371,378-384,388,396-402,406,411-478,480-481,483-485,495-522,531,534-536,539-556,558,562-565,567-572,576-579,632-675
+crates/lib/src/plan/info.rs
+  s_6c2e9467c401fa::t_73ea1ccdf73de6 21-24,26-29,31-40,53,65,77,89,104,111-112
+crates/lib/src/plan/mod.rs
+  s_6c2e9467c401fa::t_d024608c7cc699 11,17,20,22-23,26-31,72-150,156-289,432-436,476-518,523-527,537-925,929-930,933
+crates/lib/src/plan/options.rs
+  s_6c2e9467c401fa::t_dcd3809cb61f23 1-263
+crates/lib/src/plan/query.rs
+  s_6c2e9467c401fa::t_93561f753e6066 70,74-78,127-128,130-131,137-141,207-210,224,267-271,341-359
+crates/lib/src/plan/strings.rs
+  s_6c2e9467c401fa::t_3147559d9667f2 41-61,64,70,98-103,108-110,166
+crates/lib/tests/differential.rs
+  s_6c2e9467c401fa::t_54ab3d01854e6b 21,23-26,71,78-83,119,123-147,155,162,169,172-178,186-191,234-240,286,298-308,326-327,342,344-359
+crates/lib/tests/precision.rs
+  s_6c2e9467c401fa::t_56429afb391d5f 1-521
+crates/lib/tests/soundness.rs
+  s_6c2e9467c401fa::t_7e8f1be9d16a44 45,49,61-69,74,76,79-80,86,99-120,142-173,189,199-217,223,235,237-260,262
+crates/lib/tests/streaming.rs
+  s_6c2e9467c401fa::t_7de54f235be776 33-38
+crates/python/src/arrow_ffi.rs
+  s_6c2e9467c401fa::t_2beab70869a596 21-25,50-53,75-78,89-92,122-125
+crates/python/src/lib.rs
+  s_6c2e9467c401fa::t_1c84ec4ed1ac5a 81,110-113,297-301
+crates/types/src/content.rs
+  s_6c2e9467c401fa::t_943785e159d427 8,49,55,61,67,73,79,85,115-120
+crates/types/src/error.rs
+  s_6c2e9467c401fa::t_826101210a0927 23-34
+crates/types/src/lib.rs
+  s_6c2e9467c401fa::t_055cd6fbf0e4f7 9
+crates/types/src/table.rs
+  s_6c2e9467c401fa::t_b4b468fbc4f28f 9,12-14,20,26-27,29-30,37-44,48,52,58-64,82-129,135,164-167,178-188,194-206,210-288,309-322
+crates/weights/Cargo.toml
+  s_6c2e9467c401fa::t_0e90ac50813ad1 13,17,28
+crates/weights/src/lib.rs
+  s_6c2e9467c401fa::t_400c973ba9e2bb 4,16,41,43,59-60,63,66,72-73,85,140,142,144,146,148,150-152,208-216,230-231,241
+docs/index-format-v2.md
+  s_6c2e9467c401fa::t_9936eb9351be4d 1-43
+optimize_query_expantion.md
+  s_6c2e9467c401fa::t_7bab68129f4839 1-11
+python/sngram/__init__.py
+  s_6c2e9467c401fa::t_e9158aaf9d0ddb 9
+python/uv.lock
+  s_6c2e9467c401fa::t_f4a9c2d51195a6 1-2058
+scripts/eg-fn-check.sh
+  s_6c2e9467c401fa::t_5dd42aebb6633f 1-68
+scripts/fp-queries.tsv
+  s_6c2e9467c401fa::t_957755b1d1b5e8 1-318
+scripts/mint-tuned-tables.py
+  s_6c2e9467c401fa::t_9f9b11d1c78a7d 1-93
+tests/src/lib.rs
+  s_6c2e9467c401fa::t_e2fe0f28225904 14-17,30,36,125,136-137
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0f164ac82e0ac44ca6e4cea01219ec33b6a36b36",
+  "prompts": {},
+  "sessions": {
+    "s_6c2e9467c401fa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f28e6-1eb5-73c1-8af0-2bd7cb5cd374",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
