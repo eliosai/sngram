@@ -1,22 +1,26 @@
 # sngram-types
 
-Core types for sparse n-gram weight tables, shared by `sngram` and
-`sngram-weights`.
+Core types for sparse n-gram extraction and weight tables, shared by `sngram` and `sngram-weights`.
 
 ```toml
 [dependencies]
 sngram-types = "0.5"
 ```
 
-- `WeightTable`: a 256x256 grid of byte-pair weights, loaded from a validated
-  262,160-byte binary (magic, version, CRC32, then 65,536 `u32` weights). Look
-  up a pair with `table.weight(c1, c2)`, or grab the whole matrix as a
-  `&[u32; 65536]` with `table.matrix()` for hot loops.
+- `WeightTable`: a 256x256 grid of byte-pair weights, loaded from and
+  serialized to the validated `SPNG` binary format with `from_bytes` and
+  `to_bytes`. Build synthetic or freshly learned tables with `from_weight_fn`,
+  attach provenance with `with_provenance`, look up a pair with
+  `table.weight(c1, c2)`, or grab the whole matrix with `table.matrix()` for
+  hot loops.
+- `Gram`: the canonical byte-string value used by query plans and index keys.
+- `HashKey`: the shared hash vocabulary used by scanners and query-side grams,
+  including direct byte hashing with `HashKey::hash_bytes`.
 - `Content`: a zero-copy view over the bytes you index, with binary-content
   detection helpers.
 
-These are the value types `sngram` builds its index and query API on. Name this
-crate directly to use them; `sngram` does not re-export.
+These are the value types `sngram` builds its index and query API on. The main
+`sngram` crate re-exports the public gram and hash types for compatibility.
 
 ## License
 

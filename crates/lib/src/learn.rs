@@ -11,7 +11,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sngram_types::{PROVENANCE_MAX, TABLE_BINARY_SIZE, TableError};
+use sngram_types::{TableError, WeightTable};
 
 const PAIR_COUNT: usize = 256 * 256;
 
@@ -235,14 +235,8 @@ impl BigramCounter {
     /// `u32::MAX` for unseen pairs) in the `SPNG` binary format that
     /// [`sngram_types::WeightTable::from_bytes`] loads.
     #[must_use]
-    #[allow(clippy::indexing_slicing, reason = "fixed-size buffer")]
     pub fn to_table_bytes(&self) -> Vec<u8> {
-        let total = self.pairs_processed();
-        let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-        write_header(&mut buf, 1);
-        write_weights(&self.counts, total, Tuning::OFF, &mut buf);
-        write_checksum(&mut buf);
-        buf
+        self.weight_table(Tuning::OFF).to_bytes()
     }
 
     /// Mint a v2 table: tuned weights plus an embedded provenance record.
@@ -250,22 +244,22 @@ impl BigramCounter {
     /// # Errors
     ///
     /// Returns [`TableError::InvalidProvenance`] when the provenance record
-    /// exceeds [`PROVENANCE_MAX`] bytes.
-    #[allow(clippy::indexing_slicing, reason = "fixed-size buffer")]
+    /// is too large for the table format.
     pub fn mint_table_bytes(&self, spec: &MintSpec<'_>) -> Result<Vec<u8>, TableError> {
-        if spec.provenance.len() > PROVENANCE_MAX {
-            return Err(TableError::InvalidProvenance);
-        }
+        Ok(self
+            .weight_table(spec.tuning)
+            .with_provenance(spec.provenance)?
+            .to_bytes())
+    }
+
+    #[allow(clippy::indexing_slicing, reason = "u8<<8|u8 < 65536")]
+    fn weight_table(&self, tuning: Tuning) -> WeightTable {
         let total = self.pairs_processed();
-        let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-        write_header(&mut buf, 2);
-        write_weights(&self.counts, total, spec.tuning, &mut buf);
-        let len =
-            u16::try_from(spec.provenance.len()).map_err(|_| TableError::InvalidProvenance)?;
-        buf.extend_from_slice(&len.to_le_bytes());
-        buf.extend_from_slice(spec.provenance.as_bytes());
-        write_checksum(&mut buf);
-        Ok(buf)
+        WeightTable::from_weight_fn(|c1, c2| {
+            let idx = usize::from(c1) << 8 | usize::from(c2);
+            let raw = compute_weight(total, self.counts[idx].load(Ordering::Relaxed));
+            tune_weight(raw, c1, c2, tuning)
+        })
     }
 }
 
@@ -329,23 +323,6 @@ const fn is_line_terminator(c: u8) -> bool {
     matches!(c, b'\n' | b'\r')
 }
 
-#[allow(clippy::indexing_slicing, reason = "fixed header offsets")]
-fn write_header(buf: &mut [u8], version: u32) {
-    buf[..4].copy_from_slice(b"SPNG");
-    buf[4..8].copy_from_slice(&version.to_le_bytes());
-}
-
-#[allow(clippy::indexing_slicing, reason = "PAIR_COUNT * 4 fits in buf")]
-#[allow(clippy::cast_possible_truncation, reason = "i is a pair index < 65536")]
-fn write_weights(counts: &[AtomicU64; PAIR_COUNT], total: u64, tuning: Tuning, buf: &mut [u8]) {
-    let data = &mut buf[16..];
-    for i in 0..PAIR_COUNT {
-        let raw = compute_weight(total, counts[i].load(Ordering::Relaxed));
-        let w = tune_weight(raw, (i >> 8) as u8, i as u8, tuning);
-        data[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
-    }
-}
-
 const fn tune_weight(raw: u32, c1: u8, c2: u8, tuning: Tuning) -> u32 {
     if tuning.boundary_discount <= 1 || !is_boundary_pair(c1, c2) {
         return raw;
@@ -364,12 +341,6 @@ fn compute_weight(total: u64, count: u64) -> u32 {
         return u32::MAX;
     }
     (total / count).min(u64::from(u32::MAX)) as u32
-}
-
-#[allow(clippy::indexing_slicing, reason = "fixed header offsets")]
-fn write_checksum(buf: &mut [u8]) {
-    let crc = crc32fast::hash(&buf[16..]);
-    buf[8..12].copy_from_slice(&crc.to_le_bytes());
 }
 
 #[cfg(test)]
@@ -609,7 +580,7 @@ mod tests {
     #[test]
     fn mint_rejects_oversized_provenance() {
         let c = BigramCounter::new();
-        let big = "x".repeat(sngram_types::PROVENANCE_MAX + 1);
+        let big = "x".repeat(2048);
         let spec = MintSpec {
             provenance: &big,
             tuning: Tuning::OFF,

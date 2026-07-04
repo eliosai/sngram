@@ -10,7 +10,7 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::indexing_slicing)]
 
 use sngram::StreamScanner;
-use sngram_types::{Content, TABLE_BINARY_SIZE, WeightTable};
+use sngram_types::{Content, WeightTable};
 
 // Frozen algorithm parameters; must mirror crates/lib/src/extract.rs.
 const MIN_LEN: usize = 3;
@@ -84,20 +84,7 @@ impl Lcg {
 }
 
 fn build_table(f: impl Fn(u8, u8) -> u32) -> WeightTable {
-    let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-    buf[..4].copy_from_slice(b"SPNG");
-    buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-    for c1 in 0u16..256 {
-        for c2 in 0u16..256 {
-            let idx = (c1 as usize) << 8 | c2 as usize;
-            let off = 16 + idx * 4;
-            #[allow(clippy::cast_possible_truncation)]
-            buf[off..off + 4].copy_from_slice(&f(c1 as u8, c2 as u8).to_le_bytes());
-        }
-    }
-    let crc = crc32fast::hash(&buf[16..]);
-    buf[8..12].copy_from_slice(&crc.to_le_bytes());
-    WeightTable::from_bytes(&buf).unwrap()
+    WeightTable::from_weight_fn(f)
 }
 
 fn tables() -> Vec<(String, WeightTable)> {

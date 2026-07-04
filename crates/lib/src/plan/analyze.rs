@@ -10,9 +10,7 @@ use regex_syntax::{
     try_is_word_character,
 };
 
-use sngram_types::WeightTable;
-
-use crate::gram::Gram;
+use sngram_types::{Gram, WeightTable};
 
 use super::info::RegexpInfo;
 use super::query::Query;
@@ -1211,12 +1209,11 @@ mod tests {
 
     use regex_syntax::hir::{Class, HirKind, Look};
 
-    use crate::gram::Gram;
-
     use super::{
         ByteSet, ClassSet, MAX_BOUNDARY_BYTES, StringSet, bounded_power_union, class_set,
         first_boundary, last_boundary, look_possible, utf8_boundary_bytes,
     };
+    use sngram_types::Gram;
 
     /// A boundary set accepts `byte` iff it is a one-byte member, or it is the
     /// `{""}` (unknown) sentinel that accepts anything.

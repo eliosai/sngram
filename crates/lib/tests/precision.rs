@@ -19,24 +19,12 @@ use std::collections::HashSet;
 use sngram::{
     IndexFormat, Pattern, PlanOptions, QueryPlan, ScanOptions, plan_query, query, scan, scan_with,
 };
-use sngram_types::{Content, TABLE_BINARY_SIZE, WeightTable};
+use sngram_types::{Content, WeightTable};
 
 /// A deterministic weight table: each byte pair hashed to a varied weight, so
 /// the sparse hull is non-trivial.
 fn weight_table() -> WeightTable {
-    let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-    buf[..4].copy_from_slice(b"SPNG");
-    buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-    for c1 in 0u8..=255 {
-        for c2 in 0u8..=255 {
-            let w = crc32fast::hash(&[c1, c2]);
-            let idx = (usize::from(c1) << 8) | usize::from(c2);
-            buf[16 + idx * 4..16 + idx * 4 + 4].copy_from_slice(&w.to_le_bytes());
-        }
-    }
-    let crc = crc32fast::hash(&buf[16..]);
-    buf[8..12].copy_from_slice(&crc.to_le_bytes());
-    WeightTable::from_bytes(&buf).unwrap()
+    WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
 }
 
 /// Evaluate a plan against the grams a document indexed to.

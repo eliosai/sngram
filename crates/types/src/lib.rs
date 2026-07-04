@@ -1,9 +1,13 @@
-//! Types for sparse n-gram weight tables.
+//! Shared types for sparse n-gram extraction and weight tables.
 
 mod content;
 mod error;
+mod gram;
+mod hashing;
 mod table;
 
 pub use content::Content;
 pub use error::TableError;
-pub use table::{PROVENANCE_MAX, TABLE_BINARY_SIZE, WeightTable};
+pub use gram::Gram;
+pub use hashing::HashKey;
+pub use table::WeightTable;

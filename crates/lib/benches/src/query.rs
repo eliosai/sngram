@@ -13,20 +13,7 @@ use sngram::pattern::Pattern;
 use sngram_types::WeightTable;
 
 fn weight_table() -> WeightTable {
-    let mut buf = vec![0u8; 262_160];
-    buf[..4].copy_from_slice(b"SPNG");
-    buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-    let data = &mut buf[16..];
-    for c1 in 0u16..256 {
-        for c2 in 0u16..256 {
-            let w = crc32fast::hash(&[c1 as u8, c2 as u8]);
-            let idx = (c1 as usize) << 8 | c2 as usize;
-            data[idx * 4..idx * 4 + 4].copy_from_slice(&w.to_le_bytes());
-        }
-    }
-    let crc = crc32fast::hash(&buf[16..]);
-    buf[8..12].copy_from_slice(&crc.to_le_bytes());
-    WeightTable::from_bytes(&buf).unwrap()
+    WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
 }
 
 const PATTERNS: &[(&str, &str)] = &[
@@ -118,16 +105,7 @@ fn bench_query(c: &mut Criterion) {
 }
 
 fn bench_table_load(c: &mut Criterion) {
-    let mut buf = vec![0u8; 262_160];
-    buf[..4].copy_from_slice(b"SPNG");
-    buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-    for i in 0..65_536u32 {
-        let pair = [(i >> 8) as u8, i as u8];
-        let w = crc32fast::hash(&pair);
-        buf[16 + i as usize * 4..16 + i as usize * 4 + 4].copy_from_slice(&w.to_le_bytes());
-    }
-    let crc = crc32fast::hash(&buf[16..]);
-    buf[8..12].copy_from_slice(&crc.to_le_bytes());
+    let buf = weight_table().to_bytes();
 
     c.bench_function("table/from_bytes", |b| {
         b.iter(|| WeightTable::from_bytes(&buf));

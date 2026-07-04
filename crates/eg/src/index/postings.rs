@@ -58,7 +58,7 @@ const BUILD_PROGRESS_EVERY: usize = 20_000;
 
 pub(super) fn prepare_index(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     table: &WeightTable,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
@@ -72,11 +72,11 @@ pub(super) fn prepare_index(
             anyhow::bail!("internal error: maintenance mode reached prepare_index")
         },
         super::config::IndexMode::Rebuild => {
-            rebuild_index(args, table_spec, table, index_home, snapshot)
+            rebuild_index(args, table_fingerprint, table, index_home, snapshot)
         },
         super::config::IndexMode::Auto | super::config::IndexMode::Require => auto_index(
             args,
-            table_spec,
+            table_fingerprint,
             table,
             index_home,
             snapshot,
@@ -192,7 +192,7 @@ impl sngram::DfStats for PostingsDf<'_> {
 
 fn auto_index(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     table: &WeightTable,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
@@ -204,7 +204,7 @@ fn auto_index(
         || !index_home.join(POSTINGS_FILE_NAME).exists()
         || !manifest_present(&manifest_path)
     {
-        return rebuild_index(args, table_spec, table, index_home, snapshot);
+        return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
     }
     let base_manifest_storage;
     let base_manifest = if let Some(manifest) = loaded_manifest {
@@ -212,24 +212,24 @@ fn auto_index(
     } else {
         base_manifest_storage = match read_manifest(&manifest_path)? {
             Some(manifest) => manifest,
-            None => return rebuild_index(args, table_spec, table, index_home, snapshot),
+            None => return rebuild_index(args, table_fingerprint, table, index_home, snapshot),
         };
         &base_manifest_storage
     };
-    let expected = manifest_for(ManifestBackend::Postings, table_spec, snapshot);
+    let expected = manifest_for(ManifestBackend::Postings, table_fingerprint, snapshot);
     let Some(changed) = changed_ordinals(base_manifest, &expected) else {
-        return rebuild_index(args, table_spec, table, index_home, snapshot);
+        return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
     };
     if changed.is_empty() {
         remove_delta(index_home)?;
-        return open_or_rebuild(args, table_spec, table, index_home, snapshot, false);
+        return open_or_rebuild(args, table_fingerprint, table, index_home, snapshot, false);
     }
     if changed.len() > MAX_DELTA_FILES {
         log::debug!(
             "eg index: {} changed files hit the MAX_DELTA_FILES={MAX_DELTA_FILES} cliff; full rebuild",
             changed.len()
         );
-        return rebuild_index(args, table_spec, table, index_home, snapshot);
+        return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
     }
     if delta_should_fold(changed.len(), base_manifest.file_count()) {
         log::debug!(
@@ -237,10 +237,10 @@ fn auto_index(
             changed.len(),
             base_manifest.file_count()
         );
-        return rebuild_index(args, table_spec, table, index_home, snapshot);
+        return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
     }
     build_delta_if_stale(args, table, index_home, snapshot, &changed, &expected)?;
-    open_or_rebuild(args, table_spec, table, index_home, snapshot, true)
+    open_or_rebuild(args, table_fingerprint, table, index_home, snapshot, true)
 }
 
 /// Fraction of the base file count a delta may reach before it is folded into
@@ -303,7 +303,7 @@ fn build_delta_if_stale(
 /// Open the index, rebuilding it when a segment is missing or corrupt.
 fn open_or_rebuild(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     table: &WeightTable,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
@@ -314,14 +314,14 @@ fn open_or_rebuild(
             "eg index: corrupt index at {}, rebuilding",
             index_home.display()
         );
-        return rebuild_index(args, table_spec, table, index_home, snapshot);
+        return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
     };
     Ok(index)
 }
 
 fn rebuild_index(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     table: &WeightTable,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
@@ -343,7 +343,7 @@ fn rebuild_index(
     )?;
     write_manifest(
         &staging.join(MANIFEST_FILE_NAME),
-        &manifest_for(ManifestBackend::Postings, table_spec, snapshot),
+        &manifest_for(ManifestBackend::Postings, table_fingerprint, snapshot),
     )?;
     fsync_dir(&staging)?;
     swap_in(&staging, index_home)?;
@@ -354,12 +354,12 @@ fn rebuild_index(
 /// Rebuild the postings index in place, for `--index=repair`.
 pub(super) fn rebuild(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     table: &WeightTable,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
 ) -> anyhow::Result<()> {
-    rebuild_index(args, table_spec, table, index_home, snapshot).map(|_| ())
+    rebuild_index(args, table_fingerprint, table, index_home, snapshot).map(|_| ())
 }
 
 /// Result of an index integrity check: one pass/fail line per check.
@@ -387,7 +387,7 @@ impl VerifyReport {
 /// completeness, and leftover build artifacts.
 pub(super) fn verify_index(
     index_home: &Path,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
 ) -> anyhow::Result<VerifyReport> {
     let mut checks = Vec::new();
     match read_manifest(&index_home.join(MANIFEST_FILE_NAME))? {
@@ -395,7 +395,7 @@ pub(super) fn verify_index(
             checks.push(("manifest present and parses".to_owned(), true));
             checks.push((
                 "manifest matches the selected weight table".to_owned(),
-                is_compatible(&manifest, ManifestBackend::Postings, table_spec),
+                is_compatible(&manifest, ManifestBackend::Postings, table_fingerprint),
             ));
         },
         None => checks.push(("manifest present and parses".to_owned(), false)),

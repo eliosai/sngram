@@ -10,11 +10,13 @@ readme = "README.md"
 keywords = ["ngram", "weights", "regex", "search", "code-search"]
 categories = ["text-processing", "data-structures"]
 publish = true
-include = ["src/**", "data/*.bin", "README.md"]
+include = ["src/**", "data/*.bin", "build.rs", "README.md"]
 
 [dependencies]
 sngram-types = { workspace = true }
-thiserror = { workspace = true }
+
+[build-dependencies]
+sngram-types = { workspace = true }
 
 [features]
 default = []
@@ -25,7 +27,13 @@ default = []
 "3tb" = []
 "4tb" = []
 "5tb" = []
+"6tb" = []
+"7tb" = []
+"8tb" = []
+"9tb" = []
 "10tb" = []
+"11tb" = []
+"12tb" = []
 
 [lints]
 workspace = true

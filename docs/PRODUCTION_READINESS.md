@@ -50,8 +50,9 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
 > grams for edge anchors, interior-anchor pruning preserved); DfStats +
 > QueryPlan::estimate_candidates + tune (rarest-first, stop-gram drops from
 > And bags only); try_scan; MSRV aligned at 1.96; README doctests wired;
-> WeightsError on thiserror + non_exhaustive; fp-queries.tsv +41 sentinel
-> rows. NOT applied on purpose: #[non_exhaustive] on QueryPlan/PlanOptions —
+> sngram-weights narrowed to feature-selected `weights() -> WeightTable`;
+> fp-queries.tsv +41 sentinel rows. NOT applied on purpose:
+> #[non_exhaustive] on QueryPlan/PlanOptions —
 > eg constructs/matches them exhaustively; that migration belongs to eg.
 
 > **2026-07-03 eg wave 2 (landed, all eg-CLI items).** Second completion wave
@@ -267,8 +268,8 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
   fmt, rustdoc `-D warnings`, MSRV job, per-feature `publish --dry-run`,
   bench smoke with committed criterion baselines. *(M)*
 - [x] **P1 MSRV** — aligned at 1.96 (declared floor is the tested floor); CI enforcement with the CI item
-- [x] (partial) **P1 Pre-1.0 API contract** — WeightsError: thiserror + non_exhaustive; QueryError already both; QueryPlan/PlanOptions left constructible (eg breaks otherwise — eg-side migration): `#[non_exhaustive]` on `QueryPlan`,
-  `PlanOptions` (or builder), `WeightsError` (also move to thiserror);
+- [x] (partial) **P1 Pre-1.0 API contract** — `sngram-weights` now exposes a single feature-selected `weights() -> WeightTable`; QueryError already uses thiserror + non_exhaustive; QueryPlan/PlanOptions left constructible (eg breaks otherwise — eg-side migration): `#[non_exhaustive]` on `QueryPlan`,
+  `PlanOptions` (or builder);
   document the Pattern vs `query_with` duality (or add a Pattern+options
   overload to avoid the re-parse). *(S)*
 - [x] **P1 Document the prefilter contract + hash policy** — documented in hashing.rs; keyed variant landed (`HashKey`): 64-bit gram-hash

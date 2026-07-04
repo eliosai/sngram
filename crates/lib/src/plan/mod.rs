@@ -15,10 +15,9 @@ mod strings;
 use core::fmt;
 
 use regex_syntax::hir::Hir;
-use sngram_types::WeightTable;
+use sngram_types::{Gram, WeightTable};
 
 use crate::error::QueryError;
-use crate::gram::Gram;
 use crate::pattern::{self, Pattern};
 use analyze::{Analyzer, PlanContext};
 use query::{Op, Query};
@@ -358,7 +357,7 @@ mod tests {
     //! which differ for sparse grams). End-to-end soundness is in
     //! `tests/soundness.rs`.
 
-    use sngram_types::{TABLE_BINARY_SIZE, WeightTable};
+    use sngram_types::WeightTable;
 
     use super::QueryPlan;
     use crate::pattern::Pattern;
@@ -367,20 +366,7 @@ mod tests {
     /// A deterministic weight table: each byte pair hashed to a varied weight,
     /// so the sparse hull is non-trivial.
     fn table() -> WeightTable {
-        let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-        buf[..4].copy_from_slice(b"SPNG");
-        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-        for c1 in 0u8..=255 {
-            for c2 in 0u8..=255 {
-                let w = crc32fast::hash(&[c1, c2]);
-                let idx = (usize::from(c1) << 8) | usize::from(c2);
-                let off = 16 + idx * 4;
-                buf[off..off + 4].copy_from_slice(&w.to_le_bytes());
-            }
-        }
-        let crc = crc32fast::hash(&buf[16..]);
-        buf[8..12].copy_from_slice(&crc.to_le_bytes());
-        WeightTable::from_bytes(&buf).unwrap()
+        WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
     }
 
     fn plan_of(re: &str) -> QueryPlan {
@@ -660,10 +646,10 @@ mod tests {
         //! folded space, each gated on the index actually carrying them.
 
         use super::table;
-        use crate::gram::Gram;
         use crate::plan::{
             DfStats, GramSpace, IndexFormat, PlanCase, PlanOptions, QueryPlan, plan_query,
         };
+        use sngram_types::Gram;
 
         fn planned(patterns: &[&str], opts: PlanOptions, format: IndexFormat) -> super::QueryPlan {
             plan_query(&table(), patterns, opts, format)

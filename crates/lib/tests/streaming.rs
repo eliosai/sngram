@@ -10,56 +10,37 @@
 )]
 
 use sngram::StreamScanner;
-use sngram_types::{Content, TABLE_BINARY_SIZE, WeightTable};
-
-fn set_weight(buf: &mut [u8], c1: u8, c2: u8, w: u32) {
-    let idx = (usize::from(c1) << 8) | usize::from(c2);
-    buf[16 + idx * 4..16 + idx * 4 + 4].copy_from_slice(&w.to_le_bytes());
-}
-
-fn finish(mut buf: Vec<u8>) -> WeightTable {
-    buf[..4].copy_from_slice(b"SPNG");
-    buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-    let crc = crc32fast::hash(&buf[16..]);
-    buf[8..12].copy_from_slice(&crc.to_le_bytes());
-    WeightTable::from_bytes(&buf).unwrap()
-}
+use sngram_types::{Content, WeightTable};
 
 /// Every byte pair gets a varied weight, so the sparse hull is non-trivial.
 fn crc_table() -> WeightTable {
-    let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-    for c1 in 0u16..256 {
-        for c2 in 0u16..256 {
-            set_weight(
-                &mut buf,
-                c1 as u8,
-                c2 as u8,
-                crc32fast::hash(&[c1 as u8, c2 as u8]),
-            );
-        }
-    }
-    finish(buf)
+    WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
 }
 
 /// Strictly decreasing weights along 1,2,3,... so the stack only grows: the
 /// worst case for the bounded stack and its overflow eviction.
 fn monotonic_table() -> WeightTable {
-    let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-    for v in 1u16..200 {
-        set_weight(&mut buf, v as u8, (v + 1) as u8, 1_000_000 - u32::from(v));
-    }
-    finish(buf)
+    WeightTable::from_weight_fn(|c1, c2| {
+        if (1..200).contains(&u16::from(c1)) && c2 == c1 + 1 {
+            1_000_000 - u32::from(c1)
+        } else {
+            0
+        }
+    })
 }
 
 /// One very rare border pair then an increasing run, producing long grams that
 /// exercise the covering front-eviction path past 50 bytes.
 fn increasing_table() -> WeightTable {
-    let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-    set_weight(&mut buf, 200, 1, 2_000_000);
-    for k in 1u8..130 {
-        set_weight(&mut buf, k, k + 1, u32::from(k));
-    }
-    finish(buf)
+    WeightTable::from_weight_fn(|c1, c2| {
+        if c1 == 200 && c2 == 1 {
+            2_000_000
+        } else if (1..130).contains(&c1) && c2 == c1 + 1 {
+            u32::from(c1)
+        } else {
+            0
+        }
+    })
 }
 
 fn batch(table: &WeightTable, doc: &[u8]) -> Vec<(Vec<u8>, u64)> {

@@ -1,9 +1,12 @@
 //! Content wrapper with binary detection utilities.
 
-/// Zero-cost wrapper around byte content.
+/// Zero-cost borrowed wrapper around byte content.
 #[derive(Debug, Clone, Copy)]
 pub struct Content<'a>(&'a [u8]);
 
+// Conservative binary signatures used as a fast prefilter before the control
+// byte sniff. Ownership stays with callers; `Content` intentionally does not
+// require an owned buffer type.
 const BINARY_SIGS: &[&[u8]] = &[
     b"SPNG",
     b"\x7fELF",

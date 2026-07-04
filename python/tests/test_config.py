@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sngram.train import config as train_config
 from sngram.train.config import (
     STACK_V2_CONTENT_PREFIX,
     STACK_V2_METADATA_REPO,
@@ -123,3 +124,16 @@ def test_source_ids_unique():
 def test_hf_token_uses_environment(monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "hf_test_token")
     assert hf_token() == "hf_test_token"
+
+
+def test_hf_token_reads_project_env(monkeypatch, tmp_path):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    project_env = tmp_path / ".env"
+    project_env.write_text("export HF_TOKEN='hf_file_token'\n")
+
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(train_config, "_project_env_path", lambda: project_env)
+
+    assert hf_token() == "hf_file_token"

@@ -14,7 +14,7 @@ pub enum Order {
     Suffix,
 }
 
-use crate::gram::Gram;
+use sngram_types::Gram;
 
 /// A set of byte strings. Always present; absence is modelled with `Option`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

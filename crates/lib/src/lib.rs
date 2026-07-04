@@ -37,18 +37,15 @@ pub mod pattern;
 pub mod plan;
 
 mod extract;
-mod gram;
-mod hashing;
 
 pub use error::QueryError;
 #[doc(inline)]
 pub use extract::{ScanOptions, StreamScanner};
-pub use gram::Gram;
-pub use hashing::{HashKey, hash_bytes, hash_bytes_keyed};
 pub use pattern::Pattern;
 pub use plan::{
     DfStats, GramSpace, IndexFormat, PlanCase, PlanOptions, PlanSyntax, PlannedQuery, QueryPlan,
 };
+pub use sngram_types::{Gram, HashKey};
 
 use sngram_types::{Content, WeightTable};
 
@@ -167,23 +164,9 @@ pub fn plan_query<P: AsRef<str>>(
 mod tests {
     use super::*;
     use crate::error::QueryError;
-    use sngram_types::TABLE_BINARY_SIZE;
 
     fn table() -> WeightTable {
-        let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-        buf[..4].copy_from_slice(b"SPNG");
-        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-        for c1 in 0u8..=255 {
-            for c2 in 0u8..=255 {
-                let w = crc32fast::hash(&[c1, c2]);
-                let idx = (usize::from(c1) << 8) | usize::from(c2);
-                let off = 16 + idx * 4;
-                buf[off..off + 4].copy_from_slice(&w.to_le_bytes());
-            }
-        }
-        let crc = crc32fast::hash(&buf[16..]);
-        buf[8..12].copy_from_slice(&crc.to_le_bytes());
-        WeightTable::from_bytes(&buf).unwrap()
+        WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
     }
 
     fn index_set(t: &WeightTable, doc: &[u8]) -> std::collections::HashSet<Vec<u8>> {
@@ -203,18 +186,13 @@ mod tests {
     // Weights that strictly decrease along the byte run 1,2,3,... so the index
     // scan's stack only ever grows — the worst case for a bounded stack.
     fn monotonic_table() -> WeightTable {
-        let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-        buf[..4].copy_from_slice(b"SPNG");
-        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-        for v in 1u16..200 {
-            let idx = ((v << 8) | (v + 1)) as usize;
-            let off = 16 + idx * 4;
-            let w = 1_000_000u32 - u32::from(v);
-            buf[off..off + 4].copy_from_slice(&w.to_le_bytes());
-        }
-        let crc = crc32fast::hash(&buf[16..]);
-        buf[8..12].copy_from_slice(&crc.to_le_bytes());
-        WeightTable::from_bytes(&buf).unwrap()
+        WeightTable::from_weight_fn(|c1, c2| {
+            if (1..200).contains(&u16::from(c1)) && c2 == c1 + 1 {
+                1_000_000u32 - u32::from(c1)
+            } else {
+                0
+            }
+        })
     }
 
     // Every covering gram of a literal MUST appear in the index of any document
@@ -287,26 +265,19 @@ mod tests {
         }
     }
 
-    fn set_weight(buf: &mut [u8], c1: u8, c2: u8, w: u32) {
-        let idx = (usize::from(c1) << 8) | usize::from(c2);
-        let off = 16 + idx * 4;
-        buf[off..off + 4].copy_from_slice(&w.to_le_bytes());
-    }
-
     // One very rare border bigram (200,1) followed by an increasing run, so the
     // covering hull holds position 0 while later positions drain — producing a
     // ~98-byte covering gram and forcing `cover`'s max-length front-eviction.
     fn increasing_table() -> WeightTable {
-        let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-        buf[..4].copy_from_slice(b"SPNG");
-        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-        set_weight(&mut buf, 200, 1, 2_000_000);
-        for k in 1u8..130 {
-            set_weight(&mut buf, k, k + 1, u32::from(k));
-        }
-        let crc = crc32fast::hash(&buf[16..]);
-        buf[8..12].copy_from_slice(&crc.to_le_bytes());
-        WeightTable::from_bytes(&buf).unwrap()
+        WeightTable::from_weight_fn(|c1, c2| {
+            if c1 == 200 && c2 == 1 {
+                2_000_000
+            } else if (1..130).contains(&c1) && c2 == c1 + 1 {
+                u32::from(c1)
+            } else {
+                0
+            }
+        })
     }
 
     // QUERY path: a long literal must still decompose into covering grams that

@@ -16,23 +16,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use sngram_types::{Content, WeightTable};
 
 fn crc32_table() -> WeightTable {
-    let mut buf = vec![0u8; 262_160];
-    buf[..4].copy_from_slice(b"SPNG");
-    buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-
-    let data = &mut buf[16..];
-    for c1 in 0u16..256 {
-        for c2 in 0u16..256 {
-            let pair = [c1 as u8, c2 as u8];
-            let w = crc32fast::hash(&pair);
-            let idx = (c1 as usize) << 8 | c2 as usize;
-            data[idx * 4..idx * 4 + 4].copy_from_slice(&w.to_le_bytes());
-        }
-    }
-
-    let crc = crc32fast::hash(&buf[16..]);
-    buf[8..12].copy_from_slice(&crc.to_le_bytes());
-    WeightTable::from_bytes(&buf).unwrap()
+    WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
 }
 
 fn source_code(size: usize) -> Vec<u8> {

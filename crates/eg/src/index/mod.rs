@@ -60,8 +60,8 @@ pub(crate) fn run(args: &HiArgs) -> anyhow::Result<bool> {
             args.index().backend
         );
     }
-    let table_spec = sngram_weights::selected()?;
-    let table = table_spec.load()?;
+    let table = sngram_weights::weights();
+    let table_fingerprint = table.fingerprint();
     let plan = match planner::query_plan(args, &table) {
         Ok(plan) => plan,
         Err(err) => {
@@ -80,14 +80,15 @@ pub(crate) fn run(args: &HiArgs) -> anyhow::Result<bool> {
     }
     let location = location::resolve(args, &index_root(args)?)?;
     let index_dir = location.index_dir();
-    let (snapshot, loaded_manifest) = load_snapshot(args, table_spec, &location, &index_dir)?;
+    let (snapshot, loaded_manifest) =
+        load_snapshot(args, table_fingerprint, &location, &index_dir)?;
     if args.has_implicit_path() && snapshot.files.is_empty() {
         crate::eprint_nothing_searched();
     }
     warn_large_implicit_build(args, &location.corpus_root, &index_dir, &snapshot);
     let Some(candidates) = backend_candidates(
         args,
-        table_spec,
+        table_fingerprint,
         &table,
         &index_dir,
         &snapshot,
@@ -104,11 +105,13 @@ pub(crate) fn run(args: &HiArgs) -> anyhow::Result<bool> {
 /// Load a freshness snapshot, reusing a fast snapshot when the index is fresh.
 fn load_snapshot(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     location: &location::IndexLocation,
     index_dir: &Path,
 ) -> anyhow::Result<(manifest::CurrentSnapshot, Option<manifest::Manifest>)> {
-    if let Some(snapshot) = try_fast_snapshot(args, table_spec, &location.corpus_root, index_dir)? {
+    if let Some(snapshot) =
+        try_fast_snapshot(args, table_fingerprint, &location.corpus_root, index_dir)?
+    {
         return Ok(snapshot);
     }
     let collected = collect_haystacks(args, &location.state_root)?;
@@ -129,7 +132,7 @@ fn load_snapshot(
 /// Prepare the selected backend and return the candidate document ordinals.
 fn backend_candidates(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     table: &sngram_types::WeightTable,
     index_dir: &Path,
     snapshot: &manifest::CurrentSnapshot,
@@ -142,7 +145,7 @@ fn backend_candidates(
             let index_home = index_dir.join("postings-v4");
             let index = postings::prepare_index(
                 args,
-                table_spec,
+                table_fingerprint,
                 table,
                 &index_home,
                 snapshot,
@@ -158,7 +161,7 @@ fn backend_candidates(
             let (schema, fields) = store::schema();
             let index = store::prepare_index(
                 args,
-                table_spec,
+                table_fingerprint,
                 table,
                 schema,
                 fields,
@@ -321,7 +324,8 @@ fn searches_stdin(args: &HiArgs) -> bool {
 /// Run `--index=verify` or `--index=repair`: check the index and report, and
 /// under repair rebuild it when a fault is found. Returns whether it is healthy.
 fn maintenance(args: &HiArgs) -> anyhow::Result<bool> {
-    let table_spec = sngram_weights::selected()?;
+    let table = sngram_weights::weights();
+    let table_fingerprint = table.fingerprint();
     let location = location::resolve(args, &index_root(args)?)?;
     let index_dir = location.index_dir();
     if !matches!(args.index().backend, IndexBackend::Postings) {
@@ -331,7 +335,7 @@ fn maintenance(args: &HiArgs) -> anyhow::Result<bool> {
         return Ok(true);
     }
     let index_home = index_dir.join("postings-v4");
-    let report = postings::verify_index(&index_home, table_spec)?;
+    let report = postings::verify_index(&index_home, table_fingerprint)?;
     for line in report.lines() {
         report_line(&line);
     }
@@ -341,7 +345,7 @@ fn maintenance(args: &HiArgs) -> anyhow::Result<bool> {
     }
     if matches!(args.index().mode, config::IndexMode::Repair) {
         report_line("eg index repair: fault found, rebuilding");
-        rebuild_for_repair(args, table_spec, &location, &index_home)?;
+        rebuild_for_repair(args, table_fingerprint, &table, &location, &index_home)?;
         report_line("eg index repair: rebuild complete");
         return Ok(true);
     }
@@ -352,11 +356,11 @@ fn maintenance(args: &HiArgs) -> anyhow::Result<bool> {
 /// Rebuild the postings index from a fresh corpus snapshot for repair.
 fn rebuild_for_repair(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
+    table: &sngram_types::WeightTable,
     location: &location::IndexLocation,
     index_home: &Path,
 ) -> anyhow::Result<()> {
-    let table = table_spec.load()?;
     let collected = collect_haystacks(args, &location.state_root)?;
     let snapshot = manifest::current_snapshot(
         args,
@@ -364,7 +368,7 @@ fn rebuild_for_repair(
         &collected.haystacks,
         &collected.dirs,
     )?;
-    postings::rebuild(args, table_spec, &table, index_home, &snapshot)?;
+    postings::rebuild(args, table_fingerprint, table, index_home, &snapshot)?;
     Ok(())
 }
 
@@ -376,7 +380,7 @@ fn report_line(line: &str) {
 
 fn try_fast_snapshot(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     index_root: &Path,
     index_dir: &Path,
 ) -> anyhow::Result<Option<(manifest::CurrentSnapshot, Option<manifest::Manifest>)>> {
@@ -407,7 +411,7 @@ fn try_fast_snapshot(
         manifest_path.display(),
         manifest_read_started_at.elapsed()
     );
-    if !manifest::is_compatible(&old, backend, table_spec) {
+    if !manifest::is_compatible(&old, backend, table_fingerprint) {
         return Ok(None);
     }
     let started_at = Instant::now();

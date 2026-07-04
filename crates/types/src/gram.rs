@@ -1,34 +1,40 @@
 //! Inline small-buffer gram type.
 //!
-//! Grams are 3–13 bytes in practice (bounded by `MAX_LEN = 100`), and the
-//! query path was measured allocation-bound: every gram in a `Vec<u8>` was a
-//! separate heap box. `Gram` stores up to [`INLINE_CAP`] bytes inline and
-//! spills longer ones to the heap, eliminating the per-gram allocation for
-//! the overwhelmingly common case. Representation is canonical (inline iff it
-//! fits), so equality and ordering are plain byte comparisons.
+//! Sparse grams are short byte strings in normal use, and the query path was
+//! measured allocation-bound: every gram in a `Vec<u8>` was a separate heap
+//! box. [`Gram`] stores short values inline and spills longer ones to the heap,
+//! eliminating the per-gram allocation for the common case.
+//! Representation is canonical (inline iff it fits), so equality and ordering
+//! are plain byte comparisons.
 
 use core::borrow::Borrow;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::ops::Deref;
 
-use crate::hashing;
+use crate::hashing::HashKey;
 
-/// Longest gram stored inline; chosen so `size_of::<Gram>() == 24`, the same
-/// footprint as the `Vec<u8>` it replaces.
-const INLINE_CAP: usize = 22;
+struct GramSettings;
+
+impl GramSettings {
+    /// Longest gram stored inline; chosen so `size_of::<Gram>() == 24`, the
+    /// same footprint as the `Vec<u8>` it replaces.
+    const INLINE_CAP: usize = 22;
+}
+
+type InlineBuf = [u8; GramSettings::INLINE_CAP];
 
 /// A gram: a short byte string with inline storage.
 ///
 /// Dereferences to `[u8]`; compares, orders, and std-hashes by its bytes.
-/// [`Gram::hash`] is the 64-bit index key, identical to the hash
-/// [`crate::scan`] emits for the same bytes.
+/// [`Gram::hash`] is the 64-bit index key, identical to the hash emitted for
+/// the same bytes by the scanner.
 #[derive(Clone)]
 pub struct Gram(Repr);
 
 #[derive(Clone)]
 enum Repr {
-    Inline { len: u8, buf: [u8; INLINE_CAP] },
+    Inline { len: u8, buf: InlineBuf },
     Heap(Box<[u8]>),
 }
 
@@ -36,10 +42,7 @@ impl Gram {
     /// The empty gram.
     #[must_use]
     pub const fn empty() -> Self {
-        Self(Repr::Inline {
-            len: 0,
-            buf: [0; INLINE_CAP],
-        })
+        Self::from_inline_parts(0, [0; GramSettings::INLINE_CAP])
     }
 
     /// Concatenation of two byte strings as one gram, without an intermediate
@@ -55,11 +58,11 @@ impl Gram {
     )]
     pub fn concat(a: &[u8], b: &[u8]) -> Self {
         let n = a.len() + b.len();
-        if n <= INLINE_CAP {
-            let mut buf = [0u8; INLINE_CAP];
+        if n <= GramSettings::INLINE_CAP {
+            let mut buf = Self::empty_inline_buf();
             buf[..a.len()].copy_from_slice(a);
             buf[a.len()..n].copy_from_slice(b);
-            Self(Repr::Inline { len: n as u8, buf })
+            Self::from_inline_len(n, buf)
         } else {
             let mut v = Vec::with_capacity(n);
             v.extend_from_slice(a);
@@ -78,38 +81,51 @@ impl Gram {
         }
     }
 
-    /// The gram's 64-bit index key: the same rolling polynomial hash that
-    /// [`crate::scan`] and [`crate::StreamScanner`] emit for these bytes, so
-    /// query-side keys match index-side keys.
+    /// The gram's 64-bit index key.
     #[must_use]
     pub fn hash(&self) -> u64 {
-        hashing::hash_bytes(self.as_bytes())
+        HashKey::UNKEYED.hash_bytes(self.as_bytes())
     }
 
-    /// The gram's index key under a deployment [`hashing::HashKey`].
+    /// The gram's index key under a deployment [`HashKey`].
     #[must_use]
-    pub fn hash_keyed(&self, key: hashing::HashKey) -> u64 {
-        hashing::hash_bytes_keyed(self.as_bytes(), key)
+    pub fn hash_keyed(&self, key: HashKey) -> u64 {
+        key.hash_bytes(self.as_bytes())
+    }
+}
+
+impl Gram {
+    const fn from_inline_parts(len: u8, buf: InlineBuf) -> Self {
+        Self(Repr::Inline { len, buf })
+    }
+
+    const fn empty_inline_buf() -> InlineBuf {
+        [0; GramSettings::INLINE_CAP]
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "caller only uses lengths <= INLINE_CAP < 256"
+    )]
+    const fn from_inline_len(len: usize, buf: InlineBuf) -> Self {
+        Self::from_inline_parts(len as u8, buf)
+    }
+
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "caller only enters this branch when bytes.len() <= INLINE_CAP"
+    )]
+    fn from_inline_bytes(bytes: &[u8]) -> Self {
+        let mut buf = Self::empty_inline_buf();
+        buf[..bytes.len()].copy_from_slice(bytes);
+        Self::from_inline_len(bytes.len(), buf)
     }
 }
 
 impl From<&[u8]> for Gram {
-    #[allow(
-        clippy::indexing_slicing,
-        reason = "bytes.len() <= INLINE_CAP in the inline arm"
-    )]
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "inline arm length <= INLINE_CAP < 256"
-    )]
     fn from(bytes: &[u8]) -> Self {
-        if bytes.len() <= INLINE_CAP {
-            let mut buf = [0u8; INLINE_CAP];
-            buf[..bytes.len()].copy_from_slice(bytes);
-            Self(Repr::Inline {
-                len: bytes.len() as u8,
-                buf,
-            })
+        if bytes.len() <= GramSettings::INLINE_CAP {
+            Self::from_inline_bytes(bytes)
         } else {
             Self(Repr::Heap(bytes.into()))
         }
@@ -157,7 +173,6 @@ impl Ord for Gram {
 
 impl Hash for Gram {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // delegate to the slice impl so Borrow<[u8]> lookups stay consistent
         self.as_bytes().hash(state);
     }
 }
@@ -181,11 +196,11 @@ mod tests {
     fn inline_and_heap_round_trip() {
         let short = Gram::from(&b"abc"[..]);
         assert_eq!(short.as_bytes(), b"abc");
-        let exact = Gram::from(&[7u8; INLINE_CAP][..]);
-        assert_eq!(exact.len(), INLINE_CAP);
-        let long = Gram::from(&[7u8; INLINE_CAP + 1][..]);
-        assert_eq!(long.len(), INLINE_CAP + 1);
-        assert_eq!(&long[..INLINE_CAP], &exact[..]);
+        let exact = Gram::from(&[7u8; GramSettings::INLINE_CAP][..]);
+        assert_eq!(exact.len(), GramSettings::INLINE_CAP);
+        let long = Gram::from(&[7u8; GramSettings::INLINE_CAP + 1][..]);
+        assert_eq!(long.len(), GramSettings::INLINE_CAP + 1);
+        assert_eq!(&long[..GramSettings::INLINE_CAP], &exact[..]);
     }
 
     #[test]
@@ -195,7 +210,6 @@ mod tests {
         assert_eq!(a, b);
         assert!(Gram::from(&b"ab"[..]) < a);
         assert!(Gram::from(&b"abd"[..]) > a);
-        // inline/heap boundary must not affect ordering
         let long_a = Gram::from(&[b'a'; 30][..]);
         let long_b = Gram::concat(&[b'a'; 15], &[b'a'; 15]);
         assert_eq!(long_a, long_b);

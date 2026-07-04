@@ -10,6 +10,7 @@ any S3 content fetch.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -221,14 +222,30 @@ def stack_v2_skip_reason(row: dict[str, object]) -> str | None:
     return None
 
 
+def _project_env_path() -> Path:
+    return Path(__file__).resolve().parents[2] / ".env"
+
+
+def _env_file_token(paths: Iterable[Path]) -> str | None:
+    seen: set[Path] = set()
+    for env in paths:
+        resolved = env.resolve()
+        if resolved in seen or not env.exists():
+            continue
+        seen.add(resolved)
+        for line in env.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line.removeprefix("export ").strip()
+            if line.startswith("HF_TOKEN="):
+                token = line.removeprefix("HF_TOKEN=").strip()
+                return token.strip("\"'")
+    return None
+
+
 def hf_token() -> str | None:
-    """HF_TOKEN from the environment or a local .env file."""
+    """HF_TOKEN from the environment or the training project's .env file."""
 
     if tok := os.environ.get("HF_TOKEN"):
         return tok
-    env = Path(".env")
-    if env.exists():
-        for line in env.read_text().splitlines():
-            if line.startswith("HF_TOKEN="):
-                return line.removeprefix("HF_TOKEN=").strip()
-    return None
+    return _env_file_token((Path(".env"), _project_env_path()))

@@ -21,8 +21,8 @@ const POSTINGS_SCHEMA_VERSION: u32 = 6;
 const TANTIVY_BACKEND: &str = "tantivy";
 const POSTINGS_BACKEND: &str = "postings";
 const TANTIVY_COMPAT_VERSION: &str = "0.26.1";
-const MANIFEST_BINARY_MAGIC: &[u8; 8] = b"EGMANI3\0";
-const MANIFEST_BINARY_VERSION: u32 = 3;
+const MANIFEST_BINARY_MAGIC: &[u8; 8] = b"EGMANI4\0";
+const MANIFEST_BINARY_VERSION: u32 = 4;
 const MANIFEST_BINARY_EXTENSION: &str = "bin";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -174,7 +174,7 @@ pub(super) fn fast_snapshot(
 
 pub(super) fn manifest_for(
     backend: ManifestBackend,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     snapshot: &CurrentSnapshot,
 ) -> Manifest {
     Manifest {
@@ -182,8 +182,7 @@ pub(super) fn manifest_for(
         schema_version: backend.schema_version(),
         backend: backend.id().to_owned(),
         engine_version: backend.engine_version().to_owned(),
-        table_id: table_spec.id().to_owned(),
-        table_fingerprint: table_spec.fingerprint(),
+        table_fingerprint,
         walk_fingerprint: snapshot.walk_fingerprint,
         git_freshness: snapshot.git_freshness,
         dirs: snapshot
@@ -271,14 +270,13 @@ pub(super) fn remove_manifest(path: &Path) -> anyhow::Result<()> {
 pub(super) fn is_compatible(
     manifest: &Manifest,
     backend: ManifestBackend,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
 ) -> bool {
     manifest.version == MANIFEST_VERSION
         && manifest.schema_version == backend.schema_version()
         && manifest.backend == backend.id()
         && manifest.engine_version == backend.engine_version()
-        && manifest.table_id == table_spec.id()
-        && manifest.table_fingerprint == table_spec.fingerprint()
+        && manifest.table_fingerprint == table_fingerprint
 }
 
 /// Write the manifest, always as binary and, when enabled, also as JSON.
@@ -313,7 +311,6 @@ pub(super) fn changed_ordinals(old: &Manifest, new: &Manifest) -> Option<Vec<usi
         || old.schema_version != new.schema_version
         || old.backend != new.backend
         || old.engine_version != new.engine_version
-        || old.table_id != new.table_id
         || old.table_fingerprint != new.table_fingerprint
         || old.walk_fingerprint != new.walk_fingerprint
         || old.git_freshness != new.git_freshness
@@ -377,7 +374,6 @@ fn write_binary_manifest(path: &Path, manifest: &Manifest) -> anyhow::Result<()>
     write_u32(&mut bytes, manifest.schema_version);
     write_string(&mut bytes, &manifest.backend)?;
     write_string(&mut bytes, &manifest.engine_version)?;
-    write_string(&mut bytes, &manifest.table_id)?;
     write_u64(&mut bytes, manifest.table_fingerprint);
     write_u64(&mut bytes, manifest.walk_fingerprint);
     write_bool(&mut bytes, manifest.git_freshness);
@@ -434,7 +430,6 @@ fn decode_binary_manifest(bytes: &[u8]) -> anyhow::Result<Manifest> {
     let schema_version = reader.read_u32()?;
     let backend = reader.read_string()?;
     let engine_version = reader.read_string()?;
-    let table_id = reader.read_string()?;
     let table_fingerprint = reader.read_u64()?;
     let walk_fingerprint = reader.read_u64()?;
     let git_freshness = reader.read_bool()?;
@@ -469,7 +464,6 @@ fn decode_binary_manifest(bytes: &[u8]) -> anyhow::Result<Manifest> {
         schema_version,
         backend,
         engine_version,
-        table_id,
         table_fingerprint,
         walk_fingerprint,
         git_freshness,
@@ -1029,7 +1023,6 @@ pub(super) struct Manifest {
     backend: String,
     #[serde(default)]
     engine_version: String,
-    table_id: String,
     table_fingerprint: u64,
     #[serde(default)]
     walk_fingerprint: u64,
@@ -1100,7 +1093,6 @@ mod tests {
             schema_version: 6,
             backend: "postings".to_owned(),
             engine_version: String::new(),
-            table_id: "test".to_owned(),
             table_fingerprint: 7,
             walk_fingerprint: 8,
             git_freshness: false,

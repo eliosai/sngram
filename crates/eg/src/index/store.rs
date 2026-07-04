@@ -45,7 +45,7 @@ const TANTIVY_THREAD_BUDGET: usize = 64 * 1024 * 1024;
 
 pub(super) fn prepare_index(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     table: &WeightTable,
     schema: Schema,
     fields: IndexFields,
@@ -62,11 +62,17 @@ pub(super) fn prepare_index(
             anyhow::bail!("internal error: maintenance mode reached prepare_index")
         },
         IndexMode::Rebuild => rebuild_disk_index(
-            args, table_spec, table, schema, fields, index_home, snapshot,
+            args,
+            table_fingerprint,
+            table,
+            schema,
+            fields,
+            index_home,
+            snapshot,
         ),
         IndexMode::Auto | IndexMode::Require => auto_disk_index(
             args,
-            table_spec,
+            table_fingerprint,
             table,
             schema,
             fields,
@@ -188,7 +194,7 @@ pub(super) fn schema() -> (Schema, IndexFields) {
 
 fn auto_disk_index(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     table: &WeightTable,
     schema: Schema,
     fields: IndexFields,
@@ -200,7 +206,13 @@ fn auto_disk_index(
     let manifest_path = index_home.join(MANIFEST_FILE_NAME);
     if !data_dir.exists() || !manifest_present(&manifest_path) {
         return rebuild_disk_index(
-            args, table_spec, table, schema, fields, index_home, snapshot,
+            args,
+            table_fingerprint,
+            table,
+            schema,
+            fields,
+            index_home,
+            snapshot,
         );
     }
     let manifest_storage;
@@ -211,16 +223,28 @@ fn auto_disk_index(
             Some(manifest) => manifest,
             None => {
                 return rebuild_disk_index(
-                    args, table_spec, table, schema, fields, index_home, snapshot,
+                    args,
+                    table_fingerprint,
+                    table,
+                    schema,
+                    fields,
+                    index_home,
+                    snapshot,
                 );
             },
         };
         &manifest_storage
     };
-    let expected = manifest_for(ManifestBackend::Tantivy, table_spec, snapshot);
+    let expected = manifest_for(ManifestBackend::Tantivy, table_fingerprint, snapshot);
     let Some(changed_ordinals) = changed_ordinals(manifest, &expected) else {
         return rebuild_disk_index(
-            args, table_spec, table, schema, fields, index_home, snapshot,
+            args,
+            table_fingerprint,
+            table,
+            schema,
+            fields,
+            index_home,
+            snapshot,
         );
     };
     let index = Index::open_in_dir(&data_dir).with_context(|| {
@@ -246,7 +270,7 @@ fn auto_disk_index(
 
 fn rebuild_disk_index(
     args: &HiArgs,
-    table_spec: sngram_weights::BuiltinTable,
+    table_fingerprint: u64,
     table: &WeightTable,
     schema: Schema,
     fields: IndexFields,
@@ -265,7 +289,7 @@ fn rebuild_disk_index(
     add_all_documents(args, table, &index, fields, &snapshot.files)?;
     write_manifest(
         &index_home.join(MANIFEST_FILE_NAME),
-        &manifest_for(ManifestBackend::Tantivy, table_spec, snapshot),
+        &manifest_for(ManifestBackend::Tantivy, table_fingerprint, snapshot),
     )?;
     Ok(index)
 }

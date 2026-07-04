@@ -67,8 +67,9 @@ A table is a 256x256 grid: one `u32` per byte pair, 65,536 entries, plus a
 
 The 0.4-era tables are retired: the 0.5 trainer uses a capped blended corpus
 and a new mint schedule (`100gb`, `500gb`, then every 1 TB to `15tb`).
-`sngram-weights` will embed the new tables as they mint — until then every
-size feature is a `compile_error!`, and you load a table you minted yourself:
+`sngram-weights` embeds the released tables from `500gb` through `12tb`; the
+`100gb` bootstrap table is kept as data but is not exposed as a crate feature.
+You can also load a table you minted yourself:
 
 ```rust
 let table = sngram_types::WeightTable::from_bytes(&std::fs::read("bins/5tb_weights.bin")?)?;
@@ -106,7 +107,7 @@ CLI.
 
 ```sh
 cd python && uv sync
-export HF_TOKEN=hf_...                   # or put it in .env
+export HF_TOKEN=hf_...                   # or put it in python/.env
 uv run sngram train --mint-dir ./bins    # 15 TB target, mints every 1 TB
 uv run sngram train --limit 1GB          # smoke run
 uv run sngram inspect bins/5tb_weights.bin

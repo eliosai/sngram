@@ -11,11 +11,7 @@
 
 use std::collections::VecDeque;
 
-use sngram_types::WeightTable;
-
-use crate::gram::Gram;
-use crate::hashing;
-use crate::hashing::HashKey;
+use sngram_types::{Gram, HashKey, WeightTable};
 
 /// Scan-time format options; index build and query plan must agree on them.
 ///
@@ -94,7 +90,7 @@ pub fn scan(table: &WeightTable, content: &[u8], mut emit: impl FnMut(usize, usi
     ring[0] = h;
 
     for (i, (&c1, &c2)) in content.iter().zip(&content[1..]).enumerate() {
-        h = hashing::step(h, c2);
+        h = HashKey::UNKEYED.advance_prefix_hash(h, c2);
         ring[(i + 1) & RING_MASK] = h;
         let w = matrix[(usize::from(c1) << 8) | usize::from(c2)];
         let end = i + 2;
@@ -146,7 +142,11 @@ fn emit_hashed(
         } else {
             ring[(start - 1) & RING_MASK]
         };
-        emit(start, end, hashing::from_prefixes(h_end, h_before, len));
+        emit(
+            start,
+            end,
+            HashKey::UNKEYED.hash_from_prefixes(h_end, h_before, len),
+        );
     }
 }
 
@@ -279,13 +279,13 @@ impl<'t> StreamScanner<'t> {
             }
             // j indexes the second byte of each newly completed pair
             for j in filled.max(1)..filled + take {
-                h = hashing::step(h, self.window[j]);
+                let key = self.ekey;
+                h = key.advance_prefix_hash(h, self.window[j]);
                 self.ring[(self.base + j) & RING_MASK] = h;
                 let w = self.matrix
                     [(usize::from(self.window[j - 1]) << 8) | usize::from(self.window[j])];
                 let pos = self.base + j - 1;
                 let end = self.base + j + 1;
-                let key = self.ekey;
                 while self.slen > 0 {
                     if tw >= w {
                         emit_window(
@@ -389,7 +389,7 @@ fn emit_window(
         };
         emit(
             &window[start - base..end - base],
-            hashing::from_prefixes_keyed(h_end, h_before, len, key),
+            key.hash_from_prefixes(h_end, h_before, len),
         );
     }
 }
@@ -515,23 +515,9 @@ fn drain(stack: &mut VecDeque<(u32, usize)>, emit: &mut impl FnMut(usize, usize)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sngram_types::TABLE_BINARY_SIZE;
 
     fn table() -> WeightTable {
-        let mut buf = vec![0u8; TABLE_BINARY_SIZE];
-        buf[..4].copy_from_slice(b"SPNG");
-        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-        for c1 in 0u8..=255 {
-            for c2 in 0u8..=255 {
-                let w = crc32fast::hash(&[c1, c2]);
-                let idx = (usize::from(c1) << 8) | usize::from(c2);
-                let off = 16 + idx * 4;
-                buf[off..off + 4].copy_from_slice(&w.to_le_bytes());
-            }
-        }
-        let crc = crc32fast::hash(&buf[16..]);
-        buf[8..12].copy_from_slice(&crc.to_le_bytes());
-        WeightTable::from_bytes(&buf).unwrap()
+        WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
     }
 
     fn collect(table: &WeightTable, doc: &[u8], opts: ScanOptions) -> Vec<(Vec<u8>, u64)> {
@@ -655,7 +641,7 @@ mod tests {
                 ..ScanOptions::default()
             },
         ) {
-            assert_eq!(h, hashing::hash_bytes_keyed(&g, key), "gram {g:?}");
+            assert_eq!(h, key.hash_bytes(&g), "gram {g:?}");
         }
     }
 

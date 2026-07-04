@@ -10,8 +10,9 @@
 
 use std::mem;
 
+use sngram_types::Gram;
+
 use crate::extract::{self, MIN_LEN};
-use crate::gram::Gram;
 
 use super::analyze::{Analyzer, BOUNDARY_GROW, BOUNDARY_KEEP, MAX_EXACT, MAX_EXACT_BYTES, MAX_SET};
 use super::info::RegexpInfo;

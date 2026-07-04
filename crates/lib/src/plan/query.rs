@@ -8,6 +8,8 @@
 
 use core::cmp::Ordering;
 
+use sngram_types::Gram;
+
 use super::strings::{Order, StringSet};
 
 /// The operator at a query node.
@@ -230,12 +232,12 @@ fn split_common(q: &mut StringSet, r: &mut StringSet) -> StringSet {
 }
 
 #[allow(clippy::indexing_slicing, reason = "caller guards *i < src.len()")]
-fn take_one(out: &mut StringSet, src: &[crate::gram::Gram], i: &mut usize) {
+fn take_one(out: &mut StringSet, src: &[Gram], i: &mut usize) {
     out.push(src[*i].clone());
     *i += 1;
 }
 
-fn drain_rest(out: &mut StringSet, src: &[crate::gram::Gram], from: usize) {
+fn drain_rest(out: &mut StringSet, src: &[Gram], from: usize) {
     for s in src.iter().skip(from) {
         out.push(s.clone());
     }
@@ -265,7 +267,7 @@ fn any_gram_in(t: &StringSet, set: &StringSet) -> bool {
 }
 
 /// Whether the presence of the single gram `g` implies query `q`.
-fn gram_implies(g: &crate::gram::Gram, q: &Query) -> bool {
+fn gram_implies(g: &Gram, q: &Query) -> bool {
     grams_imply(&StringSet::of(g.clone()), q)
 }
 
@@ -274,13 +276,13 @@ mod tests {
     use super::*;
 
     fn gram(b: &[u8]) -> Query {
-        Query::grams(Op::And, StringSet::of(crate::gram::Gram::from(b)))
+        Query::grams(Op::And, StringSet::of(Gram::from(b)))
     }
 
     fn cleaned(items: &[&[u8]]) -> StringSet {
         let mut s = StringSet::new();
         for it in items {
-            s.push(crate::gram::Gram::from(*it));
+            s.push(Gram::from(*it));
         }
         s.clean(Order::Prefix);
         s
@@ -339,7 +341,7 @@ mod tests {
         let actual = left.and(right);
         // Common "abc" implies each side, so the AND collapses to "abc".
         assert!(grams_imply(
-            &StringSet::of(crate::gram::Gram::from(&b"abc"[..])),
+            &StringSet::of(Gram::from(&b"abc"[..])),
             &actual
         ));
     }
