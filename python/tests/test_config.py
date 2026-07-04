@@ -1,156 +1,113 @@
-"""The training corpus roster: every source must be accessible, on-distribution,
-and correctly columned, and the mix caps must encode the intended blend.
-
-These are red->green guards on the 15 TB Linux-filesystem corpus: a forbidden
-repo, a metadata-only trap, a stray LLVM-IR config, an untrimmed language list,
-or a cap that lets multilingual dominate would all break the table.
-"""
+"""Production training distribution: Stack v2 metadata + SWH content only."""
 
 from __future__ import annotations
 
-from sngram.train import config
 from sngram.train.config import (
-    CJK_LANGS,
-    CONFIG_PATH_RE,
-    DOC_PATH_RE,
-    REQUIRES_HF_TOKEN,
+    STACK_V2_CONTENT_PREFIX,
+    STACK_V2_METADATA_REPO,
+    STACK_V2_REQUIRED_COLUMNS,
+    STACK_V2_TARGET_BYTES,
     TRAIN_TARGET_BYTES,
-    WEB_LANGS,
     default_families,
     hf_token,
+    stack_v2_bucket_for,
+    stack_v2_skip_reason,
 )
-
-# Reviewed repos in the capped 15 TB roster. Live HF tests verify access/schema
-# with the user's token; this static guard prevents accidental unreviewed sources.
-VERIFIED_ACCESSIBLE = {
-    "nick007x/github-code-2025": "content",
-    "CodedotAI/code_clippy_github": "content",
-    "M1keR/the-stack-v2-dedup-filtered-500-stars-100-forks-contents": "text",
-    "bigcode/starcoderdata": "content",
-    "OpenCoder-LLM/opc-fineweb-code-corpus": "text",
-    "bigcode/starcoder2data-extras": "content",
-    "mikex86/stackoverflow-posts": "Body",
-    "HuggingFaceFW/finepdfs": "text",
-    "HuggingFaceFW/fineweb-2": "text",
-}
-
-# Gated, metadata-only, or token-poisoned repos that must never be streamed.
-FORBIDDEN_REPOS = {
-    "nvidia/Nemotron-Pretraining-Code-v2",  # gated=manual
-    "nvidia/Nemotron-Pretraining-Code-v3",  # metadata only
-    "bigcode/the-stack-v2",                 # metadata only (SWHIDs)
-    "bigcode/the-stack-v2-dedup",           # metadata only
-    "bigcode/the-stack-dedup",              # gated=auto
-    "bigcode/the-stack",                    # gated
-}
+from sngram.train.pipeline import roster_hash
 
 
 def all_sources():
     return [s for f in default_families() for s in f.sources]
 
 
-def test_web_langs_trimmed_to_a_dozen_scripts():
-    # the measured filesystem is 99.9% ASCII: multilingual is a small coverage
-    # slice, not 90 languages of web text
-    assert len(WEB_LANGS) <= 15
-    assert "eng_Latn" not in WEB_LANGS  # English comes from FinePDFs, not here
-    # spans the UTF-8 multibyte space: CJK, Cyrillic, Arabic, Greek, Hebrew, Indic
-    for needed in ("cmn_Hani", "rus_Cyrl", "arb_Arab", "jpn_Jpan", "hin_Deva"):
-        assert needed in WEB_LANGS
+def test_default_distribution_is_stack_v2_swh_only():
+    assert TRAIN_TARGET_BYTES == STACK_V2_TARGET_BYTES == 12_000_000_000_000
+    assert {s.repo for s in all_sources()} == {STACK_V2_METADATA_REPO}
+    assert all(s.format == "swh" for s in all_sources())
+    assert all(s.text_field == "blob_id" for s in all_sources())
+    assert all(s.content_prefix == STACK_V2_CONTENT_PREFIX for s in all_sources())
+    assert all(set(STACK_V2_REQUIRED_COLUMNS) <= set(s.metadata_fields) for s in all_sources())
 
 
-def test_no_llvm_ir_configs():
-    for s in all_sources():
-        assert not (s.config or "").startswith("ir_"), f"LLVM-IR config leaked in: {s.id}"
-
-
-def test_no_forbidden_or_metadata_repos():
-    for s in all_sources():
-        assert s.repo not in FORBIDDEN_REPOS, f"forbidden repo in roster: {s.repo}"
-
-
-def test_every_repo_is_verified_accessible():
-    for s in all_sources():
-        assert s.repo in VERIFIED_ACCESSIBLE, f"unverified repo: {s.repo}"
-
-
-def test_text_field_matches_verified_column():
-    for s in all_sources():
-        assert s.text_field == VERIFIED_ACCESSIBLE[s.repo], (
-            f"{s.repo}: text_field {s.text_field!r} != verified "
-            f"{VERIFIED_ACCESSIBLE[s.repo]!r}"
-        )
-
-
-def test_token_required_sources_are_declared():
-    repos = {s.repo for s in all_sources()}
-    assert "bigcode/starcoderdata" in REQUIRES_HF_TOKEN
-    assert REQUIRES_HF_TOKEN <= repos
-
-
-def test_weights_present_and_normalizable():
-    fams = default_families()
-    assert all(f.weight > 0 for f in fams)
-    total = sum(f.weight for f in fams)
-    assert total > 0
-    norm = {f.id: f.weight / total for f in fams}
-    assert abs(sum(norm.values()) - 1.0) < 1e-9
-
-
-def test_distribution_caps_are_hard_targets():
-    fams = default_families()
-    caps = {f.id: f.cap_bytes for f in fams}
-    assert all(cap is not None and cap > 0 for cap in caps.values())
-    assert sum(caps.values()) == TRAIN_TARGET_BYTES == 15_000_000_000_000
-    assert caps["multilingual"] == 450_000_000_000
-    assert caps["multilingual"] / TRAIN_TARGET_BYTES == 0.03
-
-
-def test_source_and_cjk_caps_roll_up_exactly():
-    for family in default_families():
-        source_caps = [s.cap_bytes for s in family.sources]
-        assert all(cap is not None and cap > 0 for cap in source_caps), family.id
-        assert sum(source_caps) == family.cap_bytes, family.id
-
-    ml = next(f for f in default_families() if f.id == "multilingual")
-    cjk = [s for s in ml.sources if s.config in CJK_LANGS]
-    assert len(cjk) == len(CJK_LANGS)
-    assert sum(s.cap_bytes for s in cjk) == 60_000_000_000
-    assert all(s.cap_bytes <= 20_000_000_000 for s in cjk)
-
-
-def test_bucket_caps_match_distribution_doc_exactly():
-    buckets: dict[str, int] = {}
-    for family in default_families():
-        buckets[family.bucket] = buckets.get(family.bucket, 0) + family.cap_bytes
+def test_bucket_caps_match_stack_v2_distribution_doc_exactly():
+    buckets = {family.bucket: family.cap_bytes for family in default_families()}
     assert buckets == {
-        "pure-code": 10_500_000_000_000,
-        "blend": 3_600_000_000_000,
-        "english-docs": 450_000_000_000,
-        "multilingual": 450_000_000_000,
+        "core-programming": 5_200_000_000_000,
+        "docs-prose-markup": 2_300_000_000_000,
+        "config-build-infra": 1_500_000_000_000,
+        "web-ui-templates": 1_200_000_000_000,
+        "data-query-schema": 1_000_000_000_000,
+        "long-tail": 800_000_000_000,
     }
+    assert sum(buckets.values()) == STACK_V2_TARGET_BYTES
 
 
-def test_code_is_about_seventy_percent_of_the_blend():
-    fams = default_families()
-    total = sum(f.weight for f in fams)
-    code = sum(f.weight for f in fams if f.bucket == "pure-code") / total
-    assert abs(code - 0.70) < 1e-9, f"code share {code:.2%} != 70%"
+def test_source_caps_roll_up_to_family_caps():
+    for family in default_families():
+        assert family.weight == family.cap_bytes / STACK_V2_TARGET_BYTES
+        assert len(family.sources) == 1
+        assert family.sources[0].family == family.id
+        assert family.sources[0].cap_bytes == family.cap_bytes
 
 
-def test_code_text_blend_is_large_enough_to_matter():
-    fams = default_families()
-    total = sum(f.weight for f in fams)
-    blend = sum(f.weight for f in fams if f.bucket == "blend") / total
-    assert abs(blend - 0.24) < 1e-9, f"blend share {blend:.2%} != 24%"
+def test_stack_v2_content_source_is_part_of_roster_identity():
+    families = default_families()
+    changed_source = families[0].sources[0].__class__(
+        **{
+            **families[0].sources[0].__dict__,
+            "content_prefix": "s3://different/content/",
+        }
+    )
+    changed_family = families[0].__class__(
+        **{**families[0].__dict__, "sources": (changed_source,)}
+    )
+    changed = [changed_family, *families[1:]]
+
+    assert roster_hash(families, STACK_V2_TARGET_BYTES, 1_000_000_000_000) != roster_hash(
+        changed, STACK_V2_TARGET_BYTES, 1_000_000_000_000
+    )
 
 
-def test_multilingual_is_a_minor_slice():
-    # the filesystem is ASCII-dominant; multilingual must not dominate
-    fams = default_families()
-    total = sum(f.weight for f in fams)
-    ml = sum(f.weight for f in fams if f.id == "multilingual") / total
-    assert 0 < ml <= 0.15, f"multilingual share {ml:.2%} out of range"
+def test_stack_v2_classifier_routes_major_languages_and_catches_tail():
+    assert stack_v2_bucket_for("Python") == "core-programming"
+    assert stack_v2_bucket_for("Markdown") == "docs-prose-markup"
+    assert stack_v2_bucket_for("YAML") == "config-build-infra"
+    assert stack_v2_bucket_for("Vue") == "web-ui-templates"
+    assert stack_v2_bucket_for("SQL") == "data-query-schema"
+    assert stack_v2_bucket_for("1C Enterprise") == "long-tail"
+
+
+def test_stack_v2_classifier_uses_path_for_ambiguous_text_files():
+    assert stack_v2_bucket_for("Text", path="/docs/install.txt") == "docs-prose-markup"
+    assert stack_v2_bucket_for("Text", path="/.github/workflows/test.yml") == "config-build-infra"
+    assert stack_v2_bucket_for("Text", extension="csv", path="/data/users.csv") == "data-query-schema"
+
+
+def test_stack_v2_metadata_filter_skips_before_s3_fetch():
+    good = {
+        "content_id": "c1",
+        "blob_id": "b1",
+        "src_encoding": "UTF-8",
+        "language": "Python",
+        "path": "/src/app.py",
+        "is_vendor": False,
+        "is_generated": False,
+        "length_bytes": 1024,
+    }
+    assert stack_v2_skip_reason(good) is None
+
+    bad = dict(good, is_vendor=True)
+    assert stack_v2_skip_reason(bad) == "vendor"
+    bad = dict(good, is_generated=True)
+    assert stack_v2_skip_reason(bad) == "generated"
+    bad = dict(good, length_bytes=0)
+    assert stack_v2_skip_reason(bad) == "empty"
+    bad = dict(good, length_bytes=2 * 1024 * 1024 + 1)
+    assert stack_v2_skip_reason(bad) == "oversize"
+    bad = dict(good, language="Markdown", length_bytes=4 * 1024 * 1024)
+    assert stack_v2_skip_reason(bad) is None
+    bad = dict(good, language="Markdown", length_bytes=4 * 1024 * 1024 + 1)
+    assert stack_v2_skip_reason(bad) == "oversize"
 
 
 def test_family_ids_unique():
@@ -161,36 +118,6 @@ def test_family_ids_unique():
 def test_source_ids_unique():
     ids = [s.id for s in all_sources()]
     assert len(ids) == len(set(ids))
-
-
-def test_source_family_matches_owning_family():
-    for f in default_families():
-        for s in f.sources:
-            assert s.family == f.id, f"{s.id}: source.family {s.family!r} != {f.id!r}"
-
-
-def test_path_filtered_sources_declare_metadata_field():
-    for s in all_sources():
-        if s.include_path_regex or s.exclude_path_regex:
-            expected = "path" if s.repo == "CodedotAI/code_clippy_github" else "file_path"
-            assert s.path_field == expected, s.id
-
-
-def test_github2025_is_used_across_filtered_buckets():
-    github_sources = [s for s in all_sources() if s.repo == "nick007x/github-code-2025"]
-    assert sum(s.cap_bytes for s in github_sources) == 2_700_000_000_000
-    assert any(s.exclude_path_regex for s in github_sources)
-    assert any(s.include_path_regex == DOC_PATH_RE for s in github_sources)
-    assert any(s.include_path_regex == CONFIG_PATH_RE for s in github_sources)
-
-
-def test_code_clippy_raw_json_uses_path_metadata_field():
-    sources = [
-        s for s in all_sources()
-        if s.repo == "CodedotAI/code_clippy_github" and (s.include_path_regex or s.exclude_path_regex)
-    ]
-    assert sources
-    assert all(s.path_field == "path" for s in sources)
 
 
 def test_hf_token_uses_environment(monkeypatch):

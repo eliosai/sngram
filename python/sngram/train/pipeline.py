@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import gzip
 import hashlib
 import json
 import os
@@ -24,11 +25,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 import sngram
 
 from . import checkpoint, metrics
-from .config import Family, Source, hf_token
+from .config import Family, Source, hf_token, stack_v2_bucket_for, stack_v2_skip_reason
 from .events import EventLog
 from .units import fmt_bytes, mint_label
 
@@ -46,6 +48,11 @@ SHARD_BLOCK_SIZE = 64 * 1024 * 1024
 DEFAULT_REMOTE_STREAMS = 4
 JSON_BATCH_ROWS = 64
 JSON_BATCH_BYTES = 8 * 1024 * 1024
+SWH_METADATA_BATCH_ROWS = 2048
+SWH_TEXT_BATCH_ROWS = 64
+SWH_TEXT_BATCH_BYTES = 8 * 1024 * 1024
+SWH_OBJECT_ATTEMPTS = 3
+SWH_SLOW_OBJECT_S = float(os.environ.get("SNG_SWH_SLOW_OBJECT_S", "15"))
 READ_GAP_WARN_S = 60.0
 STALL_AFTER_S = 180.0
 RETRY_BASE_S = 2.0
@@ -118,6 +125,18 @@ def error_debug_fields(e: Exception) -> dict[str, object]:
         fields["received_bytes"] = int(m.group(1))
         fields["expected_bytes"] = int(m.group(2))
     return fields
+
+
+def _latency_ms(values: list[float], q: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, max(0, int((len(ordered) - 1) * q)))
+    return int(ordered[idx] * 1000)
+
+
+def _stats_skip(stats: dict[str, int], reason: str) -> None:
+    stats[f"skipped_{reason}"] = stats.get(f"skipped_{reason}", 0) + 1
 
 
 def default_workers() -> int:
@@ -215,15 +234,13 @@ def roster_hash(families: list[Family], target: int, mint_every: int) -> str:
                         "id": s.id,
                         "family": s.family,
                         "repo": s.repo,
-                        "name": s.name,
                         "config": s.config,
                         "text_field": s.text_field,
                         "cap_bytes": s.cap_bytes,
                         "format": s.format,
                         "data_files": s.data_files,
-                        "path_field": s.path_field,
-                        "include_path_regex": s.include_path_regex,
-                        "exclude_path_regex": s.exclude_path_regex,
+                        "content_prefix": s.content_prefix,
+                        "metadata_fields": s.metadata_fields,
                     }
                     for s in f.sources
                 ],
@@ -423,56 +440,6 @@ def _prefix_values_to_bytes(values: list[object], limit: int) -> list[str]:
     return out
 
 
-def _path_allowed(source: Source, path: str) -> bool:
-    if source.include_path_regex and not re.search(source.include_path_regex, path):
-        return False
-    if source.exclude_path_regex and re.search(source.exclude_path_regex, path):
-        return False
-    return True
-
-
-def _select_text_column(batch, field: str):
-    import pyarrow as pa
-
-    idx = batch.schema.get_field_index(field)
-    if idx < 0:
-        raise ValueError(
-            f"column [{field!r}] not in the batch. "
-            f"columns in the batch: {batch.schema.names}."
-        )
-    return pa.record_batch([batch.column(idx)], names=[field])
-
-
-def _filter_arrow_batch(batch, source: Source):
-    """Apply an optional path regex filter and return a text-only batch."""
-    if not source.path_field:
-        return _select_text_column(batch, source.text_field)
-    path_idx = batch.schema.get_field_index(source.path_field)
-    if path_idx < 0:
-        raise ValueError(
-            f"path column [{source.path_field!r}] not in the batch. "
-            f"columns in the batch: {batch.schema.names}."
-        )
-    paths = batch.column(path_idx).to_pylist()
-    mask = [isinstance(p, str) and _path_allowed(source, p) for p in paths]
-    if not any(mask):
-        return None
-    filtered = batch.filter(mask)
-    return _select_text_column(filtered, source.text_field)
-
-
-def _json_row_allowed(source: Source, obj: dict[str, object]) -> bool:
-    if not source.path_field:
-        return True
-    path = obj.get(source.path_field)
-    if not isinstance(path, str):
-        raise ValueError(
-            f"path column [{source.path_field!r}] not in json object. "
-            f"columns in the object: {sorted(obj)}."
-        )
-    return _path_allowed(source, path)
-
-
 def _resolved_files(ds) -> list[str]:
     """The ordered parquet file URLs behind a streaming `datasets` dataset.
 
@@ -589,6 +556,7 @@ class Trainer:
         # one worker's remote session/cache cannot serialize every other worker.
         self._fs = None
         self._fs_tls = threading.local()
+        self._s3_tls = threading.local()
         self.remote_streams = max(
             1,
             int(os.environ.get("SNG_HF_STREAMS", min(DEFAULT_REMOTE_STREAMS, workers))),
@@ -605,8 +573,6 @@ class Trainer:
         self._family_failed: dict[str, int] = {}
         self._source_failed: dict[str, int] = {}
         self.errors = 0
-        self._logged_family_done: set[str] = set()
-        self._logged_source_cap_reached: set[str] = set()
         # per-family blend feedback (bytes + completed shards) lives on
         # self.state so it survives resume; it is mutated only under the merge
         # lock, alongside the counter merge and mark_done, so a checkpoint sees
@@ -757,18 +723,6 @@ class Trainer:
             and self._source_inflight(sid, completed, dispatched, failed) > 0
         )
 
-    def _log_family_done_once(self, fid: str) -> None:
-        if fid in self._logged_family_done:
-            return
-        self._logged_family_done.add(fid)
-        self.events.log("family_done", family=fid)
-
-    def _log_source_cap_reached_once(self, sid: str) -> None:
-        if sid in self._logged_source_cap_reached:
-            return
-        self._logged_source_cap_reached.add(sid)
-        self.events.log("source_cap_reached", source=sid)
-
     # ------------------------------------------------------------- planner
 
     def _plan(self) -> None:
@@ -796,7 +750,7 @@ class Trainer:
             source_dispatched = resume_dispatched(self.state.source_done, source_order)
             for fid in order:
                 if ahead[fid] is None:
-                    self._log_family_done_once(fid)
+                    self.events.log("family_done", family=fid)
             while not self.stop.is_set():
                 with self._merge_lock:
                     counted = dict(self.state.family_bytes)
@@ -815,10 +769,10 @@ class Trainer:
                         sid = ahead[fid].source.id
                         if source_counted.get(sid, 0) < (self._source_caps.get(sid) or 10**100):
                             break
-                        self._log_source_cap_reached_once(sid)
+                        self.events.log("source_cap_reached", source=sid)
                         ahead[fid] = next(gens[fid], None)
                     if ahead.get(fid) is None:
-                        self._log_family_done_once(fid)
+                        self.events.log("family_done", family=fid)
                 live = [
                     fid for fid in order
                     if ahead.get(fid) is not None
@@ -862,7 +816,7 @@ class Trainer:
                 task = ahead[fid]
                 ahead[fid] = next(gens[fid], None)  # refill the prefetch slot
                 if ahead[fid] is None:
-                    self._log_family_done_once(fid)
+                    self.events.log("family_done", family=fid)
                 dispatched[fid] += 1  # count it now so the next pick sees in-flight
                 source_dispatched[task.source.id] += 1
                 while not self.stop.is_set():
@@ -999,6 +953,11 @@ class Trainer:
                 source.format, data_files=files, split="train",
                 streaming=True, token=self.token,
             )
+        elif source.format == "swh":
+            ds = load_dataset(
+                source.repo, split="train",
+                streaming=True, token=self.token, revision=rev,
+            )
         else:
             ds = load_dataset(
                 source.repo, name=source.config, split="train",
@@ -1071,6 +1030,24 @@ class Trainer:
         self.events.log("preflight_done", sources=checked)
 
     def _preflight_source_schema(self, source: Source, url: str) -> None:
+        if source.format == "swh":
+            required = set(source.metadata_fields or ())
+            if not required:
+                raise ValueError(f"{source.id}: missing SWH metadata field contract")
+            pf, fh = self._open_parquet(url)
+            try:
+                names = set(pf.schema_arrow.names)
+                missing = sorted(required - names)
+                if missing:
+                    raise ValueError(
+                        f"{source.id}: missing metadata columns {missing}; "
+                        f"columns={pf.schema_arrow.names}"
+                    )
+            finally:
+                if fh is not None:
+                    fh.close()
+            return
+
         if source.format == "json":
             import gzip
             import json
@@ -1081,11 +1058,6 @@ class Trainer:
             if source.text_field not in obj:
                 raise ValueError(
                     f"{source.id}: missing {source.text_field!r}; "
-                    f"columns={sorted(obj)}"
-                )
-            if source.path_field and source.path_field not in obj:
-                raise ValueError(
-                    f"{source.id}: missing path field {source.path_field!r}; "
                     f"columns={sorted(obj)}"
                 )
             return
@@ -1099,11 +1071,6 @@ class Trainer:
                     f"{source.id}: missing {source.text_field!r}; "
                     f"columns={pf.schema_arrow.names}"
                 )
-            if source.path_field and source.path_field not in pf.schema_arrow.names:
-                raise ValueError(
-                    f"{source.id}: missing path field {source.path_field!r}; "
-                    f"columns={pf.schema_arrow.names}"
-                )
             return
 
         pf, fh = self._open_parquet(url)
@@ -1111,11 +1078,6 @@ class Trainer:
             if source.text_field not in pf.schema_arrow.names:
                 raise ValueError(
                     f"{source.id}: missing {source.text_field!r}; "
-                    f"columns={pf.schema_arrow.names}"
-                )
-            if source.path_field and source.path_field not in pf.schema_arrow.names:
-                raise ValueError(
-                    f"{source.id}: missing path field {source.path_field!r}; "
                     f"columns={pf.schema_arrow.names}"
                 )
         finally:
@@ -1279,6 +1241,9 @@ class Trainer:
         ws.stall_count = 0
         ws.max_silent_s = 0.0
         ws.last_gap_log = 0.0
+        if task.source.format == "swh":
+            self._run_swh_shard(ws, task, sid)
+            return
         if task.source.format == "json":
             self._run_json_shard(ws, task, sid)
             return
@@ -1307,9 +1272,6 @@ class Trainer:
                     # iter_batches call => only the current row group is resident,
                     # so memory stays bounded no matter how large the shard.
                     cap_stop = False
-                    columns = [field]
-                    if task.source.path_field and task.source.path_field != field:
-                        columns.append(task.source.path_field)
                     for rg in range(next_rg, pf.num_row_groups):
                         if self.stop.is_set():
                             self._drop_in_flight(ws)  # abandoned: nothing merged
@@ -1317,14 +1279,11 @@ class Trainer:
                         rg_tally = sngram.LocalTally()
                         uncommitted = 0
                         for batch in pf.iter_batches(
-                            batch_size=BATCH_ROWS, columns=columns, row_groups=[rg]
+                            batch_size=BATCH_ROWS, columns=[field], row_groups=[rg]
                         ):
                             if self.stop.is_set():
                                 self._drop_in_flight(ws)
                                 return
-                            batch = _filter_arrow_batch(batch, task.source)
-                            if batch is None:
-                                continue
                             remaining = self._remaining_cap_for_worker(task, ws)
                             batch_tally, n, capped = self._count_arrow_with_cap(
                                 batch, remaining
@@ -1400,6 +1359,305 @@ class Trainer:
         fh = open(url, "rb")
         return _HeartbeatFile(fh, ws) if ws is not None else fh
 
+    def _s3_client(self):
+        client = getattr(self._s3_tls, "client", None)
+        if client is None:
+            try:
+                import boto3
+            except ImportError as e:  # pragma: no cover - exercised on run hosts
+                raise RuntimeError(
+                    "Stack v2 SWH content fetch needs boto3; install sngram[train]"
+                ) from e
+            client = boto3.Session().client("s3")
+            self._s3_tls.client = client
+        return client
+
+    def _swh_content_url(self, source: Source, blob_id: str) -> str:
+        if not source.content_prefix:
+            raise ValueError(f"{source.id}: SWH source is missing content_prefix")
+        return f"{source.content_prefix.rstrip('/')}/{blob_id}"
+
+    def _read_swh_content_once(self, url: str) -> bytes:
+        if url.startswith("file://"):
+            parsed = urlparse(url)
+            with gzip.open(parsed.path, "rb") as fh:
+                return fh.read()
+        if "://" not in url:
+            with gzip.open(url, "rb") as fh:
+                return fh.read()
+
+        try:
+            from smart_open import open as smart_open
+        except ImportError as e:  # pragma: no cover - exercised on run hosts
+            raise RuntimeError(
+                "Stack v2 SWH content fetch needs smart_open[s3]; install sngram[train]"
+            ) from e
+
+        transport_params = {}
+        if url.startswith("s3://"):
+            transport_params["client"] = self._s3_client()
+        with smart_open(
+            url, "rb", compression=".gz", transport_params=transport_params
+        ) as fh:
+            return fh.read()
+
+    def _read_swh_content(self, url: str, ws: WorkerState, sid: str) -> tuple[bytes, float]:
+        delay = 0.5
+        for attempt in range(1, SWH_OBJECT_ATTEMPTS + 1):
+            start = time.monotonic()
+            try:
+                data = self._read_swh_content_once(url)
+                ws.last_progress = time.monotonic()
+                return data, ws.last_progress - start
+            except Exception as e:  # noqa: BLE001 - classified below
+                kind = classify_error(e)
+                if kind == "transient" and attempt < SWH_OBJECT_ATTEMPTS:
+                    self.events.log(
+                        "warn",
+                        stage="s3_object",
+                        shard=sid,
+                        url=url,
+                        error_kind=kind,
+                        attempt=attempt,
+                        retry_in_s=round(delay, 1),
+                        error=err_text(e),
+                        **error_debug_fields(e),
+                    )
+                    self.stop.wait(delay)
+                    delay = min(delay * 2, RETRY_CAP_S)
+                    continue
+                raise
+        raise RuntimeError("unreachable SWH retry state")
+
+    def _run_swh_shard(self, ws: WorkerState, task: ShardTask, sid: str) -> None:
+        import pyarrow as pa
+
+        delay = RETRY_BASE_S
+        while not self.stop.is_set():
+            file_tally = sngram.LocalTally()
+            ws.shard_bytes = 0
+            remote_acquired = False
+            bucket = task.source.config or task.source.family
+            stats: dict[str, int] = {
+                "scanned_rows": 0,
+                "accepted_objects": 0,
+                "accepted_bytes": 0,
+                "decoded_bytes": 0,
+                "fetched_bytes": 0,
+                "fetch_errors": 0,
+                "decode_errors": 0,
+            }
+            latencies: list[float] = []
+            texts: list[str] = []
+            text_bytes = 0
+            started = time.monotonic()
+            try:
+                url = self._load_source(task.source)[task.shard]
+                self.events.log(
+                    "swh_manifest_start",
+                    shard=sid,
+                    source=task.source.id,
+                    bucket=bucket,
+                    url=url,
+                    revision=task.revision,
+                    content_prefix=task.source.content_prefix,
+                    metadata_fields=list(task.source.metadata_fields or ()),
+                )
+                remote_acquired = self._acquire_remote_stream(url, ws, sid)
+                if self.stop.is_set():
+                    self._drop_in_flight(ws)
+                    return
+                fh = None
+
+                def flush() -> bool:
+                    nonlocal text_bytes
+                    if not texts:
+                        return False
+                    tbl = pa.table({"content": pa.array(texts, type=pa.large_string())})
+                    remaining = self._remaining_cap_for_worker(task, ws)
+                    batch_tally, n, capped = self._count_arrow_with_cap(tbl, remaining)
+                    if n:
+                        file_tally.add_from(batch_tally)
+                    ws.shard_bytes += n
+                    stats["accepted_bytes"] += n
+                    self._note_worker_progress(ws, sid)
+                    with self._lock:
+                        self.in_flight_bytes += n
+                    texts.clear()
+                    text_bytes = 0
+                    return capped
+
+                cap_stop = False
+                try:
+                    pf, fh = self._open_parquet(url, ws)
+                    fields = list(task.source.metadata_fields or ())
+                    names = pf.schema_arrow.names
+                    missing = [field for field in fields if field not in names]
+                    if missing:
+                        raise ValueError(
+                            f"{task.source.id}: missing metadata columns {missing}; "
+                            f"columns={names}"
+                        )
+                    for batch in pf.iter_batches(
+                        batch_size=SWH_METADATA_BATCH_ROWS, columns=fields
+                    ):
+                        if self.stop.is_set():
+                            self._drop_in_flight(ws)
+                            return
+                        for row in batch.to_pylist():
+                            stats["scanned_rows"] += 1
+                            reason = stack_v2_skip_reason(row)
+                            if reason:
+                                _stats_skip(stats, reason)
+                                continue
+                            row_bucket = stack_v2_bucket_for(
+                                row.get("language"),
+                                row.get("extension"),
+                                row.get("path"),
+                            )
+                            if row_bucket != bucket:
+                                _stats_skip(stats, "bucket")
+                                continue
+                            if self._remaining_cap_for_worker(task, ws) == 0:
+                                cap_stop = True
+                                break
+                            blob_id = str(row["blob_id"])
+                            url = self._swh_content_url(task.source, blob_id)
+                            try:
+                                raw, elapsed = self._read_swh_content(url, ws, sid)
+                                latencies.append(elapsed)
+                                if elapsed >= SWH_SLOW_OBJECT_S:
+                                    self.events.log(
+                                        "s3_slow_object",
+                                        shard=sid,
+                                        source=task.source.id,
+                                        bucket=bucket,
+                                        blob_id=blob_id,
+                                        elapsed_ms=int(elapsed * 1000),
+                                    )
+                            except Exception as e:  # noqa: BLE001
+                                stats["fetch_errors"] += 1
+                                self.events.log(
+                                    "s3_object_error",
+                                    shard=sid,
+                                    source=task.source.id,
+                                    bucket=bucket,
+                                    blob_id=blob_id,
+                                    error_kind=classify_error(e),
+                                    stage="fetch",
+                                    error=err_text(e),
+                                    **error_debug_fields(e),
+                                )
+                                continue
+                            stats["fetched_bytes"] += len(raw)
+                            try:
+                                text = raw.decode(str(row["src_encoding"]))
+                            except Exception as e:  # noqa: BLE001
+                                stats["decode_errors"] += 1
+                                self.events.log(
+                                    "s3_object_error",
+                                    shard=sid,
+                                    source=task.source.id,
+                                    bucket=bucket,
+                                    blob_id=blob_id,
+                                    error_kind="decode",
+                                    stage="decode",
+                                    encoding=row.get("src_encoding"),
+                                    error=err_text(e),
+                                )
+                                continue
+                            if not text:
+                                _stats_skip(stats, "empty_content")
+                                continue
+                            encoded_len = len(text.encode("utf-8"))
+                            stats["decoded_bytes"] += encoded_len
+                            texts.append(text)
+                            text_bytes += encoded_len
+                            stats["accepted_objects"] += 1
+                            if (
+                                len(texts) >= SWH_TEXT_BATCH_ROWS
+                                or text_bytes >= SWH_TEXT_BATCH_BYTES
+                            ):
+                                cap_stop = flush()
+                                if cap_stop:
+                                    break
+                        if cap_stop:
+                            break
+                    if not cap_stop:
+                        flush()
+                finally:
+                    if fh is not None:
+                        fh.close()
+                    self._release_remote_stream(remote_acquired)
+                    remote_acquired = False
+                    _release_arrow_pool()
+                    self._maybe_trim_memory("swh_shard", sid)
+            except Exception as e:  # noqa: BLE001 - metadata shard read failure
+                self._release_remote_stream(remote_acquired)
+                self._drop_in_flight(ws)
+                self._bump("errors")
+                kind = classify_error(e)
+                if kind == "missing":
+                    self._abandon_failed(ws, task, sid, kind, e)
+                    return
+                if kind == "hard":
+                    task.attempts += 1
+                    if task.attempts >= MAX_HARD_ATTEMPTS:
+                        self._abandon_failed(ws, task, sid, kind, e)
+                        return
+                task.retries += 1
+                if task.retries <= 3 or task.retries % 10 == 0:
+                    self.events.log(
+                        "warn", stage="swh_shard", shard=sid, error_kind=kind,
+                        retries=task.retries, retry_in_s=round(delay),
+                        error=err_text(e), **error_debug_fields(e),
+                    )
+                ws.task = f"{sid} (retry in {delay:.0f}s)"
+                self.stop.wait(delay)
+                delay = min(delay * 2, RETRY_CAP_S)
+                continue
+
+            secs = time.monotonic() - started
+            self.events.log(
+                "s3_batch",
+                shard=sid,
+                source=task.source.id,
+                bucket=bucket,
+                secs=round(secs, 1),
+                latency_p50_ms=_latency_ms(latencies, 0.50),
+                latency_p95_ms=_latency_ms(latencies, 0.95),
+                latency_max_ms=_latency_ms(latencies, 1.0),
+                **stats,
+            )
+            self.events.log(
+                "swh_bucket_progress",
+                shard=sid,
+                source=task.source.id,
+                bucket=bucket,
+                accepted_bytes=stats["accepted_bytes"],
+                accepted_objects=stats["accepted_objects"],
+                scanned_rows=stats["scanned_rows"],
+                decoded_bytes=stats["decoded_bytes"],
+                fetched_bytes=stats["fetched_bytes"],
+                skips={
+                    k.removeprefix("skipped_"): v
+                    for k, v in stats.items()
+                    if k.startswith("skipped_")
+                },
+                fetch_errors=stats["fetch_errors"],
+                decode_errors=stats["decode_errors"],
+            )
+            self.events.log(
+                "swh_manifest_done",
+                shard=sid,
+                source=task.source.id,
+                bucket=bucket,
+                rows=stats["scanned_rows"],
+                secs=round(secs, 1),
+            )
+            self._commit_tally(ws, task, sid, file_tally, ws.shard_bytes)
+            return
+
     def _run_json_shard(self, ws: WorkerState, task: ShardTask, sid: str) -> None:
         import gzip
         import json
@@ -1453,8 +1711,6 @@ class Trainer:
                                 f"column [{task.source.text_field!r}] not in json object. "
                                 f"columns in the object: {sorted(obj)}."
                             )
-                        if not _json_row_allowed(task.source, obj):
-                            continue
                         value = obj[task.source.text_field]
                         if isinstance(value, str):
                             batch.append(value)

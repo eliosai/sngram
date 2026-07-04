@@ -19,7 +19,7 @@ app = typer.Typer(
 @app.command()
 def train(
     mint_dir: Path = typer.Option(Path("./bins"), help="Where minted .bin tables land."),
-    target: str = typer.Option("15TB", help="Total text to count."),
+    target: str = typer.Option("12TB", help="Total text to count."),
     mint_every: str = typer.Option(
         "1TB", help="Steady mint cadence (100GB/500GB bootstrap mints come first)."
     ),

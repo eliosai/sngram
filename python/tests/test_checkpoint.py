@@ -21,7 +21,7 @@ def test_snapshot_restore_round_trip(tmp_path: Path):
     state = checkpoint.RunState()
     state.mark_done("code-fixture", 100, 3, "sha1")
     state.mark_done("code-fixture", 100, 7, "sha1")
-    state.mark_done("fineweb-2/cmn_Hani", 12, 0, None)
+    state.mark_done("stack-long-tail/1C Enterprise", 12, 0, None)
     state.mints_done.append("5tb")
     state.revisions["example/code-fixture"] = "sha1"
     state.roster_hash = "roster-sha"
@@ -46,7 +46,7 @@ def test_snapshot_restore_round_trip(tmp_path: Path):
     assert not restored.is_done("code-fixture", 100, 4, "sha1")
     assert not restored.is_done("code-fixture", 99, 3, "sha1"), "layout change invalidates"
     assert not restored.is_done("code-fixture", 100, 3, "sha2"), "revision change invalidates"
-    assert restored.is_done("fineweb-2/cmn_Hani", 12, 0, None)
+    assert restored.is_done("stack-long-tail/1C Enterprise", 12, 0, None)
     assert restored.mints_done == ["5tb"]
     assert restored.revisions == {"example/code-fixture": "sha1"}
     assert restored.roster_hash == "roster-sha"
@@ -61,20 +61,20 @@ def test_blend_feedback_survives_checkpoint(tmp_path: Path):
     # the convergence signal
     c = make_counter([b"abc"])
     state = checkpoint.RunState()
-    state.family_bytes = {"code-github-2025": 3_000, "multilingual": 1_000}
-    state.family_done = {"code-github-2025": 30, "multilingual": 10}
-    state.source_bytes = {"multilingual/jpn_Jpan": 500}
-    state.source_done = {"multilingual/jpn_Jpan": 5}
+    state.family_bytes = {"stack-core-programming": 3_000, "stack-long-tail": 1_000}
+    state.family_done = {"stack-core-programming": 30, "stack-long-tail": 10}
+    state.source_bytes = {"stack-long-tail/1C Enterprise": 500}
+    state.source_done = {"stack-long-tail/1C Enterprise": 5}
     state.last_mint_counts = [0] * (256 * 256)
     state.last_mint_counts[(ord("a") << 8) | ord("b")] = 42
 
     checkpoint.save(tmp_path, c, state)
     restored = checkpoint.load(tmp_path, sngram.BigramCounter())
 
-    assert restored.family_bytes == {"code-github-2025": 3_000, "multilingual": 1_000}
-    assert restored.family_done == {"code-github-2025": 30, "multilingual": 10}
-    assert restored.source_bytes == {"multilingual/jpn_Jpan": 500}
-    assert restored.source_done == {"multilingual/jpn_Jpan": 5}
+    assert restored.family_bytes == {"stack-core-programming": 3_000, "stack-long-tail": 1_000}
+    assert restored.family_done == {"stack-core-programming": 30, "stack-long-tail": 10}
+    assert restored.source_bytes == {"stack-long-tail/1C Enterprise": 500}
+    assert restored.source_done == {"stack-long-tail/1C Enterprise": 5}
     assert restored.last_mint_counts is not None
     assert len(restored.last_mint_counts) == 256 * 256
     assert restored.last_mint_counts[(ord("a") << 8) | ord("b")] == 42

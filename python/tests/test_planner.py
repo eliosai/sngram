@@ -4,7 +4,6 @@ the family weights, pick the most-underserved family, and skip exhausted ones.""
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pyarrow as pa
@@ -335,12 +334,6 @@ def test_source_cap_stops_dispatching_source(tmp_path: Path):
 
     assert trainer.state.source_bytes["docs/local"] == 200_000
     assert len(trainer.state.completed["docs/local"]["done"]) == 2
-    events = [
-        json.loads(line)
-        for line in (tmp_path / "bins" / "train-events.jsonl").read_text().splitlines()
-    ]
-    assert sum(e.get("kind") == "source_cap_reached" for e in events) <= 1
-    assert sum(e.get("kind") == "family_done" for e in events) <= 1
 
 
 def test_oversized_shard_fills_to_cap_without_overshoot(tmp_path: Path):

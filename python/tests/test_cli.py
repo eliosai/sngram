@@ -13,10 +13,11 @@ def test_cli_does_not_expose_synthetic_ingest_benchmark():
 
 def test_train_preflights_sources_before_running(monkeypatch, tmp_path):
     calls = []
+    init_kwargs = []
 
     class FakeTrainer:
-        def __init__(self, **_kwargs):
-            pass
+        def __init__(self, **kwargs):
+            init_kwargs.append(kwargs)
 
         def preflight_sources(self):
             calls.append("preflight")
@@ -46,6 +47,7 @@ def test_train_preflights_sources_before_running(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert calls == ["preflight", "run"]
+    assert init_kwargs[0]["target"] == 12_000_000_000_000
 
 
 def test_train_preflight_failure_exits_without_retrying(monkeypatch, tmp_path):
