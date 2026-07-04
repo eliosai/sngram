@@ -11,10 +11,10 @@ mod tests {
         let mut buf = vec![0u8; TABLE_BINARY_SIZE];
         buf[..4].copy_from_slice(b"SPNG");
         buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-        for c1 in 0u16..256 {
-            for c2 in 0u16..256 {
-                let w = crc32fast::hash(&[c1 as u8, c2 as u8]);
-                let idx = (c1 as usize) << 8 | c2 as usize;
+        for c1 in 0u8..=u8::MAX {
+            for c2 in 0u8..=u8::MAX {
+                let w = crc32fast::hash(&[c1, c2]);
+                let idx = (usize::from(c1) << 8) | usize::from(c2);
                 let off = 16 + idx * 4;
                 buf[off..off + 4].copy_from_slice(&w.to_le_bytes());
             }
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn concurrent_indexing() {
         let table = std::sync::Arc::new(weight_table());
-        let handles: Vec<_> = (0..8)
+        let total: usize = (0..8)
             .map(|i| {
                 let t = table.clone();
                 std::thread::spawn(move || {
@@ -133,8 +133,8 @@ mod tests {
                     n
                 })
             })
-            .collect();
-        let total: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+            .map(|h| h.join().unwrap())
+            .sum();
         assert!(total > 0);
     }
 }

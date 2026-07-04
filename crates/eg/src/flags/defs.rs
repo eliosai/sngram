@@ -29,7 +29,7 @@ use crate::flags::{
         SearchMode, SortMode, SortModeKind, SpecialMode, TypeChange,
     },
 };
-use crate::index::config::{IndexBackend, IndexMode};
+use crate::index::config::{IndexBackend, IndexFreshness, IndexMode};
 
 #[cfg(test)]
 use crate::flags::parse::parse_low_raw;
@@ -86,6 +86,8 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &IncludeZero,
     &Index,
     &IndexBackendFlag,
+    &IndexDir,
+    &IndexFreshnessFlag,
     &InvertMatch,
     &JSON,
     &LineBuffered,
@@ -3373,22 +3375,175 @@ impl Flag for Index {
     fn doc_long(&self) -> &'static str {
         r"
 Use eg's sparse n-gram index before ripgrep verifies matches. The supported
-modes are \fBauto\fP, which uses an existing compatible index, and
-\fBrebuild\fP, which rebuilds the index before searching.
+modes are \fBauto\fP, which uses an existing compatible index, \fBrebuild\fP,
+which rebuilds the index before searching, and \fBrequire\fP, which behaves
+like \fBauto\fP but errors on a query the index cannot serve instead of
+falling back to an unindexed scan.
+.sp
+Two maintenance modes do not search: \fBverify\fP checks the on-disk index for
+structural faults (section headers, sampled checksums, manifest cross-check,
+and orphaned files) and reports, and \fBrepair\fP runs the same checks and
+rebuilds the index when a fault is found. Both ignore any pattern argument.
+.sp
+By default an unindexable query (for example a very short pattern, an inverted
+match, or a stdin pipe) transparently falls back to the unindexed scan path.
 "
     }
     fn doc_choices(&self) -> &'static [&'static str] {
-        &["auto", "rebuild"]
+        &["auto", "rebuild", "require", "verify", "repair"]
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         args.index.mode = match convert::str(&v.unwrap_value())? {
             "auto" => IndexMode::Auto,
             "rebuild" => IndexMode::Rebuild,
-            other => anyhow::bail!("unrecognized index mode '{other}', expected auto or rebuild"),
+            "require" => IndexMode::Require,
+            "verify" => IndexMode::Verify,
+            "repair" => IndexMode::Repair,
+            other => anyhow::bail!(
+                "unrecognized index mode '{other}', expected auto, rebuild, require, verify or repair"
+            ),
         };
         Ok(())
     }
+}
+
+/// --index-dir
+#[derive(Debug)]
+struct IndexDir;
+
+impl Flag for IndexDir {
+    fn is_switch(&self) -> bool {
+        false
+    }
+    fn name_long(&self) -> &'static str {
+        "index-dir"
+    }
+    fn doc_variable(&self) -> Option<&'static str> {
+        Some("DIR")
+    }
+    fn doc_category(&self) -> Category {
+        Category::SparseNgram
+    }
+    fn doc_short(&self) -> &'static str {
+        r"Store the sparse n-gram index in DIR."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+Store eg's sparse n-gram index state in \fBDIR\fP instead of the default
+\fB.eg\fP directory beside the searched corpus. This is useful for read-only
+corpora. When this flag is absent and the corpus directory cannot be written,
+eg automatically falls back to a per-corpus directory under the XDG cache home
+(\fB$XDG_CACHE_HOME/eg\fP or \fB$HOME/.cache/eg\fP).
+"
+    }
+    fn completion_type(&self) -> CompletionType {
+        CompletionType::Filename
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        args.index.dir = Some(PathBuf::from(v.unwrap_value()));
+        if args.index.mode.is_no_index() {
+            args.index.mode = IndexMode::Auto;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_index_mode_require() {
+    let args = parse_low_raw(["--index", "require"]).unwrap();
+    assert_eq!(IndexMode::Require, args.index.mode);
+
+    let args = parse_low_raw(["--index", "rebuild"]).unwrap();
+    assert_eq!(IndexMode::Rebuild, args.index.mode);
+
+    assert!(parse_low_raw(["--index", "nonsense"]).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn test_index_dir() {
+    let args = parse_low_raw(None::<&str>).unwrap();
+    assert_eq!(None, args.index.dir);
+
+    let args = parse_low_raw(["--index-dir", "/tmp/eg-index"]).unwrap();
+    assert_eq!(Some(PathBuf::from("/tmp/eg-index")), args.index.dir);
+
+    let args = parse_low_raw(["--no-index", "--index-dir", "/tmp/eg-index"]).unwrap();
+    assert_eq!(IndexMode::Auto, args.index.mode);
+}
+
+#[cfg(test)]
+#[test]
+fn test_index_mode_maintenance() {
+    let args = parse_low_raw(["--index", "verify"]).unwrap();
+    assert_eq!(IndexMode::Verify, args.index.mode);
+
+    let args = parse_low_raw(["--index", "repair"]).unwrap();
+    assert_eq!(IndexMode::Repair, args.index.mode);
+}
+
+/// --index-freshness
+#[derive(Debug)]
+struct IndexFreshnessFlag;
+
+impl Flag for IndexFreshnessFlag {
+    fn is_switch(&self) -> bool {
+        false
+    }
+    fn name_long(&self) -> &'static str {
+        "index-freshness"
+    }
+    fn doc_variable(&self) -> Option<&'static str> {
+        Some("MODE")
+    }
+    fn doc_category(&self) -> Category {
+        Category::SparseNgram
+    }
+    fn doc_short(&self) -> &'static str {
+        r"Select how the index detects changed files."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+Select how eg's sparse n-gram index decides a file changed since it was
+indexed. \fBstat\fP (the default) compares modification time, change time, and
+length. \fBhash\fP compares a fast content hash over the file's head and tail
+windows and its length, closing the silent-false-negative window where a
+mutation preserves all three stat fields. Hash mode reads a small slice of
+each candidate file during the freshness check, so it is slower than stat.
+"
+    }
+    fn doc_choices(&self) -> &'static [&'static str] {
+        &["stat", "hash"]
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        args.index.freshness = match convert::str(&v.unwrap_value())? {
+            "stat" => IndexFreshness::Stat,
+            "hash" => IndexFreshness::Hash,
+            other => {
+                anyhow::bail!("unrecognized index freshness '{other}', expected stat or hash")
+            },
+        };
+        if args.index.mode.is_no_index() {
+            args.index.mode = IndexMode::Auto;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_index_freshness() {
+    let args = parse_low_raw(None::<&str>).unwrap();
+    assert_eq!(IndexFreshness::Stat, args.index.freshness);
+
+    let args = parse_low_raw(["--index-freshness", "hash"]).unwrap();
+    assert_eq!(IndexFreshness::Hash, args.index.freshness);
+
+    assert!(parse_low_raw(["--index-freshness", "nonsense"]).is_err());
 }
 
 /// --index-backend
@@ -3413,10 +3568,15 @@ impl Flag for IndexBackendFlag {
     }
     fn doc_long(&self) -> &'static str {
         r"
-Select the backend used by eg's sparse n-gram index. \fBtantivy\fP uses
-\fBeg\fP's compact mmap-backed postings index. \fBtantivy\fP uses Tantivy's
-mmap-backed on-disk directory. \fBtantivy-ram\fP uses Tantivy's in-memory
-directory for benchmark isolation.
+Select the backend used by eg's sparse n-gram index. \fBpostings\fP (the
+default) uses \fBeg\fP's compact mmap-backed postings index. \fBtantivy\fP uses
+Tantivy's mmap-backed on-disk directory. \fBtantivy-ram\fP uses Tantivy's
+in-memory directory for benchmark isolation.
+.sp
+The \fBtantivy\fP and \fBtantivy-ram\fP backends are \fBexperimental\fP: they
+have no dedicated test coverage, diverge from the postings backend's delta
+semantics, and are excluded from eg's default and maintenance paths. Prefer
+\fBpostings\fP for production use.
 "
     }
     fn doc_choices(&self) -> &'static [&'static str] {
@@ -6696,6 +6856,11 @@ This flag is always and implicitly enabled when \flag{json} is used.
 .sp
 Note that this flag has no effect if \flag{files}, \flag{files-with-matches} or
 \flag{files-without-match} is passed.
+.sp
+Under indexed search (see \flag{index}), the files-searched and bytes-searched
+figures cover only the candidate files the index selected for verification, not
+the whole corpus. Files the index rules out are never searched, so they are not
+counted. Run with \flag{no-index} for corpus-wide figures.
 "
     }
 

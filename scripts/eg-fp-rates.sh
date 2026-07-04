@@ -86,16 +86,20 @@ query_rows() {
 printf 'label\tpattern\tflags\ttotal_files\tpostings\tcandidates\tactual\tfp\tfp_per_candidate_pct\tfpr_nonmatch_pct\tprecision_pct\tlookup_ms\tfilter_ms\tverify_ms\ttotal_ms\tplan\n' >"$OUT"
 
 while IFS=$'\t' read -r label pattern flags; do
-  [[ -n "${label:-}" && -n "${pattern:-}" ]] || continue
+  [[ -n "${label:-}" ]] || continue
+  # A row with an empty pattern column carries its pattern in flags (e.g. -e).
+  [[ -n "${pattern:-}" || -n "${flags:-}" ]] || continue
   safe_label=$(printf '%s' "$label" | tr -c 'A-Za-z0-9_.-' '_')
   stdout="$WORKDIR/$safe_label.out"
   stderr="$WORKDIR/$safe_label.err"
 
+  if [[ -n "${pattern:-}" ]]; then query=("$pattern" "$ROOT"); else query=("$ROOT"); fi
+
   # shellcheck disable=SC2086
-  "$EG_BIN" --debug --files-with-matches ${EXTRA_ARGS:-} ${flags:-} -- "$pattern" "$ROOT" >"$stdout" 2>"$stderr"
+  "$EG_BIN" --debug --files-with-matches ${EXTRA_ARGS:-} ${flags:-} -- "${query[@]}" >"$stdout" 2>"$stderr"
   status=$?
   if [[ $status -ne 0 && $status -ne 1 ]]; then
-    if grep -q 'use --no-index' "$stderr"; then
+    if grep -q -- '--no-index' "$stderr"; then
       printf '%s\t%s\t%s\t0\t0\t0\t0\t0\t0.00\t0.00\t0.00\t0.000\t0.000\t0.000\t0.000\tunsupported\n' \
         "$label" "$pattern" "${flags:-}" >>"$OUT"
       continue
@@ -106,12 +110,23 @@ while IFS=$'\t' read -r label pattern flags; do
   fi
 
   total_files=$(grep -o 'f\(ast freshness snapshot\|reshness manifest\) for [0-9]* files' "$stderr" | tail -n1 | grep -o '[0-9]*')
+  if [[ -z "${total_files:-}" ]]; then
+    total_files=$(grep -o 'collected [0-9]* haystacks' "$stderr" | tail -n1 | grep -o '[0-9]*')
+  fi
   postings=$(grep -o 'postings candidates=[0-9]*' "$stderr" | tail -n1 | sed 's/.*=//')
   retained=$(grep -o 'literal filter candidates=[0-9]* retained=[0-9]*' "$stderr" | tail -n1 | sed 's/.*retained=//')
   actual=$(wc -l <"$stdout" | tr -d ' ')
   total_files=${total_files:-0}
   postings=${postings:-0}
   candidates=${retained:-$postings}
+  if grep -q 'falling back to unindexed scan' "$stderr"; then
+    lookup_raw=$(grep -o 'lookup_time=[^ ]*' "$stderr" | tail -n1 | sed 's/lookup_time=//')
+    total_raw=$(grep -o 'total_query_time=[^ ]*' "$stderr" | tail -n1 | sed 's/total_query_time=//')
+    printf '%s\t%s\t%s\t%s\t0\t0\t%s\t0\t0.00\t0.00\t0.00\t%s\t0.000\t0.000\t%s\tfallback\n' \
+      "$label" "$pattern" "${flags:-}" "$total_files" "$actual" \
+      "$(ms "$lookup_raw")" "$(ms "$total_raw")" >>"$OUT"
+    continue
+  fi
   fp=$((candidates - actual))
   nonmatch=$((total_files - actual))
   precision=$(pct "$actual" "$candidates")
@@ -122,6 +137,9 @@ while IFS=$'\t' read -r label pattern flags; do
   filter_raw=$(grep -o 'filter_time=[^ ]*' "$stderr" | tail -n1 | sed 's/filter_time=//')
   verify_raw=$(grep -o 'verify_time=[^ ]*' "$stderr" | tail -n1 | sed 's/verify_time=//')
   total_raw=$(grep 'verified' "$stderr" | tail -n1 | grep -o 'total_time=[^ ]*' | sed 's/total_time=//')
+  if [[ -z "${total_raw:-}" ]]; then
+    total_raw=$(grep -o 'total_query_time=[^ ]*' "$stderr" | tail -n1 | sed 's/total_query_time=//')
+  fi
   plan=$(grep 'query plan:' "$stderr" | tail -n1 | sed 's/.*query plan: //')
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \

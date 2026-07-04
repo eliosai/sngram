@@ -67,7 +67,7 @@ impl Query {
 
     /// Whether this node is a single gram, the atom that merges into any
     /// same-op parent without nesting.
-    fn is_atom(&self) -> bool {
+    const fn is_atom(&self) -> bool {
         self.grams.len() == 1 && self.sub.is_empty()
     }
 
@@ -134,10 +134,11 @@ impl Query {
 
 /// A node `op{single sub}` carries no information beyond that sub-query.
 fn unwrap_single(mut q: Query) -> Query {
-    if q.grams.is_empty() && q.sub.len() == 1 {
-        if let Some(only) = q.sub.pop() {
-            return only;
-        }
+    if q.grams.is_empty()
+        && q.sub.len() == 1
+        && let Some(only) = q.sub.pop()
+    {
+        return only;
     }
     q
 }
@@ -341,6 +342,21 @@ mod tests {
             &StringSet::of(crate::gram::Gram::from(&b"abc"[..])),
             &actual
         ));
+    }
+
+    #[test]
+    fn test_or_of_conjunctions_factors_shared_required_gram() {
+        // (abc AND def) OR (abc AND ghi) => abc AND (def OR ghi).
+        let left = gram(b"abc").and(gram(b"def"));
+        let right = gram(b"abc").and(gram(b"ghi"));
+        let actual = left.or(right);
+
+        assert_eq!(actual.op, Op::And);
+        assert_eq!(actual.grams, cleaned(&[b"abc"]));
+        assert_eq!(actual.sub.len(), 1);
+        assert_eq!(actual.sub[0].op, Op::Or);
+        assert_eq!(actual.sub[0].grams, cleaned(&[b"def", b"ghi"]));
+        assert!(actual.sub[0].sub.is_empty());
     }
 
     #[test]

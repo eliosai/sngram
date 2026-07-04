@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
     time::UNIX_EPOCH,
@@ -13,17 +13,24 @@ use anyhow::{Context, bail};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::{flags::HiArgs, haystack::Haystack};
+use crate::{flags::HiArgs, haystack::Haystack, index::config::IndexFreshness};
 
-const MANIFEST_VERSION: u32 = 5;
-const TANTIVY_SCHEMA_VERSION: u32 = 1;
-const POSTINGS_SCHEMA_VERSION: u32 = 3;
+const MANIFEST_VERSION: u32 = 6;
+const TANTIVY_SCHEMA_VERSION: u32 = 3;
+const POSTINGS_SCHEMA_VERSION: u32 = 6;
 const TANTIVY_BACKEND: &str = "tantivy";
 const POSTINGS_BACKEND: &str = "postings";
 const TANTIVY_COMPAT_VERSION: &str = "0.26.1";
-const MANIFEST_BINARY_FILE_NAME: &str = "manifest.bin";
 const MANIFEST_BINARY_MAGIC: &[u8; 8] = b"EGMANI3\0";
-const MANIFEST_BINARY_VERSION: u32 = 1;
+const MANIFEST_BINARY_VERSION: u32 = 3;
+const MANIFEST_BINARY_EXTENSION: &str = "bin";
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+/// Bytes hashed from each end of a file by the content-hash freshness mode.
+const CONTENT_HASH_WINDOW: usize = 8 * 1024;
+/// Environment variable forcing the JSON manifest to be written alongside the
+/// binary one, for tooling that reads the human-readable form.
+const JSON_MANIFEST_ENV: &str = "EG_INDEX_JSON_MANIFEST";
 
 #[derive(Clone, Copy)]
 pub(super) enum ManifestBackend {
@@ -63,6 +70,7 @@ pub(super) fn current_snapshot(
     let mut hashes = HashSet::with_capacity(haystacks.len());
     let mut files = Vec::with_capacity(haystacks.len());
     let mut dirs = BTreeMap::new();
+    let freshness = args.index_freshness();
     let git_untracked = git_untracked_paths(args, index_root)?;
     for dir in dir_paths {
         insert_dir(
@@ -93,8 +101,12 @@ pub(super) fn current_snapshot(
                 len: metadata.len(),
                 modified_ns: modified_ns(&metadata),
                 changed_ns: changed_ns(&metadata),
+                content_hash: content_freshness_hash(freshness, &absolute, metadata.len()),
                 explicit: haystack.is_explicit(),
                 git_untracked: is_git_untracked,
+                skipped_binary: super::classify::is_binary_path(&absolute).with_context(|| {
+                    format!("failed to classify {} for indexing", absolute.display())
+                })?,
             },
         });
         if let Some(parent) = absolute.parent() {
@@ -187,24 +199,26 @@ pub(super) fn manifest_for(
     }
 }
 
+/// Read the manifest, preferring the binary form and falling back to JSON.
+///
+/// The binary manifest is the commit point; the JSON form is only written for
+/// tooling (see [`write_manifest`]). Either alone is a valid, complete index
+/// manifest, so a missing JSON file is not treated as a missing index.
 pub(super) fn read_manifest(path: &Path) -> anyhow::Result<Option<Manifest>> {
-    if !path.exists() {
-        return Ok(None);
-    }
     let binary_path = binary_manifest_path(path);
-    if binary_path.exists() && binary_is_fresh(&binary_path, path) {
-        let bytes = fs::read(&binary_path).with_context(|| {
-            format!(
-                "failed to read binary index manifest {}",
+    let json_exists = path.exists();
+    let binary_exists = binary_path.exists();
+    if binary_exists && (!json_exists || binary_is_fresh(&binary_path, path)) {
+        match read_binary_manifest(&binary_path) {
+            Ok(manifest) => return Ok(Some(manifest)),
+            Err(err) => log::debug!(
+                "eg index: binary manifest {} unreadable ({err:#}); falling back to JSON",
                 binary_path.display()
-            )
-        })?;
-        return decode_binary_manifest(&bytes).map(Some).with_context(|| {
-            format!(
-                "failed to parse binary index manifest {}",
-                binary_path.display()
-            )
-        });
+            ),
+        }
+    }
+    if !json_exists {
+        return Ok(None);
     }
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read index manifest {}", path.display()))?;
@@ -217,6 +231,41 @@ pub(super) fn read_manifest(path: &Path) -> anyhow::Result<Option<Manifest>> {
         );
     }
     Ok(Some(manifest))
+}
+
+fn read_binary_manifest(binary_path: &Path) -> anyhow::Result<Manifest> {
+    let bytes = fs::read(binary_path).with_context(|| {
+        format!(
+            "failed to read binary index manifest {}",
+            binary_path.display()
+        )
+    })?;
+    decode_binary_manifest(&bytes).with_context(|| {
+        format!(
+            "failed to parse binary index manifest {}",
+            binary_path.display()
+        )
+    })
+}
+
+/// Return true when a manifest exists in either the binary or JSON form.
+pub(super) fn manifest_present(path: &Path) -> bool {
+    path.exists() || binary_manifest_path(path).exists()
+}
+
+/// Remove both manifest forms, ignoring files that are already gone.
+pub(super) fn remove_manifest(path: &Path) -> anyhow::Result<()> {
+    for candidate in [path.to_path_buf(), binary_manifest_path(path)] {
+        match fs::remove_file(&candidate) {
+            Ok(()) => {},
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to remove manifest {}", candidate.display()));
+            },
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn is_compatible(
@@ -232,11 +281,31 @@ pub(super) fn is_compatible(
         && manifest.table_fingerprint == table_spec.fingerprint()
 }
 
+/// Write the manifest, always as binary and, when enabled, also as JSON.
+///
+/// The full-corpus JSON encode is megabytes on a large corpus and is rewritten
+/// every build, so by default only the compact binary manifest is written. The
+/// JSON form is added under `--debug` or when [`JSON_MANIFEST_ENV`] is set. The
+/// JSON is written first so the binary lands last and stays the preferred read.
 pub(super) fn write_manifest(path: &Path, manifest: &Manifest) -> anyhow::Result<()> {
-    let bytes = serde_json::to_vec(manifest).context("failed to encode index manifest")?;
-    fs::write(path, bytes)
-        .with_context(|| format!("failed to write index manifest {}", path.display()))?;
+    if json_manifest_enabled() {
+        let bytes = serde_json::to_vec(manifest).context("failed to encode index manifest")?;
+        write_synced(path, &bytes)
+            .with_context(|| format!("failed to write index manifest {}", path.display()))?;
+    }
     write_binary_manifest(&binary_manifest_path(path), manifest)
+}
+
+/// Return true when the human-readable JSON manifest should also be written.
+fn json_manifest_enabled() -> bool {
+    log::log_enabled!(log::Level::Debug) || std::env::var_os(JSON_MANIFEST_ENV).is_some()
+}
+
+/// Write bytes to a file and fsync it so the manifest is durable on return.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 pub(super) fn changed_ordinals(old: &Manifest, new: &Manifest) -> Option<Vec<usize>> {
@@ -261,9 +330,8 @@ pub(super) fn changed_ordinals(old: &Manifest, new: &Manifest) -> Option<Vec<usi
         {
             return None;
         }
-        if old_file.len != new_file.len
-            || old_file.modified_ns != new_file.modified_ns
-            || old_file.changed_ns != new_file.changed_ns
+        if old_file.skipped_binary != new_file.skipped_binary
+            || file_content_changed(old_file, new_file)
         {
             changed.push(ord);
         }
@@ -271,8 +339,21 @@ pub(super) fn changed_ordinals(old: &Manifest, new: &Manifest) -> Option<Vec<usi
     Some(changed)
 }
 
+/// Decide whether a file changed. When both manifests carry a content hash
+/// (hash freshness), compare those; otherwise fall back to stat fields.
+fn file_content_changed(old: &ManifestFile, new: &ManifestFile) -> bool {
+    match (old.content_hash, new.content_hash) {
+        (Some(old_hash), Some(new_hash)) => old_hash != new_hash,
+        _ => {
+            old.len != new.len
+                || old.modified_ns != new.modified_ns
+                || old.changed_ns != new.changed_ns
+        },
+    }
+}
+
 fn binary_manifest_path(path: &Path) -> PathBuf {
-    path.with_file_name(MANIFEST_BINARY_FILE_NAME)
+    path.with_extension(MANIFEST_BINARY_EXTENSION)
 }
 
 fn binary_is_fresh(binary_path: &Path, json_path: &Path) -> bool {
@@ -314,14 +395,19 @@ fn write_binary_manifest(path: &Path, manifest: &Manifest) -> anyhow::Result<()>
         write_u64(&mut bytes, file.len);
         write_option_u64(&mut bytes, file.modified_ns);
         write_option_u64(&mut bytes, file.changed_ns);
+        write_option_u64(&mut bytes, file.content_hash);
         write_bool(&mut bytes, file.explicit);
         write_bool(&mut bytes, file.git_untracked);
+        write_bool(&mut bytes, file.skipped_binary);
     }
     let mut output = fs::File::create(path)
         .with_context(|| format!("failed to create binary index manifest {}", path.display()))?;
     output
         .write_all(&bytes)
-        .with_context(|| format!("failed to write binary index manifest {}", path.display()))
+        .with_context(|| format!("failed to write binary index manifest {}", path.display()))?;
+    output
+        .sync_all()
+        .with_context(|| format!("failed to fsync binary index manifest {}", path.display()))
 }
 
 fn binary_manifest_capacity(manifest: &Manifest) -> usize {
@@ -333,7 +419,7 @@ fn binary_manifest_capacity(manifest: &Manifest) -> usize {
         + manifest
             .files
             .iter()
-            .map(|file| file.path.len() + file.display_path.len() + 48)
+            .map(|file| file.path.len() + file.display_path.len() + 58)
             .sum::<usize>()
 }
 
@@ -371,8 +457,10 @@ fn decode_binary_manifest(bytes: &[u8]) -> anyhow::Result<Manifest> {
             len: reader.read_u64()?,
             modified_ns: reader.read_option_u64()?,
             changed_ns: reader.read_option_u64()?,
+            content_hash: reader.read_option_u64()?,
             explicit: reader.read_bool()?,
             git_untracked: reader.read_bool()?,
+            skipped_binary: reader.read_bool()?,
         });
     }
     reader.finish()?;
@@ -463,7 +551,10 @@ impl BinaryManifestReader<'_> {
     }
 
     fn read_u8(&mut self) -> anyhow::Result<u8> {
-        Ok(self.read_exact(1)?[0])
+        self.read_exact(1)?
+            .first()
+            .copied()
+            .context("binary manifest ended early")
     }
 
     fn read_u32(&mut self) -> anyhow::Result<u32> {
@@ -543,7 +634,7 @@ fn current_dir(root: &Path, old: &ManifestDir) -> anyhow::Result<CurrentDir> {
 }
 
 fn current_file_from_manifest(
-    _args: &HiArgs,
+    args: &HiArgs,
     root: &Path,
     ord: usize,
     old: &ManifestFile,
@@ -561,6 +652,13 @@ fn current_file_from_manifest(
     if !metadata.is_file() {
         return Ok(None);
     }
+    let content_hash = content_freshness_hash(args.index_freshness(), &absolute, metadata.len());
+    let skipped_binary = super::classify::is_binary_path(&absolute).with_context(|| {
+        format!(
+            "failed to classify {} for index freshness",
+            absolute.display()
+        )
+    })?;
     let path = if old.display_path.is_empty() {
         absolute
     } else {
@@ -576,8 +674,10 @@ fn current_file_from_manifest(
             len: metadata.len(),
             modified_ns: modified_ns(&metadata),
             changed_ns: changed_ns(&metadata),
+            content_hash,
             explicit: old.explicit,
             git_untracked: old.git_untracked,
+            skipped_binary,
         },
     }))
 }
@@ -638,7 +738,11 @@ fn git_fast_snapshot(
         if is_ignore_control_path(&relative) {
             return Ok(None);
         }
-        if manifest.files[ord].git_untracked {
+        if manifest
+            .files
+            .get(ord)
+            .is_some_and(|file| file.git_untracked)
+        {
             current_untracked.insert(relative.clone());
         }
         dirty_manifest_paths.insert(relative);
@@ -652,8 +756,10 @@ fn git_fast_snapshot(
         let Some(&ord) = manifest_paths.get(path.as_str()) else {
             return Ok(None);
         };
-        let Some(file) = current_file_from_manifest(args, index_root, ord, &manifest.files[ord])?
-        else {
+        let Some(old) = manifest.files.get(ord) else {
+            return Ok(None);
+        };
+        let Some(file) = current_file_from_manifest(args, index_root, ord, old)? else {
             return Ok(None);
         };
         changed.insert(ord, file);
@@ -765,11 +871,9 @@ fn git_status_paths(git_root: &Path) -> anyhow::Result<Vec<String>> {
     let mut paths = Vec::new();
     let mut fields = output.stdout.split(|byte| *byte == 0).peekable();
     while let Some(field) = fields.next() {
-        if field.len() < 4 {
+        let (Some(status), Some(path)) = (field.get(..2), field.get(3..)) else {
             continue;
-        }
-        let status = &field[..2];
-        let path = &field[3..];
+        };
         if !path.is_empty() {
             paths.push(String::from_utf8_lossy(path).into_owned());
         }
@@ -817,6 +921,48 @@ fn path_hash(path: &str) -> u64 {
         })
 }
 
+fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+    for &byte in bytes {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// Content hash for hash freshness, or `None` for stat freshness.
+fn content_freshness_hash(freshness: IndexFreshness, path: &Path, len: u64) -> Option<u64> {
+    if freshness.is_hash() {
+        content_hash(path, len)
+    } else {
+        None
+    }
+}
+
+/// Fast content hash over the length plus the file's head and tail windows.
+///
+/// This catches same-stat mutations that touch either end of the file; a
+/// change confined to the interior of a file larger than both windows is not
+/// detected, matching the documented first/last-window trade-off. A read
+/// failure yields `None`, which falls back to stat comparison.
+fn content_hash(path: &Path, len: u64) -> Option<u64> {
+    let mut file = fs::File::open(path).ok()?;
+    let hash = fnv1a(FNV_OFFSET, &len.to_le_bytes());
+    if len == 0 {
+        return Some(hash);
+    }
+    let window = CONTENT_HASH_WINDOW as u64;
+    if len <= 2 * window {
+        let mut body = vec![0u8; usize::try_from(len).ok()?];
+        file.read_exact(&mut body).ok()?;
+        return Some(fnv1a(hash, &body));
+    }
+    let mut buf = vec![0u8; CONTENT_HASH_WINDOW];
+    file.read_exact(&mut buf).ok()?;
+    let hash = fnv1a(hash, &buf);
+    file.seek(SeekFrom::Start(len - window)).ok()?;
+    file.read_exact(&mut buf).ok()?;
+    Some(fnv1a(hash, &buf))
+}
+
 fn modified_ns(metadata: &fs::Metadata) -> Option<u64> {
     let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
     u64::try_from(duration.as_nanos()).ok()
@@ -850,6 +996,10 @@ impl CurrentFile {
     pub(super) fn is_explicit(&self) -> bool {
         self.manifest.explicit
     }
+
+    pub(super) fn is_skipped_binary(&self) -> bool {
+        self.manifest.skipped_binary
+    }
 }
 
 pub(super) struct CurrentDir {
@@ -861,6 +1011,13 @@ pub(super) struct CurrentSnapshot {
     git_freshness: bool,
     pub(super) files: Vec<CurrentFile>,
     dirs: Vec<CurrentDir>,
+}
+
+impl Manifest {
+    /// Number of files recorded in this manifest.
+    pub(super) fn file_count(&self) -> usize {
+        self.files.len()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -900,7 +1057,135 @@ struct ManifestFile {
     modified_ns: Option<u64>,
     changed_ns: Option<u64>,
     #[serde(default)]
+    content_hash: Option<u64>,
+    #[serde(default)]
     explicit: bool,
     #[serde(default)]
     git_untracked: bool,
+    #[serde(default)]
+    skipped_binary: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{
+        Manifest, ManifestFile, binary_manifest_path, changed_ordinals, file_content_changed,
+        read_binary_manifest, write_binary_manifest,
+    };
+
+    fn file(len: u64, modified: u64, changed: u64, content: Option<u64>) -> ManifestFile {
+        ManifestFile {
+            path: "a".to_owned(),
+            display_path: String::new(),
+            path_hash: 1,
+            len,
+            modified_ns: Some(modified),
+            changed_ns: Some(changed),
+            content_hash: content,
+            explicit: false,
+            git_untracked: false,
+            skipped_binary: false,
+        }
+    }
+
+    fn manifest(files: Vec<ManifestFile>) -> Manifest {
+        Manifest {
+            version: 6,
+            schema_version: 6,
+            backend: "postings".to_owned(),
+            engine_version: String::new(),
+            table_id: "test".to_owned(),
+            table_fingerprint: 7,
+            walk_fingerprint: 8,
+            git_freshness: false,
+            dirs: Vec::new(),
+            files,
+        }
+    }
+
+    fn scratch_path(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("eg-manifest-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&root).expect("scratch dir");
+        root.join(name)
+    }
+
+    #[test]
+    fn content_hash_overrides_stat_when_present() {
+        let old = file(10, 1, 1, Some(42));
+        let touched = file(10, 2, 2, Some(42));
+        assert!(
+            !file_content_changed(&old, &touched),
+            "same hash, new mtime is unchanged"
+        );
+        let mutated = file(10, 1, 1, Some(43));
+        assert!(
+            file_content_changed(&old, &mutated),
+            "different hash is changed"
+        );
+    }
+
+    #[test]
+    fn stat_fields_used_when_hash_absent() {
+        let old = file(10, 1, 1, None);
+        assert!(
+            file_content_changed(&old, &file(10, 2, 1, None)),
+            "mtime change"
+        );
+        assert!(
+            file_content_changed(&old, &file(11, 1, 1, None)),
+            "len change"
+        );
+        assert!(
+            !file_content_changed(&old, &file(10, 1, 1, None)),
+            "identical stat"
+        );
+    }
+
+    #[test]
+    fn binary_manifest_path_is_specific_to_each_manifest() {
+        assert_eq!(
+            binary_manifest_path(Path::new("/idx/manifest.json")),
+            Path::new("/idx/manifest.bin")
+        );
+        assert_eq!(
+            binary_manifest_path(Path::new("/idx/delta-manifest.json")),
+            Path::new("/idx/delta-manifest.bin")
+        );
+    }
+
+    #[test]
+    fn skipped_binary_transition_marks_ordinal_changed() {
+        let old = manifest(vec![file(10, 1, 1, None)]);
+        let mut new = manifest(vec![file(10, 1, 1, None)]);
+        new.files[0].skipped_binary = true;
+
+        assert_eq!(changed_ordinals(&old, &new), Some(vec![0]));
+    }
+
+    #[test]
+    fn binary_manifest_round_trips_skipped_binary_disposition() {
+        let path = scratch_path("manifest.bin");
+        let mut source = manifest(vec![file(10, 1, 1, Some(42))]);
+        source.files[0].skipped_binary = true;
+
+        write_binary_manifest(&path, &source).expect("write binary manifest");
+        let decoded = read_binary_manifest(&path).expect("read binary manifest");
+
+        assert_eq!(decoded.files.len(), 1);
+        assert!(decoded.files[0].skipped_binary);
+        assert_eq!(decoded.files[0].content_hash, Some(42));
+
+        fs::remove_file(&path).expect("remove manifest");
+        fs::remove_dir(path.parent().expect("parent")).expect("remove scratch dir");
+    }
 }

@@ -70,7 +70,7 @@ macro_rules! eprintln_locked {
 #[macro_export]
 macro_rules! message {
     ($($tt:tt)*) => {
-        if crate::messages::messages() {
+        if $crate::messages::messages() {
             eprintln_locked!($($tt)*);
         }
     }
@@ -81,7 +81,7 @@ macro_rules! message {
 #[macro_export]
 macro_rules! err_message {
     ($($tt:tt)*) => {
-        crate::messages::set_errored();
+        $crate::messages::set_errored();
         message!($($tt)*);
     }
 }
@@ -91,7 +91,7 @@ macro_rules! err_message {
 #[macro_export]
 macro_rules! ignore_message {
     ($($tt:tt)*) => {
-        if crate::messages::messages() && crate::messages::ignore_messages() {
+        if $crate::messages::messages() && $crate::messages::ignore_messages() {
             eprintln_locked!($($tt)*);
         }
     }

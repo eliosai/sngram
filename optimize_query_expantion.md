@@ -1,0 +1,11 @@
+# Optimizing Query Pipline To Reduce False Positives
+
+We copyied the query pipeline mostly from google codesearch https://github.com/google/codesearch.git. it is for trigrams though so i bet there are issues and wholes!!!
+If you run some queries via eg on linux source code in ~/ripos/linux genraly the FP rate is low at <10%.. but for some queries like with -i for case or whatever it spikes to 80%+.. THIS IS BAD! For whatever regexes we do not support (like '*') we should return the unsupported part, but for whatever we suppoort we should get lowest FP and max prformance.
+There is the script you can use to run and see FP rates.
+scripts/eg-fp-rates.sh is the script.
+EG_BIN=target/release/eg QUERIES=/tmp/queries.tsv scripts/eg-fp-rates.sh /path/to/corpus /tmp/
+  fp.tsv
+Before you an agent (which is dumber) was trying to opimize everything. My fear is that it was trying to fit to the queries from the script (which is a bench) rather then fitting the whole engine to fit to sparse ngrams in a generic way which makes FP rates drop and performance (speed) of the engine (see benches) remain.
+Please do deep research and think in depth!! DEPTH! analying and cloning codesearch as needed, and respecting / ignoring the changes made by the dumber agent as you feel like, towards finding all ways to optimize the query piplien to reduce false positives for all cases!!! now while expoloring feel free to add MANY MANY more queries to the script for it to test!!! the more tested the better!!! the more edge cases found the better!! this is your method for red green testing!! /tdd do it and optimize the query engine to were no crazy FP cases!! the weight table is desent, but the 80% FP rates are unacceptible as you understand.
+ask me anything you need /grill-me and then when you are comfortable start optimizing, work as hard as you can optimizing everything!! clean code, tdd, making sure nothig is 100x slower or anything but that we have a sparse ngram native query engine which takes into advantage ALL regex syntax (via the imported crates), the unsupported edge cases are all covered already as a ban list but the ones at 8-% FP DO NOT match that! so avoid adding to the list which is easy unless it is the right solution.

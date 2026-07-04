@@ -1,4 +1,10 @@
 //! Phase-one integration tests for the elgrep CLI port.
+#![allow(
+    missing_docs,
+    clippy::too_many_lines,
+    clippy::use_self,
+    clippy::unwrap_used
+)]
 
 use std::{
     fs,
@@ -37,6 +43,15 @@ fn eg(args: &[&str]) -> Output {
         .args(args)
         .output()
         .unwrap()
+}
+
+fn eg_with_env(args: &[&str], envs: &[(&str, &Path)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_eg"));
+    command.args(args);
+    for &(key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().unwrap()
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Output {
@@ -108,7 +123,34 @@ fn default_search_builds_and_uses_index() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("default indexed needle"));
-    assert!(fixture.path(".eg/index/postings-v3/manifest.json").exists());
+    assert!(fixture.path(".eg/index/postings-v4/manifest.bin").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn read_only_local_index_dir_falls_back_to_xdg_cache() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "xdg fallback needle\n").unwrap();
+    fs::create_dir_all(fixture.path(".eg")).unwrap();
+    fs::set_permissions(fixture.path(".eg"), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let cache = fixture.path("cache");
+    let output = eg_with_env(
+        &["xdg fallback needle", fixture.root.to_str().unwrap()],
+        &[("XDG_CACHE_HOME", &cache)],
+    );
+    fs::set_permissions(fixture.path(".eg"), fs::Permissions::from_mode(0o755)).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("xdg fallback needle"), "{stdout}");
+    assert!(cache.join("eg").exists());
 }
 
 #[test]
@@ -182,7 +224,7 @@ fn auto_index_refreshes_changed_files_without_full_rebuild() {
         String::from_utf8(first.stderr).unwrap()
     );
 
-    let marker = fixture.root.join(".eg/index/postings-v3/auto-marker");
+    let marker = fixture.root.join(".eg/index/postings-v4/auto-marker");
     fs::write(&marker, "keep").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
     fs::write(fixture.path("sample.txt"), "beta changed needle\n").unwrap();
@@ -373,32 +415,17 @@ fn indexed_empty_files_do_not_fail_mmap_indexing() {
 }
 
 #[test]
-fn indexed_full_corpus_output_modes_error_without_scan_fallback() {
+fn indexed_passthru_errors_with_help() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "alpha constrained needle\n").unwrap();
     let root = fixture.root.to_str().unwrap();
 
-    for args in [
-        vec!["--index=auto", "--passthru", "constrained needle", root],
-        vec!["--index=auto", "--json", "constrained needle", root],
-        vec![
-            "--index=auto",
-            "--count",
-            "--include-zero",
-            "constrained needle",
-            root,
-        ],
-    ] {
-        let output = eg(&args);
-        let stderr = String::from_utf8(output.stderr).unwrap();
+    let output = eg(&["--index=require", "--passthru", "constrained needle", root]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
 
-        assert_eq!(Some(2), output.status.code(), "{args:?}");
-        assert!(
-            stderr.contains("indexed search does not support"),
-            "{stderr}"
-        );
-        assert!(stderr.contains("use --no-index"), "{stderr}");
-    }
+    assert_eq!(Some(2), output.status.code());
+    assert!(stderr.contains("indexed search cannot run with `--passthru`"));
+    assert!(stderr.contains("--no-index"), "{stderr}");
 }
 
 #[test]
@@ -408,27 +435,64 @@ fn indexed_transformed_input_modes_error_without_scan_fallback() {
     let root = fixture.root.to_str().unwrap();
 
     for args in [
-        vec!["--index=auto", "--engine=auto", "constrained needle", root],
-        vec!["--index=auto", "--engine=pcre2", "constrained needle", root],
         vec![
-            "--index=auto",
+            "--index=require",
+            "--engine=auto",
+            "constrained needle",
+            root,
+        ],
+        vec![
+            "--index=require",
+            "--engine=pcre2",
+            "constrained needle",
+            root,
+        ],
+        vec![
+            "--index=require",
             "--encoding=utf-16",
             "constrained needle",
             root,
         ],
-        vec!["--index=auto", "--pre=cat", "constrained needle", root],
-        vec!["--index=auto", "-z", "constrained needle", root],
+        vec!["--index=require", "--pre=cat", "constrained needle", root],
+        vec!["--index=require", "-z", "constrained needle", root],
     ] {
         let output = eg(&args);
         let stderr = String::from_utf8(output.stderr).unwrap();
 
         assert_eq!(Some(2), output.status.code(), "{args:?}");
         assert!(
-            stderr.contains("indexed search does not support"),
+            stderr.contains("indexed search cannot run with"),
             "{stderr}"
         );
-        assert!(stderr.contains("use --no-index"), "{stderr}");
+        assert!(stderr.contains("--no-index"), "{stderr}");
     }
+}
+
+#[test]
+fn indexed_null_data_errors_with_help() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), b"alpha\0beta").unwrap();
+    let root = fixture.root.to_str().unwrap();
+
+    let output = eg(&["--index=require", "--null-data", "alpha", root]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(2), output.status.code());
+    assert!(stderr.contains("indexed search cannot run with `--null-data`"));
+    assert!(stderr.contains("--no-index"), "{stderr}");
+}
+
+#[test]
+fn indexed_invalid_regex_reports_parse_error() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), "alpha\n").unwrap();
+
+    let output = eg(&["[", fixture.root.to_str().unwrap()]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(2), output.status.code());
+    assert!(stderr.contains("invalid regex"), "{stderr}");
+    assert!(!stderr.contains("too broad"), "{stderr}");
 }
 
 #[test]
@@ -488,12 +552,227 @@ fn indexed_broad_regex_errors_without_scan_fallback() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "alpha\n").unwrap();
 
-    let output = eg(&["--index=auto", ".", fixture.root.to_str().unwrap()]);
+    let output = eg(&[".", fixture.root.to_str().unwrap()]);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert_eq!(Some(2), output.status.code());
-    assert!(stderr.contains("indexed query has no sparse n-gram constraints"));
-    assert!(stderr.contains("use --no-index"));
+    assert!(stderr.contains("indexed search cannot use this pattern"));
+    assert!(stderr.contains("too broad"));
+    assert!(stderr.contains("--no-index"));
+}
+
+#[test]
+fn indexed_impossible_regex_errors_with_help() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), "foo bar\n").unwrap();
+
+    let output = eg(&["foo$bar", fixture.root.to_str().unwrap()]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(2), output.status.code());
+    assert!(stderr.contains("indexed search cannot use this pattern"));
+    assert!(stderr.contains("cannot match"));
+    assert!(stderr.contains("anchors"));
+}
+
+#[test]
+fn forced_candidates_count_toward_selectivity_rejection() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "rare forced candidate needle\n").unwrap();
+    for i in 0..80 {
+        fs::write(
+            fixture.path(format!("encoded_{i:02}.txt")),
+            [0xFF, 0xFE, b'x', b'y', b'z'],
+        )
+        .unwrap();
+    }
+
+    let output = eg(&[
+        "--debug",
+        "--index=rebuild",
+        "--files-with-matches",
+        "rare forced candidate needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(2), output.status.code(), "{stderr}");
+    assert!(
+        stderr.contains("selects too much of the corpus"),
+        "high estimates should reject the indexed path: {stderr}"
+    );
+    assert!(
+        stderr.contains("--no-index"),
+        "rejection should explain the exact-scan escape hatch: {stderr}"
+    );
+}
+
+#[test]
+fn tantivy_forced_candidates_count_toward_selectivity_rejection() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "rare forced candidate needle\n").unwrap();
+    for i in 0..80 {
+        fs::write(
+            fixture.path(format!("encoded_{i:02}.txt")),
+            [0xFF, 0xFE, b'x', b'y', b'z'],
+        )
+        .unwrap();
+    }
+
+    let output = eg(&[
+        "--debug",
+        "--index=rebuild",
+        "--index-backend=tantivy-ram",
+        "--files-with-matches",
+        "rare forced candidate needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(2), output.status.code(), "{stderr}");
+    assert!(
+        stderr.contains("selects too much of the corpus"),
+        "high estimates should reject the indexed path in tantivy backend: {stderr}"
+    );
+    assert!(
+        stderr.contains("--no-index"),
+        "rejection should explain the exact-scan escape hatch: {stderr}"
+    );
+}
+
+#[test]
+fn indexed_search_skips_binary_files_instead_of_forcing_them() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("blob.bin"), b"rare binary needle\0tail\n").unwrap();
+    for i in 0..10 {
+        fs::write(
+            fixture.path(format!("text_{i:02}.txt")),
+            "plain text miss\n",
+        )
+        .unwrap();
+    }
+
+    let output = eg(&[
+        "--debug",
+        "--index=rebuild",
+        "--files-with-matches",
+        "rare binary needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(1), output.status.code(), "{stderr}");
+    assert_eq!("", stdout);
+    assert!(
+        stderr.contains("backend prepare+lookup produced 0 candidates"),
+        "binary files should not enter the forced-candidate set: {stderr}"
+    );
+    assert!(
+        !stderr.contains("found binary data"),
+        "binary files should not be searched by indexed verification: {stderr}"
+    );
+}
+
+#[test]
+fn indexed_search_skips_late_nul_binary_files() {
+    let fixture = Fixture::new();
+    let mut bytes = b"late binary needle\n".to_vec();
+    bytes.extend(std::iter::repeat_n(b'a', 16 * 1024));
+    bytes.push(0);
+    fs::write(fixture.path("late.bin"), bytes).unwrap();
+    fs::write(fixture.path("text.txt"), "plain text miss\n").unwrap();
+
+    let output = eg(&[
+        "--debug",
+        "--index=rebuild",
+        "--files-with-matches",
+        "late binary needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(1), output.status.code(), "{stderr}");
+    assert_eq!("", stdout);
+    assert!(
+        stderr.contains("backend prepare+lookup produced 0 candidates"),
+        "late-NUL binary files should not be gram-indexed: {stderr}"
+    );
+}
+
+#[test]
+fn indexed_full_corpus_modes_do_not_synthesize_binary_no_matches() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "full corpus needle\n").unwrap();
+    fs::write(fixture.path("miss.txt"), "plain text miss\n").unwrap();
+    fs::write(fixture.path("blob.bin"), b"binary miss\0tail\n").unwrap();
+
+    let output = eg(&[
+        "--index=rebuild",
+        "--files-without-match",
+        "full corpus needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("miss.txt"), "{stdout}");
+    assert!(!stdout.contains("hit.txt"), "{stdout}");
+    assert!(!stdout.contains("blob.bin"), "{stdout}");
+}
+
+#[test]
+fn indexed_search_rejects_binary_modes() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), "plain text needle\n").unwrap();
+
+    for flag in ["--binary", "--text"] {
+        let output = eg(&[flag, "plain text needle", fixture.root.to_str().unwrap()]);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+
+        assert_eq!(Some(2), output.status.code(), "{flag}: {stderr}");
+        assert!(stderr.contains("binary search flags"), "{flag}: {stderr}");
+        assert!(
+            stderr.contains("does not search binary data"),
+            "{flag}: {stderr}"
+        );
+        assert!(stderr.contains("--no-index"), "{flag}: {stderr}");
+    }
+}
+
+#[test]
+fn indexed_search_honors_reverse_path_sort() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("a.txt"), "sort needle\n").unwrap();
+    fs::write(fixture.path("z.txt"), "sort needle\n").unwrap();
+    for i in 0..10 {
+        fs::write(fixture.path(format!("miss_{i:02}.txt")), "no match here\n").unwrap();
+    }
+
+    let output = eg(&[
+        "--debug",
+        "--index=rebuild",
+        "--sortr",
+        "path",
+        "sort needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("falling back to unindexed scan"),
+        "{stderr}"
+    );
+    let z = stdout.find("z.txt").expect("z.txt in output");
+    let a = stdout.find("a.txt").expect("a.txt in output");
+    assert!(z < a, "{stdout}");
 }
 
 #[test]
@@ -625,7 +904,7 @@ fn indexed_multiple_patterns_match_any_pattern() {
 }
 
 #[test]
-fn indexed_utf16_bom_file_is_forced_into_exact_verification() {
+fn indexed_utf16_bom_file_is_not_searched_as_binary() {
     let fixture = Fixture::new();
     let mut bytes = vec![0xFF, 0xFE];
     for unit in "unicode sparse needle\n".encode_utf16() {
@@ -634,18 +913,22 @@ fn indexed_utf16_bom_file_is_forced_into_exact_verification() {
     fs::write(fixture.path("utf16.txt"), bytes).unwrap();
 
     let output = eg(&[
+        "--debug",
         "--index=rebuild",
+        "--files-with-matches",
         "unicode sparse needle",
         fixture.root.to_str().unwrap(),
     ]);
     let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
 
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
+    assert!(stdout.contains("utf16.txt"), "{stdout}");
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8(output.stderr).unwrap()
+        stderr.contains("backend prepare+lookup produced 1 candidates"),
+        "{stderr}"
     );
-    assert!(stdout.contains("unicode sparse needle"));
+    assert!(!stderr.contains("found binary data"), "{stderr}");
 }
 
 #[test]

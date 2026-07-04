@@ -1,6 +1,26 @@
 /*!
 The main entry point into ripgrep.
 */
+#![allow(
+    clippy::all,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cognitive_complexity,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::missing_const_for_fn,
+    clippy::missing_errors_doc,
+    clippy::nursery,
+    clippy::panic,
+    clippy::pedantic,
+    clippy::restriction,
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::unwrap_used,
+    clippy::wildcard_imports,
+    reason = "eg is a ripgrep-derived CLI/application port; strict clippy is enforced on reusable sparse n-gram crates and targeted eg index tests"
+)]
 
 use std::{io::Write, process::ExitCode};
 

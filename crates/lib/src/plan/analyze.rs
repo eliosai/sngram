@@ -5,22 +5,26 @@
 //! expands `(?i)` into character classes during parsing, so concat-of-classes
 //! reproduces the folded variant sets for free.
 
-use regex_syntax::hir::{Class, Hir, HirKind, Look, Repetition};
+use regex_syntax::{
+    hir::{Class, Hir, HirKind, Look, Repetition},
+    try_is_word_character,
+};
 
 use sngram_types::WeightTable;
 
 use crate::gram::Gram;
 
 use super::info::RegexpInfo;
+use super::query::Query;
 use super::strings::{Order, StringSet};
 
 /// Flush the exact set once it holds more than this many strings.
 ///
 /// Codesearch used 7 so three case-folded letters (2³ = 8 variants) trigger a
 /// flush — all a trigram index can use. Sparse grams keep gaining selectivity
-/// with window length, so case-folded windows are allowed to span about
-/// eight doubling characters before they flush.
-pub const MAX_EXACT: usize = 256;
+/// with window length, and broad finite classes need to stay correlated across
+/// adjacent literals. The byte cap below remains the practical limiter.
+pub const MAX_EXACT: usize = 4096;
 /// Upper bound on prefix and suffix set sizes.
 pub const MAX_SET: usize = 128;
 /// Upper bound on exact-set bytes retained before spilling into the query.
@@ -29,7 +33,10 @@ pub const MAX_SET: usize = 128;
 /// two bytes of boundary context are enough to recover future trigrams. Sparse
 /// grams are variable-length, so retaining exact literals/classes longer lets
 /// later concatenation form precise branch-specific covers before we flush.
-pub const MAX_EXACT_BYTES: usize = 1024;
+/// This admits common two-slot source-code classes such as
+/// `[A-Za-z][A-Za-z]` through a following literal while still rejecting larger
+/// structured IDs before they can explode.
+pub const MAX_EXACT_BYTES: usize = 64 * 1024;
 /// Bytes a prefix/suffix string may grow to before its window is flushed.
 ///
 /// Codesearch flushed at three bytes (one trigram); wider windows cover to
@@ -44,19 +51,25 @@ pub const MAX_CLASS: u64 = 100;
 /// Distinct first- or last-bytes a wide class may keep before that side is
 /// dropped to `{""}` (boundary unknown).
 ///
-/// 64 is the count of UTF-8 continuation bytes (`0x80..=0xBF`): every
-/// multi-byte scalar ends in one, so a class confined to non-ASCII scalars
-/// (like `\p{Greek}`) has at most 64 distinct trailing bytes and this cap
-/// keeps its full continuation-byte suffix. A class whose scalars span ASCII
-/// too — `.` is `[^\n]`, whose first and last bytes cover almost all of
-/// `0x00..=0xFF` — overflows the cap and collapses that side to no
-/// constraint, exactly the bare-`any_char` behaviour from before. A 64-way OR
-/// of covering windows also stays a small fraction of [`PLAN_GRAM_BUDGET`].
-pub const MAX_BOUNDARY_BYTES: usize = 64;
+/// 128 keeps full boundary sets for mixed source-code alphabets (ASCII
+/// letters plus one non-ASCII script) while still collapsing truly arbitrary
+/// byte classes such as `.`/`[\x00-\xff]` to the bare-`any_char` behaviour.
+/// The resulting OR remains a small fraction of [`PLAN_GRAM_BUDGET`].
+pub const MAX_BOUNDARY_BYTES: usize = 128;
 /// Copies of a bounded repetition expanded into an explicit concatenation:
 /// `x{3}` analyzes as `xxx`, `x{5,}` as `xxx` then `x+`. Beyond this many
 /// copies the tail is conservatively folded into the `x+` form.
 pub const MAX_REPEAT_EXPAND: u32 = 4;
+/// Concat-local alternatives preserved before merging back into one summary.
+///
+/// Mixed wide classes such as `[A-Za-z\p{Cyrillic}]` need their finite ASCII
+/// branch kept separate from the wide Unicode branch until surrounding
+/// literals have been crossed in. Otherwise the class's first-byte and
+/// last-byte sets can satisfy opposite sides with different one-byte members.
+/// The cap keeps repeated mixed classes from turning concat analysis into an
+/// exponential expansion; overflow merges branch summaries early, which is a
+/// sound precision fallback.
+const MAX_CONCAT_ALTERNATIVES: usize = 8;
 
 /// Grams the whole plan may accumulate across every flush. Long case-folded
 /// patterns chain hundreds of variant windows whose grams barely overlap;
@@ -76,15 +89,27 @@ pub struct Analyzer<'a> {
     /// flush even on a spent budget (bounded by the flush-cap floor), so a
     /// long pattern's tail is never left entirely unconstrained.
     finalizing: core::cell::Cell<bool>,
+    ctx: PlanContext,
+}
+
+/// Index-format facts the analyzer plans against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlanContext {
+    /// Plan in the folded gram space: every string byte is ASCII-folded.
+    pub fold: bool,
+    /// The index brackets documents with virtual `\n` sentinels, so edge
+    /// anchors may demand terminator-bridging grams.
+    pub line_sentinels: bool,
 }
 
 impl<'a> Analyzer<'a> {
-    /// Bind an analyzer to the weight table used to cover literals.
-    pub const fn new(table: &'a WeightTable) -> Self {
+    /// Bind an analyzer with explicit index-format context.
+    pub const fn with_context(table: &'a WeightTable, ctx: PlanContext) -> Self {
         Self {
             table,
             flushed: core::cell::Cell::new(0),
             finalizing: core::cell::Cell::new(false),
+            ctx,
         }
     }
 
@@ -95,7 +120,7 @@ impl<'a> Analyzer<'a> {
 
     /// Whether the plan still has budget for more covering grams; `spend`
     /// records grams a flush just added.
-    pub fn within_budget(&self) -> bool {
+    pub const fn within_budget(&self) -> bool {
         self.flushed.get() < PLAN_GRAM_BUDGET
     }
 
@@ -105,7 +130,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Whether a flush may proceed: within budget, or finalizing.
-    pub(super) fn may_flush(&self) -> bool {
+    pub(super) const fn may_flush(&self) -> bool {
         self.within_budget() || self.finalizing.get()
     }
 
@@ -115,7 +140,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Grams the plan may still add before hitting [`PLAN_GRAM_BUDGET`].
-    fn budget_left(&self) -> usize {
+    pub(super) const fn budget_left(&self) -> usize {
         PLAN_GRAM_BUDGET.saturating_sub(self.flushed.get())
     }
 
@@ -149,8 +174,8 @@ impl<'a> Analyzer<'a> {
             HirKind::Concat(subs) => return self.fold_concat(subs),
             HirKind::Alternation(subs) => return self.fold_alternate(subs),
             HirKind::Repetition(rep) => return self.repetition(rep),
-            HirKind::Literal(lit) => RegexpInfo::literal(&lit.0),
-            HirKind::Class(cls) => class(cls),
+            HirKind::Literal(lit) => RegexpInfo::literal(&self.plan_bytes(&lit.0)),
+            HirKind::Class(cls) => self.fold_info(class(cls)),
         };
         self.simplify(&mut info, false);
         info
@@ -162,26 +187,191 @@ impl<'a> Analyzer<'a> {
     /// with a byte after the anchor) means the whole concatenation matches
     /// nothing.
     fn fold_concat(&self, subs: &[Hir]) -> RegexpInfo {
-        let mut acc: Option<RegexpInfo> = None;
+        let mut accs: Vec<Option<RegexpInfo>> = vec![None];
         let mut pending: Vec<Look> = Vec::new();
+        let (subs, trailing) = self.split_trailing_anchor(subs);
         for sub in subs {
             if let HirKind::Look(look) = sub.kind() {
-                pending.push(*look);
+                self.note_look(&mut pending, &mut accs, *look);
                 continue;
             }
-            let mut info = self.analyze(sub);
-            if looks_blocked(&mut pending, acc.as_mut(), Some(&mut info)) {
+
+            let variants = self.analyze_variants(sub);
+            if variants.is_empty() {
                 return RegexpInfo::no_match();
             }
-            acc = Some(match acc {
-                None => info,
-                Some(prev) => self.concat(prev, info),
-            });
+            accs = self.concat_variants(accs, &variants, &mut pending);
+            if accs.is_empty() {
+                return RegexpInfo::no_match();
+            }
         }
-        if looks_blocked(&mut pending, acc.as_mut(), None) {
+        let infos = self.finish_concat(accs, trailing.as_ref(), &pending);
+        if infos.is_empty() {
             return RegexpInfo::no_match();
         }
-        acc.unwrap_or_else(RegexpInfo::empty_string)
+        self.merge_infos(infos)
+    }
+
+    /// Analyze a concat child, optionally exposing a small set of alternatives
+    /// that should stay branch-local until more surrounding context is known.
+    fn analyze_variants(&self, hir: &Hir) -> Vec<RegexpInfo> {
+        if let HirKind::Class(cls) = hir.kind()
+            && let Some((exact, wide)) = split_mixed_class(cls)
+        {
+            return vec![self.fold_info(exact), self.fold_info(wide)];
+        }
+        vec![self.analyze(hir)]
+    }
+
+    /// Cross the live concat alternatives with a child's branch variants.
+    fn concat_variants(
+        &self,
+        mut accs: Vec<Option<RegexpInfo>>,
+        variants: &[RegexpInfo],
+        pending: &mut Vec<Look>,
+    ) -> Vec<Option<RegexpInfo>> {
+        if accs.len().saturating_mul(variants.len()) > MAX_CONCAT_ALTERNATIVES {
+            accs = vec![Some(self.merge_accs(accs))];
+        }
+        let pending_at_seam = pending.clone();
+        pending.clear();
+        accs.into_iter()
+            .flat_map(|acc| self.join_variants(acc.as_ref(), variants, &pending_at_seam))
+            .map(Some)
+            .collect()
+    }
+
+    fn join_variants(
+        &self,
+        acc: Option<&RegexpInfo>,
+        variants: &[RegexpInfo],
+        pending: &[Look],
+    ) -> Vec<RegexpInfo> {
+        variants
+            .iter()
+            .filter_map(|variant| self.join_variant(acc, variant, pending))
+            .collect()
+    }
+
+    fn join_variant(
+        &self,
+        acc: Option<&RegexpInfo>,
+        variant: &RegexpInfo,
+        pending: &[Look],
+    ) -> Option<RegexpInfo> {
+        let mut prev = acc.cloned();
+        let mut info = variant.clone();
+        let mut seam_looks = pending.to_vec();
+        if looks_blocked(&mut seam_looks, prev.as_mut(), Some(&mut info)) {
+            return None;
+        }
+        Some(match prev {
+            None => info,
+            Some(prev) => self.concat(prev, info),
+        })
+    }
+
+    fn finish_concat(
+        &self,
+        accs: Vec<Option<RegexpInfo>>,
+        trailing: Option<&RegexpInfo>,
+        pending: &[Look],
+    ) -> Vec<RegexpInfo> {
+        accs.into_iter()
+            .filter_map(|acc| self.finish_concat_branch(acc, trailing, pending))
+            .collect()
+    }
+
+    fn finish_concat_branch(
+        &self,
+        acc: Option<RegexpInfo>,
+        trailing: Option<&RegexpInfo>,
+        pending: &[Look],
+    ) -> Option<RegexpInfo> {
+        let mut info = join_trailing(acc, trailing.cloned(), |prev, term| self.concat(prev, term))
+            .unwrap_or_else(RegexpInfo::empty_string);
+        let mut trailing_looks = pending.to_vec();
+        if looks_blocked(&mut trailing_looks, Some(&mut info), None) {
+            return None;
+        }
+        Some(info)
+    }
+
+    /// Merge partially built concat alternatives after flushing each branch's
+    /// boundary state into its own query, preserving soundness while bounding
+    /// the number of live branches.
+    fn merge_accs(&self, accs: Vec<Option<RegexpInfo>>) -> RegexpInfo {
+        let infos = accs
+            .into_iter()
+            .map(|acc| acc.unwrap_or_else(RegexpInfo::empty_string))
+            .collect();
+        self.merge_infos(infos)
+    }
+
+    /// Alternation over already-built branch summaries.
+    fn merge_infos(&self, mut infos: Vec<RegexpInfo>) -> RegexpInfo {
+        let mut info = infos.pop().unwrap_or_else(RegexpInfo::no_match);
+        self.flush_sets(&mut info);
+        while let Some(mut branch) = infos.pop() {
+            self.flush_sets(&mut branch);
+            info = self.alternate(branch, info);
+        }
+        info
+    }
+
+    /// A leading start anchor becomes its terminator bytes when the index
+    /// carries line sentinels: every `^foo` occurrence in the scanned stream
+    /// is preceded by a real or virtual terminator, so the plan may demand
+    /// the bridging grams of `\nfoo` — the anchored-literal FP killer.
+    /// Anything else stays a pending look for junction pruning
+    fn note_look(&self, pending: &mut Vec<Look>, accs: &mut [Option<RegexpInfo>], look: Look) {
+        if self.ctx.line_sentinels
+            && accs.len() == 1
+            && accs.first().is_some_and(Option::is_none)
+            && let Some(bytes) = start_terminators(look)
+        {
+            if let Some(acc) = accs.first_mut() {
+                *acc = Some(terminator_info(bytes));
+            }
+            return;
+        }
+        pending.push(look);
+    }
+
+    /// Split off a trailing end anchor as its terminator info under sentinels
+    fn split_trailing_anchor<'h>(&self, subs: &'h [Hir]) -> (&'h [Hir], Option<RegexpInfo>) {
+        if !self.ctx.line_sentinels {
+            return (subs, None);
+        }
+        let Some((last, head)) = subs.split_last() else {
+            return (subs, None);
+        };
+        let HirKind::Look(look) = last.kind() else {
+            return (subs, None);
+        };
+        end_terminators(*look).map_or((subs, None), |bytes| (head, Some(terminator_info(bytes))))
+    }
+
+    /// ASCII-fold bytes when planning in the folded space
+    fn plan_bytes(&self, bytes: &[u8]) -> Vec<u8> {
+        if self.ctx.fold {
+            bytes.iter().map(u8::to_ascii_lowercase).collect()
+        } else {
+            bytes.to_vec()
+        }
+    }
+
+    /// Fold a class node's string state into the folded space
+    fn fold_info(&self, mut info: RegexpInfo) -> RegexpInfo {
+        if !self.ctx.fold {
+            return info;
+        }
+        if let Some(exact) = info.exact.take() {
+            info.exact = Some(exact.fold_ascii());
+        }
+        info.prefix = info.prefix.fold_ascii();
+        info.suffix = info.suffix.fold_ascii();
+        info
     }
 
     /// `x?`, `x*`, `x+`, `x{n,m}`: expand what is bounded, collapse the rest.
@@ -203,6 +393,10 @@ impl<'a> Analyzer<'a> {
     fn repetition(&self, rep: &Repetition) -> RegexpInfo {
         let (min, max) = (rep.min, rep.max);
         if min == 0 && max.is_none() {
+            let base = self.analyze(&rep.sub);
+            if let Some(info) = demote_star(base) {
+                return info;
+            }
             return RegexpInfo::any_match(); // `x*`, `x{0,}`
         }
         let base = self.analyze(&rep.sub);
@@ -389,6 +583,22 @@ fn demote_plus(mut info: RegexpInfo) -> RegexpInfo {
     info
 }
 
+/// `x*` over a finite, non-empty exact set keeps bounded edge context while
+/// still allowing the empty match through `can_empty`.
+fn demote_star(mut info: RegexpInfo) -> Option<RegexpInfo> {
+    let mut exact = info.exact.take()?;
+    exact.retain(|s| !s.as_bytes().is_empty());
+    if exact.is_empty() {
+        return None;
+    }
+    info.can_empty = true;
+    info.exact = None;
+    info.prefix = exact.clone();
+    info.suffix = exact.clone();
+    info.plus_base = Some(exact);
+    Some(info)
+}
+
 /// The exact language `⋃ₖ₌ₘᵢₙᵐᵃˣ Eᵏ` of a closed repetition of the exact set
 /// `E`, or `None` if it would exceed [`MAX_EXACT`] strings or
 /// [`MAX_EXACT_BYTES`] bytes at any point while it is built.
@@ -431,30 +641,77 @@ fn looks_blocked(
     mut right: Option<&mut RegexpInfo>,
 ) -> bool {
     for look in pending.drain(..) {
-        let left_bytes = left.as_deref().and_then(last_bytes);
-        let right_bytes = right.as_deref().and_then(first_bytes);
-        if let (Some(info), Some(lb)) = (right.as_deref_mut(), &left_bytes) {
-            let keep = |b: u8| lb.iter().any(|&l| look_possible(look, Some(l), Some(b)));
+        let left_chars = left.as_deref().and_then(last_boundaries);
+        let right_chars = right.as_deref().and_then(first_boundaries);
+        if let (Some(info), Some(lb)) = (right.as_deref_mut(), &left_chars) {
+            let keep = |b: Option<Boundary>| lb.iter().any(|&l| look_possible(look, Some(l), b));
             if filter_first_members(info, keep) {
                 return true;
             }
         }
-        if let (Some(info), Some(rb)) = (left.as_deref_mut(), &right_bytes) {
-            let keep = |b: u8| rb.iter().any(|&r| look_possible(look, Some(b), Some(r)));
+        if let (Some(info), Some(rb)) = (left.as_deref_mut(), &right_chars) {
+            let keep = |b: Option<Boundary>| rb.iter().any(|&r| look_possible(look, b, Some(r)));
             if filter_last_members(info, keep) {
                 return true;
             }
         }
-        if !cross_possible(look, left_bytes.as_deref(), right_bytes.as_deref()) {
+        if !cross_possible(look, left_chars.as_deref(), right_chars.as_deref()) {
             return true;
         }
     }
     false
 }
 
-/// Whether `look` can hold for at least one adjacent byte pair; a `None`
-/// side stands for every possible byte (or the haystack edge).
-fn cross_possible(look: Look, left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
+/// Concat the trailing anchor's terminator info onto the accumulator
+fn join_trailing(
+    acc: Option<RegexpInfo>,
+    trailing: Option<RegexpInfo>,
+    concat: impl FnOnce(RegexpInfo, RegexpInfo) -> RegexpInfo,
+) -> Option<RegexpInfo> {
+    match (acc, trailing) {
+        (acc, None) => acc,
+        (None, Some(term)) => Some(term),
+        (Some(prev), Some(term)) => Some(concat(prev, term)),
+    }
+}
+
+/// The terminator bytes a start anchor guarantees on its left, under sentinels
+const fn start_terminators(look: Look) -> Option<&'static [u8]> {
+    match look {
+        Look::Start | Look::StartLF => Some(b"\n"),
+        Look::StartCRLF => Some(b"\n\r"),
+        _ => None,
+    }
+}
+
+/// The terminator bytes an end anchor guarantees on its right, under sentinels
+const fn end_terminators(look: Look) -> Option<&'static [u8]> {
+    match look {
+        Look::End | Look::EndLF => Some(b"\n"),
+        Look::EndCRLF => Some(b"\n\r"),
+        _ => None,
+    }
+}
+
+/// An exact one-byte-per-terminator string set standing in for an anchor
+fn terminator_info(bytes: &'static [u8]) -> RegexpInfo {
+    let mut set = StringSet::new();
+    for &b in bytes {
+        set.push(Gram::from(&[b][..]));
+    }
+    RegexpInfo {
+        can_empty: false,
+        exact: Some(set),
+        prefix: StringSet::new(),
+        suffix: StringSet::new(),
+        plus_base: None,
+        match_: Query::all(),
+    }
+}
+
+/// Whether `look` can hold for at least one adjacent boundary pair; a `None`
+/// side stands for unknown context (or the haystack edge).
+fn cross_possible(look: Look, left: Option<&[Boundary]>, right: Option<&[Boundary]>) -> bool {
     match (left, right) {
         (None, None) => true,
         (Some(lb), None) => lb.iter().any(|&l| look_possible(look, Some(l), None)),
@@ -469,7 +726,7 @@ fn cross_possible(look: Look, left: Option<&[u8]>, right: Option<&[u8]>) -> bool
 /// returns true when a known non-empty set filtered to nothing (no match
 /// can pass the junction). Empty-string members have no first byte at this
 /// junction and always survive.
-fn filter_first_members(info: &mut RegexpInfo, keep: impl Fn(u8) -> bool) -> bool {
+fn filter_first_members(info: &mut RegexpInfo, keep: impl Fn(Option<Boundary>) -> bool) -> bool {
     let set = match info.exact.as_mut() {
         Some(exact) => exact,
         None => &mut info.prefix,
@@ -477,12 +734,12 @@ fn filter_first_members(info: &mut RegexpInfo, keep: impl Fn(u8) -> bool) -> boo
     if set.is_empty() {
         return false;
     }
-    set.retain(|m| m.as_bytes().first().is_none_or(|&b| keep(b)));
+    set.retain(|m| keep(first_boundary(m.as_bytes())));
     set.is_empty()
 }
 
 /// Symmetric to [`filter_first_members`] for exact/suffix LAST bytes.
-fn filter_last_members(info: &mut RegexpInfo, keep: impl Fn(u8) -> bool) -> bool {
+fn filter_last_members(info: &mut RegexpInfo, keep: impl Fn(Option<Boundary>) -> bool) -> bool {
     let set = match info.exact.as_mut() {
         Some(exact) => exact,
         None => &mut info.suffix,
@@ -490,62 +747,138 @@ fn filter_last_members(info: &mut RegexpInfo, keep: impl Fn(u8) -> bool) -> bool
     if set.is_empty() {
         return false;
     }
-    set.retain(|m| m.as_bytes().last().is_none_or(|&b| keep(b)));
+    set.retain(|m| keep(last_boundary(m.as_bytes())));
     set.is_empty()
 }
 
-/// The complete set of bytes a match of `info` can end with, or `None` when
-/// unknown. The suffix (or exact) set holds a string every match ends with,
-/// so the members' last bytes are exhaustive; an empty-able match has no
-/// final byte to speak of.
-fn last_bytes(info: &RegexpInfo) -> Option<Vec<u8>> {
+/// The complete set of boundary characters a match of `info` can end with,
+/// or `None` when unknown. The suffix (or exact) set holds a string every
+/// match ends with, so the members' last characters are exhaustive; an
+/// empty-able match has no final character to speak of.
+fn last_boundaries(info: &RegexpInfo) -> Option<Vec<Boundary>> {
     if info.can_empty {
         return None;
     }
     let set = info.exact.as_ref().unwrap_or(&info.suffix);
-    boundary_bytes(set.as_slice().iter().map(|s| s.as_bytes().last()))
+    boundaries(set.as_slice().iter().map(|s| last_boundary(s.as_bytes())))
 }
 
-/// The complete set of bytes a match of `info` can start with; see
-/// [`last_bytes`].
-fn first_bytes(info: &RegexpInfo) -> Option<Vec<u8>> {
+/// The complete set of boundary characters a match of `info` can start with;
+/// see [`last_boundaries`].
+fn first_boundaries(info: &RegexpInfo) -> Option<Vec<Boundary>> {
     if info.can_empty {
         return None;
     }
     let set = info.exact.as_ref().unwrap_or(&info.prefix);
-    boundary_bytes(set.as_slice().iter().map(|s| s.as_bytes().first()))
+    boundaries(set.as_slice().iter().map(|s| first_boundary(s.as_bytes())))
 }
 
-fn boundary_bytes<'a>(members: impl Iterator<Item = Option<&'a u8>>) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
-    for byte in members {
-        bytes.push(*byte?);
+fn boundaries(members: impl Iterator<Item = Option<Boundary>>) -> Option<Vec<Boundary>> {
+    let mut out = Vec::new();
+    for boundary in members {
+        out.push(boundary?);
     }
-    if bytes.is_empty() { None } else { Some(bytes) }
+    if out.is_empty() { None } else { Some(out) }
 }
 
-/// Whether `look` can hold between one concrete byte pair. `None` means
-/// the byte is absent (pattern edge next to the haystack boundary) or
-/// unknown; unknown keeps the assertion possible. Sound to over-report:
-/// a spurious `true` only costs candidates.
-fn look_possible(look: Look, left: Option<u8>, right: Option<u8>) -> bool {
+/// The adjacent byte plus any scalar-level wordness proven from a complete
+/// UTF-8 character at a regex boundary.
+#[derive(Clone, Copy)]
+struct Boundary {
+    byte: u8,
+    ascii_word: bool,
+    unicode_word: Option<bool>,
+}
+
+fn first_boundary(bytes: &[u8]) -> Option<Boundary> {
+    let byte = *bytes.first()?;
+    Some(Boundary {
+        byte,
+        ascii_word: byte.is_ascii() && is_word_byte(byte),
+        unicode_word: first_char(bytes).and_then(unicode_word),
+    })
+}
+
+fn last_boundary(bytes: &[u8]) -> Option<Boundary> {
+    let byte = *bytes.last()?;
+    Some(Boundary {
+        byte,
+        ascii_word: byte.is_ascii() && is_word_byte(byte),
+        unicode_word: last_char(bytes).and_then(unicode_word),
+    })
+}
+
+fn first_char(bytes: &[u8]) -> Option<char> {
+    let byte = *bytes.first()?;
+    let len = utf8_len(byte)?;
+    let slice = bytes.get(..len)?;
+    let text = core::str::from_utf8(slice).ok()?;
+    text.chars().next()
+}
+
+fn last_char(bytes: &[u8]) -> Option<char> {
+    let mut start = bytes.len().checked_sub(1)?;
+    while start > 0
+        && bytes
+            .get(start)
+            .is_some_and(|b| b & 0b1100_0000 == 0b1000_0000)
+    {
+        start -= 1;
+    }
+    let slice = bytes.get(start..)?;
+    let text = core::str::from_utf8(slice).ok()?;
+    let mut chars = text.chars();
+    let ch = chars.next()?;
+    if chars.next().is_none() {
+        Some(ch)
+    } else {
+        None
+    }
+}
+
+const fn utf8_len(byte: u8) -> Option<usize> {
+    match byte {
+        0x00..=0x7F => Some(1),
+        0xC2..=0xDF => Some(2),
+        0xE0..=0xEF => Some(3),
+        0xF0..=0xF4 => Some(4),
+        _ => None,
+    }
+}
+
+fn unicode_word(ch: char) -> Option<bool> {
+    try_is_word_character(ch).ok()
+}
+
+/// Whether `look` can hold between one concrete boundary pair. `None` means
+/// the boundary is absent or unknown; unknown keeps the assertion possible.
+/// Sound to over-report: a spurious `true` only costs candidates.
+fn look_possible(look: Look, left: Option<Boundary>, right: Option<Boundary>) -> bool {
     match look {
         // Text anchors: no byte may sit on the anchored side.
         Look::Start => left.is_none(),
         Look::End => right.is_none(),
         // Line anchors: the adjacent byte, if any, must be a terminator.
-        Look::StartLF => left.is_none_or(|b| b == b'\n'),
-        Look::EndLF => right.is_none_or(|b| b == b'\n'),
-        Look::StartCRLF => left.is_none_or(|b| b == b'\n' || b == b'\r'),
-        Look::EndCRLF => right.is_none_or(|b| b == b'\n' || b == b'\r'),
-        // Word boundaries: ASCII wordness must differ (or agree for the
-        // negation). Non-ASCII bytes have unknown wordness; a missing byte
-        // is a non-word boundary side.
-        Look::WordAscii | Look::WordUnicode => match (word_of(left), word_of(right)) {
+        Look::StartLF => left.is_none_or(|b| b.byte == b'\n'),
+        Look::EndLF => right.is_none_or(|b| b.byte == b'\n'),
+        Look::StartCRLF => left.is_none_or(|b| b.byte == b'\n' || b.byte == b'\r'),
+        Look::EndCRLF => right.is_none_or(|b| b.byte == b'\n' || b.byte == b'\r'),
+        // Word boundaries: wordness must differ (or agree for the negation).
+        // Unicode wordness is used only when a complete adjacent scalar is
+        // known; invalid/truncated UTF-8 stays unknown.
+        Look::WordAscii => match (ascii_word_of(left), ascii_word_of(right)) {
             (Some(l), Some(r)) => l != r,
             _ => true,
         },
-        Look::WordAsciiNegate | Look::WordUnicodeNegate => match (word_of(left), word_of(right)) {
+        Look::WordAsciiNegate => match (ascii_word_of(left), ascii_word_of(right)) {
+            (Some(l), Some(r)) => l == r,
+            _ => true,
+        },
+        Look::WordUnicode => match (unicode_word_of(left), unicode_word_of(right)) {
+            (Some(l), Some(r)) => l != r,
+            _ => true,
+        },
+        Look::WordUnicodeNegate => match (unicode_word_of(left), unicode_word_of(right)) {
             (Some(l), Some(r)) => l == r,
             _ => true,
         },
@@ -553,13 +886,17 @@ fn look_possible(look: Look, left: Option<u8>, right: Option<u8>) -> bool {
     }
 }
 
-/// The ASCII wordness of an adjacent byte; `None` for unknown — a missing
-/// byte (the pattern edge may abut arbitrary haystack context) or a
-/// non-ASCII byte.
-const fn word_of(byte: Option<u8>) -> Option<bool> {
-    match byte {
-        Some(b) if b.is_ascii() => Some(is_word_byte(b)),
-        _ => None,
+const fn ascii_word_of(boundary: Option<Boundary>) -> Option<bool> {
+    match boundary {
+        Some(b) => Some(b.ascii_word),
+        None => None,
+    }
+}
+
+const fn unicode_word_of(boundary: Option<Boundary>) -> Option<bool> {
+    match boundary {
+        Some(b) => b.unicode_word,
+        None => None,
     }
 }
 
@@ -578,7 +915,11 @@ const fn is_word_byte(b: u8) -> bool {
 /// side whose byte set is too large falls back to `{""}` (boundary unknown),
 /// leaving that edge as unconstraining as before.
 fn class(cls: &Class) -> RegexpInfo {
-    match class_set(cls) {
+    info_from_class_set(class_set(cls))
+}
+
+fn info_from_class_set(set: ClassSet) -> RegexpInfo {
+    match set {
         ClassSet::Empty => RegexpInfo::no_match(),
         ClassSet::Wide { first, last } => RegexpInfo {
             prefix: first,
@@ -590,6 +931,58 @@ fn class(cls: &Class) -> RegexpInfo {
             ..RegexpInfo::blank()
         },
     }
+}
+
+/// Split a mixed-width Unicode class into a small exact ASCII branch and a
+/// residual non-ASCII branch. This keeps the ASCII branch's first/last byte
+/// correlation until neighbouring literals are crossed, avoiding a merged
+/// wide-class plan that can use different class bytes on each side.
+fn split_mixed_class(cls: &Class) -> Option<(RegexpInfo, RegexpInfo)> {
+    let ranges = unicode_ranges(cls)?;
+    if range_count(&ranges) <= MAX_CLASS {
+        return None;
+    }
+    let (ascii, non_ascii) = partition_ascii_ranges(&ranges);
+    let ascii_count = range_count(&ascii);
+    if ascii_count == 0 || ascii_count > MAX_CLASS || non_ascii.is_empty() {
+        return None;
+    }
+    let ascii = info_from_class_set(enumerate(&ascii, encode_char, utf8_boundary_bytes));
+    let non_ascii = info_from_class_set(enumerate(&non_ascii, encode_char, utf8_boundary_bytes));
+    Some((ascii, non_ascii))
+}
+
+type ScalarRange = (u32, u32);
+type ScalarRanges = Vec<ScalarRange>;
+
+fn unicode_ranges(cls: &Class) -> Option<ScalarRanges> {
+    let Class::Unicode(cu) = cls else {
+        return None;
+    };
+    Some(
+        cu.ranges()
+            .iter()
+            .map(|r| (r.start() as u32, r.end() as u32))
+            .collect(),
+    )
+}
+
+fn partition_ascii_ranges(ranges: &[ScalarRange]) -> (ScalarRanges, ScalarRanges) {
+    let mut ascii = Vec::new();
+    let mut non_ascii = Vec::new();
+    for &(lo, hi) in ranges {
+        if lo <= 0x7F {
+            ascii.push((lo, hi.min(0x7F)));
+        }
+        if hi >= 0x80 {
+            non_ascii.push((lo.max(0x80), hi));
+        }
+    }
+    (ascii, non_ascii)
+}
+
+fn range_count(ranges: &[(u32, u32)]) -> u64 {
+    ranges.iter().map(|&(lo, hi)| u64::from(hi - lo) + 1).sum()
 }
 
 /// The outcome of enumerating a character class.
@@ -816,9 +1209,14 @@ mod tests {
         reason = "tests assert by panicking; UTF-8 encodings are 1..=4 bytes"
     )]
 
-    use regex_syntax::hir::{Class, HirKind};
+    use regex_syntax::hir::{Class, HirKind, Look};
 
-    use super::{ClassSet, StringSet, class_set, utf8_boundary_bytes};
+    use crate::gram::Gram;
+
+    use super::{
+        ByteSet, ClassSet, MAX_BOUNDARY_BYTES, StringSet, bounded_power_union, class_set,
+        first_boundary, last_boundary, look_possible, utf8_boundary_bytes,
+    };
 
     /// A boundary set accepts `byte` iff it is a one-byte member, or it is the
     /// `{""}` (unknown) sentinel that accepts anything.
@@ -846,6 +1244,15 @@ mod tests {
             .iter()
             .map(|r| (r.start() as u32, r.end() as u32))
             .collect()
+    }
+
+    fn set(items: &[&[u8]]) -> StringSet {
+        let mut set = StringSet::new();
+        for item in items {
+            set.push(Gram::from(*item));
+        }
+        set.clean(super::Order::Prefix);
+        set
     }
 
     /// Assert `cp`'s actual UTF-8 first and last bytes lie in the boundary sets.
@@ -908,5 +1315,47 @@ mod tests {
         assert!(!first.as_slice().iter().any(|g| g.as_bytes().is_empty()));
         assert!(!last.as_slice().iter().any(|g| g.as_bytes().is_empty()));
         assert!(accepts(&last, 0xB1)); // last byte of U+03B1 (α)
+    }
+
+    #[test]
+    fn bounded_power_union_expands_closed_exact_language() {
+        let base = set(&[b"ab", b"cd"]);
+        let actual = bounded_power_union(&base, 1, 2).expect("small exact language");
+        let expected = set(&[b"ab", b"cd", b"abab", b"abcd", b"cdab", b"cdcd"]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn bounded_power_union_rejects_explosive_exact_language() {
+        let mut base = StringSet::new();
+        for byte in b'a'..=b'q' {
+            base.push(Gram::from(&[byte][..]));
+        }
+        base.clean(super::Order::Prefix);
+        assert!(bounded_power_union(&base, 0, 4).is_none());
+    }
+
+    #[test]
+    fn overlarge_boundary_byte_set_collapses_to_unknown_member() {
+        let mut bytes = ByteSet::new();
+        let last = u8::try_from(MAX_BOUNDARY_BYTES).expect("boundary cap fits in u8");
+        bytes.mark_range(0, last);
+        let set = bytes.into_boundary();
+        assert_eq!(set, StringSet::of(Gram::empty()));
+    }
+
+    #[test]
+    fn unicode_word_boundary_uses_complete_scalars_only() {
+        let word_left = last_boundary("α".as_bytes());
+        let word_right = first_boundary("β".as_bytes());
+        let space_right = first_boundary(b" ");
+        let incomplete_right = first_boundary(&[0xCE]);
+
+        assert!(!look_possible(Look::WordUnicode, word_left, word_right));
+        assert!(look_possible(Look::WordUnicode, word_left, space_right));
+        assert!(
+            look_possible(Look::WordUnicode, word_left, incomplete_right),
+            "truncated UTF-8 must stay possible instead of proving no match"
+        );
     }
 }

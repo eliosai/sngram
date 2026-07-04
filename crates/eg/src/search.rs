@@ -265,6 +265,15 @@ impl<W: WriteColor> SearchWorker<W> {
         }
     }
 
+    /// Emit the "no match" result for a path without reading it.
+    ///
+    /// Indexed search knows, by soundness, that a file the index ruled out has
+    /// no matches. Searching an empty reader drives the printer to produce the
+    /// exact zero-count or without-match output for that path, at no I/O cost.
+    pub(crate) fn search_absent(&mut self, path: &Path) -> io::Result<SearchResult> {
+        self.search_reader(path, &mut io::empty())
+    }
+
     /// Return a mutable reference to the underlying printer.
     pub(crate) fn printer(&mut self) -> &mut Printer<W> {
         &mut self.printer

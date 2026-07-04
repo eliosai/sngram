@@ -23,3 +23,15 @@ pub enum QueryError {
     #[error("invalid regex: {0}")]
     InvalidRegex(#[from] Box<regex_syntax::Error>),
 }
+
+/// Errors from [`crate::try_scan`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ScanError {
+    /// Content exceeds the 4 GiB whole-slice scan limit.
+    #[error("content length {len} exceeds the 4 GiB scan limit; use StreamScanner")]
+    TooLarge {
+        /// Content length in bytes.
+        len: usize,
+    },
+}

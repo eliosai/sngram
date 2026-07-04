@@ -232,7 +232,7 @@ pub(crate) enum GenerateMode {
 }
 
 /// Indicates how ripgrep should treat binary data.
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum BinaryMode {
     /// Automatically determine the binary mode to use. Essentially, when
     /// a file is searched explicitly, then it will be searched using the

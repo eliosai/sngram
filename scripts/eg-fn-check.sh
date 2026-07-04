@@ -31,15 +31,19 @@ total=0
 skipped=0
 
 while IFS=$'\t' read -r label pattern flags; do
-  [[ -n "${label:-}" && -n "${pattern:-}" ]] || continue
+  [[ -n "${label:-}" ]] || continue
+  # A row with an empty pattern column carries its pattern in flags (e.g. -e).
+  [[ -n "${pattern:-}" || -n "${flags:-}" ]] || continue
   case $label in \#*) continue ;; esac
 
+  if [[ -n "${pattern:-}" ]]; then query=("$pattern" "$ROOT"); else query=("$ROOT"); fi
+
   # shellcheck disable=SC2086
-  "$EG_BIN" --files-with-matches ${flags:-} -- "$pattern" "$ROOT" >"$WORKDIR/indexed.raw" 2>"$WORKDIR/err"
+  "$EG_BIN" --files-with-matches ${flags:-} -- "${query[@]}" >"$WORKDIR/indexed.raw" 2>"$WORKDIR/err"
   status=$?
   sort "$WORKDIR/indexed.raw" >"$WORKDIR/indexed"
   if [[ $status -ne 0 && $status -ne 1 ]]; then
-    if grep -q 'use --no-index' "$WORKDIR/err"; then
+    if grep -q -- '--no-index' "$WORKDIR/err"; then
       skipped=$((skipped + 1))
       continue
     fi
@@ -49,7 +53,7 @@ while IFS=$'\t' read -r label pattern flags; do
   fi
 
   # shellcheck disable=SC2086
-  "$EG_BIN" --no-index --files-with-matches ${flags:-} -- "$pattern" "$ROOT" 2>/dev/null | sort >"$WORKDIR/scan"
+  "$EG_BIN" --no-index --files-with-matches ${flags:-} -- "${query[@]}" 2>/dev/null | sort >"$WORKDIR/scan"
 
   total=$((total + 1))
   missed=$(comm -13 "$WORKDIR/indexed" "$WORKDIR/scan")

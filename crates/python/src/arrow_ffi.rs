@@ -72,6 +72,10 @@ fn count_stream(py: Python<'_>, data: &Bound<'_, PyAny>, tally: &mut LocalTally)
 }
 
 /// Consume a single `__arrow_c_array__` (a RecordBatch-shaped struct array).
+#[allow(
+    clippy::too_many_lines,
+    reason = "Arrow C data capsules require schema and array extraction in one ownership block"
+)]
 fn count_array(py: Python<'_>, data: &Bound<'_, PyAny>, tally: &mut LocalTally) -> PyResult<()> {
     let pair: Bound<'_, PyTuple> = data
         .call_method0("__arrow_c_array__")?

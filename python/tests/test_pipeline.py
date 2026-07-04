@@ -1,6 +1,7 @@
 """Pipeline end-to-end over local parquet fixtures — no network."""
 
 import asyncio
+import builtins
 from pathlib import Path
 
 import pyarrow as pa
@@ -47,6 +48,34 @@ def test_units():
     assert parse_size("1gb") == 1_000_000_000
     assert mint_label(5_000_000_000_000) == "5tb"
     assert fmt_bytes(2_500_000) == "2.50 MB"
+
+
+def test_local_data_files_resolve_without_datasets(tmp_path: Path, monkeypatch):
+    fam = local_family(tmp_path, "alpha", ["hello"], files=2)
+    trainer = Trainer(
+        families=[fam],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "datasets":
+            raise AssertionError("local parquet globs must not import datasets")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    files = trainer._load_source(fam.sources[0])
+
+    assert len(files) == 2
+    assert files == sorted(files)
+    trainer.events.close()
 
 
 def test_full_run_counts_everything_and_mints(tmp_path: Path):

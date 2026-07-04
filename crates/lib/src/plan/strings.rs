@@ -43,15 +43,31 @@ impl StringSet {
         self.0.retain(f);
     }
 
+    /// The ASCII-case-folded image of the set, deduplicated.
+    #[must_use]
+    pub fn fold_ascii(&self) -> Self {
+        let mut folded: Vec<Gram> = self
+            .0
+            .iter()
+            .map(|s| {
+                let bytes: Vec<u8> = s.as_bytes().iter().map(u8::to_ascii_lowercase).collect();
+                Gram::from(bytes.as_slice())
+            })
+            .collect();
+        folded.sort_unstable();
+        folded.dedup();
+        Self(folded)
+    }
+
     /// Number of strings in the set.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 
     /// Whether the set is empty.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 

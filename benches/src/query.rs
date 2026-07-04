@@ -4,7 +4,8 @@
     clippy::missing_panics_doc,
     clippy::indexing_slicing,
     clippy::cast_possible_truncation,
-    clippy::unwrap_used
+    clippy::unwrap_used,
+    clippy::expect_used
 )]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -62,6 +63,15 @@ const PATTERNS: &[(&str, &str)] = &[
     (
         "hex_uuid",
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    ),
+    ("anchor_indent_define", r"^[ \t]*#define CONFIG"),
+    ("anchor_trailing_ws", r"EXPORT_SYMBOL\(\w+\);[ \t]*$"),
+    ("wide_mixed_unicode_left", r"[A-Za-z\p{Greek}]term_var"),
+    ("wide_mixed_branch_mix", r"read[A-Za-z\p{Cyrillic}]lock"),
+    ("unicode_word_boundary", r"\bµs\b"),
+    (
+        "uuid_hex",
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
     ),
 ];
 

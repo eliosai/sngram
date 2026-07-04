@@ -21,7 +21,7 @@ use super::strings::{Order, StringSet};
 /// Bound on the seam cross product flushed at a concat boundary. Beyond it
 /// the boundary strings are truncated back toward codesearch's two-byte
 /// stubs, trading precision for a bounded plan.
-const MAX_SEAM_CROSS: usize = 128;
+const MAX_SEAM_CROSS: usize = 2048;
 
 /// Most strings ever covered in one flush, and the largest exact cross
 /// product built in one concat step. Case-folded text doubles per character
@@ -55,16 +55,7 @@ impl Analyzer<'_> {
         } else {
             xy.prefix = concat_prefix(&x, &y);
             xy.suffix = concat_suffix(&x, &y);
-            // Tighten the seam where a pure `E+` run abuts its neighbour. The
-            // result's own `plus_base` stays `None` (blank): the tightened
-            // window is baked into `prefix`/`suffix` here, so a later concat
-            // crosses it normally. Both may fire (`a+b+`), independently.
-            if let Some(e) = y.plus_base.as_ref() {
-                xy.suffix = plus_suffix(&x, e);
-            }
-            if let Some(e) = x.plus_base.as_ref() {
-                xy.prefix = plus_prefix(&y, e);
-            }
+            apply_plus_hints(&mut xy, &x, &y);
         }
         xy.match_ = x.match_.and(y.match_);
         if let Some(boundary) = boundary {
@@ -109,7 +100,7 @@ impl Analyzer<'_> {
     /// set (and the flush that follows it) in a single step. The full
     /// windows accumulated so far are covered before any byte is dropped.
     fn bound_crosses(&self, x: &mut RegexpInfo, y: &mut RegexpInfo) {
-        let over = |a: usize, b: usize| a.saturating_mul(b) > MAX_FLUSH_SET;
+        let over = |a: usize, b: usize| a.saturating_mul(b) > MAX_EXACT;
         match (&x.exact, &y.exact) {
             (Some(xe), Some(ye)) if over(xe.len(), ye.len()) => self.flush_spill(x),
             (Some(xe), None) if over(xe.len(), y.prefix.len()) => self.flush_spill(x),
@@ -162,14 +153,21 @@ impl Analyzer<'_> {
             return q;
         }
         let cap = self.flush_cap();
-        if set.len() <= MAX_MAXIMAL_COVER_BRANCHES {
-            if let Some(covers) = self.branch_covers(set, false, cap) {
-                return self.or_covers(q, covers);
-            }
+        if set.len() <= MAX_MAXIMAL_COVER_BRANCHES
+            && let Some(covers) = self.branch_covers(set, false, cap)
+        {
+            return self.or_covers(q, covers);
         }
         if let Some(covers) = self.branch_covers(set, true, cap) {
             return self.or_covers(q, covers);
         }
+        if let Some(grams) = self.branch_single_covers(set, self.budget_left()) {
+            return self.and_or_grams(q, grams);
+        }
+        self.truncated_cover(q, set, order, cap)
+    }
+
+    fn truncated_cover(&self, q: Query, set: &StringSet, order: Order, cap: usize) -> Query {
         let mut fitted = set.clone();
         while fitted.max_len() > MIN_LEN {
             let keep = fitted.max_len() - 1;
@@ -206,6 +204,42 @@ impl Analyzer<'_> {
             covers.push(grams);
         }
         Some(covers)
+    }
+
+    /// One selective gram per string in a large exact/prefix/suffix set.
+    ///
+    /// Full covers are strongest, but class products such as
+    /// `[A-Za-z][A-Za-z]` can have thousands of branches. Truncating those
+    /// branches before recording any gram loses the variable-slot
+    /// correlation. Keeping the longest guaranteed gram from each branch is
+    /// still sound, fits the remaining global budget, and preserves a
+    /// correlated middle window for broad finite classes and numeric runs.
+    fn branch_single_covers(&self, set: &StringSet, cap: usize) -> Option<StringSet> {
+        if set.len() > cap {
+            return None;
+        }
+        let mut grams = StringSet::new();
+        for s in set.as_slice() {
+            grams.push(self.single_cover(s.as_bytes())?);
+        }
+        grams.clean(Order::Prefix);
+        Some(grams)
+    }
+
+    /// The strongest single guaranteed gram for a branch: longest first,
+    /// then lexicographic for stable plans.
+    fn single_cover(&self, s: &[u8]) -> Option<Gram> {
+        self.cover_set(s).into_vec().into_iter().max_by(|a, b| {
+            a.len()
+                .cmp(&b.len())
+                .then_with(|| a.as_bytes().cmp(b.as_bytes()))
+        })
+    }
+
+    fn and_or_grams(&self, q: Query, grams: StringSet) -> Query {
+        let spent = grams.len();
+        self.spend(spent);
+        q.and(Query::grams(Op::Or, grams))
     }
 
     /// AND into `q` the OR over already-built branch covers, spending the
@@ -284,15 +318,9 @@ impl Analyzer<'_> {
             put_set(info, order, t);
             return;
         }
-        if t.len() > MAX_FLUSH_SET {
-            // A wide class ballooned the set in one step; covering every
-            // string would balloon the plan the same way. Shrink first and
-            // cover what survives.
-            reduce_set(&mut t, order);
-            dedup_redundant(&mut t, order);
-        }
+        let flushed_large_set = self.flush_large_set_before_reduce(info, &mut t, order);
         let needs_reduce = t.len() > MAX_SET || t.max_len() > BOUNDARY_GROW;
-        if force || needs_reduce {
+        if force || (needs_reduce && !flushed_large_set) {
             let q = mem::replace(&mut info.match_, Query::all());
             info.match_ = self.and_grams(q, &t, order);
         }
@@ -301,6 +329,27 @@ impl Analyzer<'_> {
             dedup_redundant(&mut t, order);
         }
         put_set(info, order, t);
+    }
+
+    fn flush_large_set_before_reduce(
+        &self,
+        info: &mut RegexpInfo,
+        t: &mut StringSet,
+        order: Order,
+    ) -> bool {
+        if t.len() <= MAX_FLUSH_SET {
+            return false;
+        }
+        let flushed = self
+            .branch_single_covers(t, self.budget_left())
+            .map(|grams| {
+                let q = mem::replace(&mut info.match_, Query::all());
+                info.match_ = self.and_or_grams(q, grams);
+            })
+            .is_some();
+        reduce_set(t, order);
+        dedup_redundant(t, order);
+        flushed
     }
 }
 
@@ -326,11 +375,17 @@ fn alternate_sets(xy: &mut RegexpInfo, x: &RegexpInfo, y: &RegexpInfo) {
 /// Possible match prefixes of `xy`, where not both sides are exact.
 fn concat_prefix(x: &RegexpInfo, y: &RegexpInfo) -> StringSet {
     if let Some(xe) = &x.exact {
-        return xe.cross(&y.prefix, Order::Prefix);
+        let p = y_prefix(y);
+        let crossed = xe.cross(p, Order::Prefix);
+        return if y.can_empty {
+            crossed.union(xe, Order::Prefix)
+        } else {
+            crossed
+        };
     }
     let p = x.prefix.clone();
     if x.can_empty {
-        return p.union(&y.prefix, Order::Prefix);
+        return p.union(y_prefix(y), Order::Prefix);
     }
     p
 }
@@ -338,13 +393,57 @@ fn concat_prefix(x: &RegexpInfo, y: &RegexpInfo) -> StringSet {
 /// Possible match suffixes of `xy`, where not both sides are exact.
 fn concat_suffix(x: &RegexpInfo, y: &RegexpInfo) -> StringSet {
     if let Some(ye) = &y.exact {
-        return x.suffix.cross(ye, Order::Suffix);
+        let s = x_suffix(x);
+        let crossed = s.cross(ye, Order::Suffix);
+        return if x.can_empty {
+            crossed.union(ye, Order::Suffix)
+        } else {
+            crossed
+        };
     }
     let s = y.suffix.clone();
     if y.can_empty {
-        return s.union(&x.suffix, Order::Suffix);
+        return s.union(x_suffix(x), Order::Suffix);
     }
     s
+}
+
+fn y_prefix(y: &RegexpInfo) -> &StringSet {
+    y.exact.as_ref().unwrap_or(&y.prefix)
+}
+
+fn x_suffix(x: &RegexpInfo) -> &StringSet {
+    x.exact.as_ref().unwrap_or(&x.suffix)
+}
+
+/// Tighten the seam where a pure `E+`/`E*` run abuts its neighbour. The
+/// result's own `plus_base` stays `None` (blank): the tightened window is
+/// baked into `prefix`/`suffix` here, so a later concat crosses it normally.
+fn apply_plus_hints(xy: &mut RegexpInfo, x: &RegexpInfo, y: &RegexpInfo) {
+    if let Some(e) = y.plus_base.as_ref() {
+        xy.suffix = plus_suffix_with_empty_left(x, y, e);
+    }
+    if let Some(e) = x.plus_base.as_ref() {
+        xy.prefix = plus_prefix_with_empty_left(x, y, e);
+    }
+}
+
+fn plus_suffix_with_empty_left(x: &RegexpInfo, y: &RegexpInfo, e: &StringSet) -> StringSet {
+    let suffix = plus_suffix(x, e);
+    if y.can_empty {
+        suffix.union(x_suffix(x), Order::Suffix)
+    } else {
+        suffix
+    }
+}
+
+fn plus_prefix_with_empty_left(x: &RegexpInfo, y: &RegexpInfo, e: &StringSet) -> StringSet {
+    let prefix = plus_prefix(y, e);
+    if x.can_empty {
+        prefix.union(y_prefix(y), Order::Prefix)
+    } else {
+        prefix
+    }
 }
 
 /// The exhaustive suffix set of `X·E+` given the left side `x` and the plus
@@ -381,6 +480,9 @@ fn plus_prefix(y: &RegexpInfo, e: &StringSet) -> StringSet {
 /// exact set and the strings are long enough to cover. An oversized cross
 /// product is rebuilt from short stubs so the flush stays bounded.
 fn seam(x: &RegexpInfo, y: &RegexpInfo) -> Option<StringSet> {
+    if x.can_empty || y.can_empty {
+        return None;
+    }
     if x.exact.is_some() || y.exact.is_some() {
         return None;
     }
@@ -525,5 +627,49 @@ fn put_set(info: &mut RegexpInfo, order: Order, set: StringSet) {
     match order {
         Order::Prefix => info.prefix = set,
         Order::Suffix => info.suffix = set,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn numbered_set(prefix: u8, count: usize) -> StringSet {
+        let mut out = StringSet::new();
+        for number in 0..count {
+            out.push(Gram::from(
+                format!("{}{:02}", prefix as char, number).as_bytes(),
+            ));
+        }
+        out.clean(Order::Prefix);
+        out
+    }
+
+    #[test]
+    fn shrink_seam_bounds_large_cross_product_without_emptying_context() {
+        let left = numbered_set(b'l', 64);
+        let right = numbered_set(b'r', 64);
+        let (left, right) = shrink_seam(left, right).expect("seam should fit");
+
+        assert!(left.len().saturating_mul(right.len()) <= MAX_SEAM_CROSS);
+        assert!(left.min_len() > 0);
+        assert!(right.min_len() > 0);
+    }
+
+    #[test]
+    fn reduce_set_never_introduces_empty_unknown_member() {
+        let mut wide = StringSet::new();
+        for byte in 0u8..=199 {
+            wide.push(Gram::from(&[byte][..]));
+        }
+        wide.clean(Order::Prefix);
+
+        reduce_set(&mut wide, Order::Prefix);
+
+        assert!(
+            wide.as_slice()
+                .iter()
+                .all(|member| !member.as_bytes().is_empty())
+        );
     }
 }

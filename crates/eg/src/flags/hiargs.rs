@@ -35,6 +35,7 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct HiArgs {
     binary: BinaryDetection,
+    binary_mode: BinaryMode,
     boundary: Option<BoundaryMode>,
     buffer: BufferMode,
     byte_offset: bool,
@@ -254,6 +255,7 @@ impl HiArgs {
             patterns,
             paths,
             binary,
+            binary_mode: low.binary,
             boundary: low.boundary,
             buffer: low.buffer,
             byte_offset: low.byte_offset,
@@ -372,6 +374,11 @@ impl HiArgs {
         &self.index
     }
 
+    /// Return the selected freshness policy for the index.
+    pub(crate) fn index_freshness(&self) -> crate::index::config::IndexFreshness {
+        self.index.freshness
+    }
+
     /// The planner options mirroring [`Self::matcher_rust`]'s configuration,
     /// so the gram plan is built from exactly the semantics the verifying
     /// matcher applies. Smart case in particular resolves inside the planner
@@ -413,6 +420,11 @@ impl HiArgs {
     /// Returns true when compressed archives should be searched.
     pub(crate) fn search_zip(&self) -> bool {
         self.search_zip
+    }
+
+    /// Returns true when line terminators are NUL bytes instead of newlines.
+    pub(crate) fn null_data(&self) -> bool {
+        self.null_data
     }
 
     /// Returns true when indexed scanning may use mmap.
@@ -652,6 +664,11 @@ impl HiArgs {
             return false;
         }
         true
+    }
+
+    /// Return true when indexed search must reject the requested binary mode.
+    pub(crate) fn index_rejects_binary_mode(&self) -> bool {
+        !matches!(self.binary_mode, BinaryMode::Auto)
     }
 
     /// Returns the "mode" that ripgrep should operate in.
@@ -1102,6 +1119,9 @@ impl Patterns {
         // No search means no patterns. Even if -e/--regexp or -f/--file is
         // given, we know we won't use them so don't bother collecting them.
         if !matches!(low.mode, Mode::Search(_)) {
+            return Ok(Patterns { patterns: vec![] });
+        }
+        if low.index.mode.is_maintenance() && low.patterns.is_empty() {
             return Ok(Patterns { patterns: vec![] });
         }
         // If we got nothing from -e/--regexp and -f/--file, then the first

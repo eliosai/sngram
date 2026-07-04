@@ -3,6 +3,13 @@
 //! These are not the official Divan/CodSpeed benchmarks. They exist to make
 //! rebuild, unchanged-auto, and small-change-auto timings easy to inspect while
 //! developing the CLI indexer.
+#![allow(
+    missing_docs,
+    clippy::format_push_string,
+    clippy::too_many_lines,
+    clippy::use_self,
+    clippy::unwrap_used
+)]
 
 use std::{
     fs,

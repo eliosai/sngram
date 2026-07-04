@@ -16,7 +16,9 @@
 
 use std::collections::HashSet;
 
-use sngram::{Pattern, QueryPlan, query, scan};
+use sngram::{
+    IndexFormat, Pattern, PlanOptions, QueryPlan, ScanOptions, plan_query, query, scan, scan_with,
+};
 use sngram_types::{Content, TABLE_BINARY_SIZE, WeightTable};
 
 /// A deterministic weight table: each byte pair hashed to a varied weight, so
@@ -61,6 +63,14 @@ fn index_grams(t: &WeightTable, doc: &[u8]) -> HashSet<Vec<u8>> {
     grams
 }
 
+fn index_grams_with(t: &WeightTable, doc: &[u8], opts: ScanOptions) -> HashSet<Vec<u8>> {
+    let mut grams = HashSet::new();
+    scan_with(t, &Content::new(doc), opts, |gram, _| {
+        grams.insert(gram.to_vec());
+    });
+    grams
+}
+
 /// Assert the plan rejects a document the regex does not match. The document
 /// must genuinely not match (checked against an oracle) so the plan is free
 /// to reject it; rejecting it proves the plan retains enough structure.
@@ -78,6 +88,29 @@ fn assert_rejects(re: &str, doc: &[u8]) {
     let plan = query(&t, &Pattern::new(re).expect("pattern parses"));
     assert!(
         !satisfies(&plan, &index_grams(&t, doc)),
+        "PRECISION REGRESSION: {re:?} plan {plan} admits non-matching {text:?}"
+    );
+}
+
+fn assert_planned_rejects(
+    re: &str,
+    doc: &[u8],
+    opts: PlanOptions,
+    format: IndexFormat,
+    scan_opts: ScanOptions,
+) {
+    let t = weight_table();
+    let oracle = regex::bytes::Regex::new(re).expect("oracle parses pattern");
+    let text = String::from_utf8_lossy(doc);
+    assert!(
+        !oracle.is_match(doc),
+        "test bug: {re:?} actually matches {text:?}; pick a non-matching doc"
+    );
+    let plan = plan_query(&t, &[re], opts, format)
+        .expect("pattern plans")
+        .plan;
+    assert!(
+        !satisfies(&plan, &index_grams_with(&t, doc, scan_opts)),
         "PRECISION REGRESSION: {re:?} plan {plan} admits non-matching {text:?}"
     );
 }
@@ -242,6 +275,21 @@ fn wide_class_pair_keeps_the_trailing_seam() {
     assert_rejects("read[a-zA-Z][a-zA-Z]lock", b"readb lock held");
 }
 
+#[test]
+fn finite_class_pair_keeps_correlated_middle_window() {
+    // The file contains a valid left seam ("readb") and a valid right seam
+    // ("block"), but never the same two class bytes between "read" and
+    // "lock". A plan that flushes the two sides independently admits it.
+    assert_rejects("read[a-zA-Z][a-zA-Z]lock", b"readb fast block held");
+}
+
+#[test]
+fn numeric_plus_keeps_literal_prefix_context() {
+    // A semver-like regex with a literal prefix must not degenerate into
+    // only the broad digit-dot-digit middle window.
+    assert_rejects(r"v[0-9]+\.[0-9]+\.[0-9]+", b"release 1.2.3 without v");
+}
+
 // --- wide classes keep a boundary-byte seam to their neighbours ---
 
 #[test]
@@ -268,6 +316,21 @@ fn wide_class_between_literals_keeps_both_seams() {
     // literal and its continuation bytes into the right one, so both edges
     // stay anchored.
     assert_rejects(r"read\p{Cyrillic}lock", b"read lock, readlock, red lock");
+}
+
+#[test]
+fn mixed_wide_class_before_literal_keeps_boundary_seam() {
+    assert_rejects(r"[A-Za-z\p{Greek}]term_var", b"the term_var here");
+}
+
+#[test]
+fn mixed_wide_class_between_literals_keeps_boundary_seams() {
+    assert_rejects(r"read[A-Za-z\p{Cyrillic}]lock", b"read lock");
+}
+
+#[test]
+fn mixed_wide_class_between_literals_rejects_missing_class_byte() {
+    assert_rejects(r"read[A-Za-z\p{Cyrillic}]lock", b"readlock");
 }
 
 #[test]
@@ -328,6 +391,40 @@ fn gap_islands_are_both_required() {
 }
 
 #[test]
+fn sentinel_start_anchor_survives_nullable_indent() {
+    assert_planned_rejects(
+        r"^[ \t]*#define CONFIG",
+        b"int x; #define CONFIG_FOO",
+        PlanOptions::default(),
+        IndexFormat {
+            folded_space: false,
+            line_sentinels: true,
+        },
+        ScanOptions {
+            line_sentinels: true,
+            ..ScanOptions::default()
+        },
+    );
+}
+
+#[test]
+fn sentinel_end_anchor_survives_nullable_trailing_space() {
+    assert_planned_rejects(
+        r"EXPORT_SYMBOL\(\w+\);[ \t]*$",
+        b"EXPORT_SYMBOL(foo); trailing",
+        PlanOptions::default(),
+        IndexFormat {
+            folded_space: false,
+            line_sentinels: true,
+        },
+        ScanOptions {
+            line_sentinels: true,
+            ..ScanOptions::default()
+        },
+    );
+}
+
+#[test]
 fn unicode_case_fold_stays_constrained() {
     assert!(!matches!(plan_of("(?i)björn_qux"), QueryPlan::All));
 }
@@ -340,6 +437,18 @@ fn impossible_look_contexts_plan_to_none() {
     assert!(matches!(plan_of(r"foo$bar"), QueryPlan::None));
     assert!(matches!(plan_of(r"abc\Adef"), QueryPlan::None));
     assert!(matches!(plan_of(r"kfree\B\("), QueryPlan::None));
+}
+
+#[test]
+fn unicode_word_boundary_between_words_plans_to_none() {
+    assert!(matches!(plan_of(r"a\bµs"), QueryPlan::None));
+    assert!(matches!(plan_of(r"µ\bβ"), QueryPlan::None));
+}
+
+#[test]
+fn unicode_non_word_boundary_between_word_and_word_plans_to_none() {
+    assert!(matches!(plan_of(r"a\B-"), QueryPlan::None));
+    assert!(matches!(plan_of(r"-\Bµ"), QueryPlan::None));
 }
 
 #[test]

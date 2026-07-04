@@ -93,6 +93,44 @@ pub(super) fn smart_case_insensitive(pattern: &str) -> bool {
     analysis.any_literal && !analysis.any_uppercase
 }
 
+/// Whether the regex enables case-insensitive matching through inline flags.
+///
+/// A scoped `(?i:...)` only affects part of the regex, but picking the folded
+/// gram space for the whole plan is still sound: exact verification keeps the
+/// original case-sensitive semantics, while the prefilter avoids HIR variant
+/// explosion for the insensitive region.
+pub(super) fn has_inline_case_insensitive(pattern: &str) -> bool {
+    let Ok(parsed) = ast::parse::Parser::new().parse(pattern) else {
+        return false;
+    };
+    InlineFlagAnalysis::visit(&parsed)
+}
+
+struct InlineFlagAnalysis;
+
+impl InlineFlagAnalysis {
+    fn visit(node: &Ast) -> bool {
+        match *node {
+            Ast::Empty(_)
+            | Ast::Literal(_)
+            | Ast::Dot(_)
+            | Ast::Assertion(_)
+            | Ast::ClassUnicode(_)
+            | Ast::ClassPerl(_)
+            | Ast::ClassBracketed(_) => false,
+            Ast::Flags(ref x) => Self::flags(&x.flags),
+            Ast::Repetition(ref x) => Self::visit(&x.ast),
+            Ast::Group(ref x) => x.flags().is_some_and(Self::flags) || Self::visit(&x.ast),
+            Ast::Alternation(ref x) => x.asts.iter().any(Self::visit),
+            Ast::Concat(ref x) => x.asts.iter().any(Self::visit),
+        }
+    }
+
+    fn flags(flags: &ast::Flags) -> bool {
+        matches!(flags.flag_state(ast::Flag::CaseInsensitive), Some(true))
+    }
+}
+
 /// Literal-character facts of a pattern AST, as `grep-regex` counts them.
 #[derive(Default)]
 struct CaseAnalysis {
@@ -177,7 +215,7 @@ impl CaseAnalysis {
 
 #[cfg(test)]
 mod tests {
-    use super::smart_case_insensitive;
+    use super::{has_inline_case_insensitive, smart_case_insensitive};
 
     #[test]
     fn lowercase_literals_are_insensitive() {
@@ -211,5 +249,15 @@ mod tests {
     #[test]
     fn unparseable_patterns_stay_sensitive() {
         assert!(!smart_case_insensitive("foo("));
+    }
+
+    #[test]
+    fn detects_inline_case_insensitive_flags() {
+        assert!(has_inline_case_insensitive("(?i)foo"));
+        assert!(has_inline_case_insensitive("foo(?i:bar)baz"));
+        assert!(has_inline_case_insensitive("(?:foo|(?i:bar))"));
+        assert!(!has_inline_case_insensitive("foo"));
+        assert!(!has_inline_case_insensitive("(?-i:foo)"));
+        assert!(!has_inline_case_insensitive("foo("));
     }
 }

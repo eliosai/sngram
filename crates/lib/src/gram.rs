@@ -85,6 +85,12 @@ impl Gram {
     pub fn hash(&self) -> u64 {
         hashing::hash_bytes(self.as_bytes())
     }
+
+    /// The gram's index key under a deployment [`hashing::HashKey`].
+    #[must_use]
+    pub fn hash_keyed(&self, key: hashing::HashKey) -> u64 {
+        hashing::hash_bytes_keyed(self.as_bytes(), key)
+    }
 }
 
 impl From<&[u8]> for Gram {

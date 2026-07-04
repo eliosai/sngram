@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use sngram::QueryPlan;
 use sngram_types::{Content, WeightTable};
 use tantivy::{
-    DocId, Index, Score, SegmentOrdinal, SegmentReader, TantivyDocument, Term,
+    DocId, Index, Score, Searcher, SegmentOrdinal, SegmentReader, TantivyDocument, Term,
     collector::{Collector, SegmentCollector},
     fastfield::Column,
     query::{BooleanQuery, Query, TermQuery},
@@ -29,7 +29,7 @@ use crate::{
 use super::{
     manifest::{
         CurrentFile, CurrentSnapshot, Manifest, ManifestBackend, changed_ordinals, manifest_for,
-        read_manifest, write_manifest,
+        manifest_present, read_manifest, write_manifest,
     },
     planner::plan_to_query,
 };
@@ -58,10 +58,13 @@ pub(super) fn prepare_index(
     }
     match args.index().mode {
         IndexMode::NoIndex => anyhow::bail!("internal error: indexed path used with --no-index"),
+        IndexMode::Verify | IndexMode::Repair => {
+            anyhow::bail!("internal error: maintenance mode reached prepare_index")
+        },
         IndexMode::Rebuild => rebuild_disk_index(
             args, table_spec, table, schema, fields, index_home, snapshot,
         ),
-        IndexMode::Auto => auto_disk_index(
+        IndexMode::Auto | IndexMode::Require => auto_disk_index(
             args,
             table_spec,
             table,
@@ -77,17 +80,93 @@ pub(super) fn prepare_index(
 pub(super) fn query_index(
     index: &Index,
     fields: IndexFields,
-    plan: &QueryPlan,
-) -> anyhow::Result<BTreeSet<usize>> {
-    let query = forced_candidate_query(fields, plan_to_query(fields.gram, plan)?);
+    keyed: &super::planner::KeyedPlan,
+) -> anyhow::Result<Option<BTreeSet<usize>>> {
     let reader = index
         .reader()
         .context("failed to open tantivy index reader")?;
     let searcher = reader.searcher();
+    let doc_count = searcher.num_docs();
+    let ceiling = super::postings::selectivity_ceiling(doc_count);
+    let df = TantivyDf {
+        searcher: &searcher,
+        fields,
+        key: keyed.key,
+    };
+    let mut plan = keyed.plan.clone();
+    let raw_grams = count_plan_grams(&plan);
+    plan.tune(&df, ceiling);
+    log::debug!(
+        "eg index query: tantivy plan_grams={} tuned_plan_grams={}",
+        raw_grams,
+        count_plan_grams(&plan),
+    );
+    if matches!(plan, QueryPlan::None) {
+        return Ok(Some(BTreeSet::new()));
+    }
+    let estimate = estimate_with_forced(&searcher, fields, &plan, &df);
+    if estimate > ceiling {
+        log::debug!(
+            "eg index query: estimate {estimate} of {doc_count} docs exceeds {}%; rejecting indexed query without scan fallback",
+            super::postings::SCAN_FALLBACK_PCT
+        );
+        return Ok(None);
+    }
+    let query = forced_candidate_query(fields, plan_to_query(fields.gram, &plan, keyed.key)?);
     let ords = searcher
         .search(&*query, &DocOrdCollector)
         .context("failed to query sparse n-gram index")?;
-    ords.into_iter().map(u64_to_usize).collect()
+    ords.into_iter()
+        .map(u64_to_usize)
+        .collect::<anyhow::Result<BTreeSet<usize>>>()
+        .map(Some)
+}
+
+fn estimate_with_forced(
+    searcher: &Searcher,
+    fields: IndexFields,
+    plan: &QueryPlan,
+    df: &TantivyDf<'_>,
+) -> u64 {
+    if matches!(plan, QueryPlan::None) {
+        return 0;
+    }
+    let forced = searcher
+        .doc_freq(&Term::from_field_u64(fields.forced_candidate, 1))
+        .unwrap_or(0);
+    plan.estimate_candidates(df)
+        .saturating_add(forced)
+        .min(searcher.num_docs())
+}
+
+struct TantivyDf<'a> {
+    searcher: &'a Searcher,
+    fields: IndexFields,
+    key: sngram::HashKey,
+}
+
+impl sngram::DfStats for TantivyDf<'_> {
+    fn doc_count(&self, gram: &sngram::Gram) -> u64 {
+        self.searcher
+            .doc_freq(&Term::from_field_u64(
+                self.fields.gram,
+                gram.hash_keyed(self.key),
+            ))
+            .unwrap_or(0)
+    }
+
+    fn total_docs(&self) -> u64 {
+        self.searcher.num_docs()
+    }
+}
+
+fn count_plan_grams(plan: &QueryPlan) -> usize {
+    match plan {
+        QueryPlan::All | QueryPlan::None => 0,
+        QueryPlan::And { grams, sub } | QueryPlan::Or { grams, sub } => {
+            grams.len() + sub.iter().map(count_plan_grams).sum::<usize>()
+        },
+    }
 }
 
 pub(super) fn schema() -> (Schema, IndexFields) {
@@ -119,7 +198,7 @@ fn auto_disk_index(
 ) -> anyhow::Result<Index> {
     let data_dir = index_home.join(INDEX_DATA_DIR_NAME);
     let manifest_path = index_home.join(MANIFEST_FILE_NAME);
-    if !data_dir.exists() || !manifest_path.exists() {
+    if !data_dir.exists() || !manifest_present(&manifest_path) {
         return rebuild_disk_index(
             args, table_spec, table, schema, fields, index_home, snapshot,
         );
@@ -274,10 +353,11 @@ fn add_documents(
     let scan_result = files
         .par_iter()
         .try_for_each_with(sender.clone(), |sender, file| {
-            let file_grams = scan_file(table, file, use_mmap)?;
-            sender
-                .send(file_document(fields, &file_grams))
-                .context("tantivy index writer stopped while receiving scanned documents")?;
+            if let Some(file_grams) = scan_file(table, file, use_mmap)? {
+                sender
+                    .send(file_document(fields, &file_grams))
+                    .context("tantivy index writer stopped while receiving scanned documents")?;
+            }
             anyhow::Ok(())
         });
     drop(sender);
@@ -301,10 +381,11 @@ fn add_document_refs(
     let scan_result = files
         .par_iter()
         .try_for_each_with(sender.clone(), |sender, file| {
-            let file_grams = scan_file(table, file, use_mmap)?;
-            sender
-                .send(file_document(fields, &file_grams))
-                .context("tantivy index writer stopped while receiving scanned documents")?;
+            if let Some(file_grams) = scan_file(table, file, use_mmap)? {
+                sender
+                    .send(file_document(fields, &file_grams))
+                    .context("tantivy index writer stopped while receiving scanned documents")?;
+            }
             anyhow::Ok(())
         });
     drop(sender);
@@ -325,31 +406,57 @@ fn add_received_documents(
     Ok(writer)
 }
 
-fn scan_file(table: &WeightTable, file: &CurrentFile, use_mmap: bool) -> anyhow::Result<FileGrams> {
-    if fs::metadata(&file.path)
+fn scan_file(
+    table: &WeightTable,
+    file: &CurrentFile,
+    use_mmap: bool,
+) -> anyhow::Result<Option<FileGrams>> {
+    let len = fs::metadata(&file.path)
         .with_context(|| format!("failed to stat {} for indexing", file.path.display()))?
-        .len()
-        == 0
-    {
-        return Ok(FileGrams {
-            ord: file.ord,
-            path_hash: file.path_hash(),
-            forced_candidate: false,
-            hashes: Vec::new(),
-        });
+        .len();
+    if len == 0 {
+        return Ok(Some(file_grams(file, false, Vec::new())));
+    }
+    if super::classify::is_oversized(len) {
+        // TODO(lib): try_scan so oversized files scan instead of force-candidate
+        return Ok(Some(file_grams(file, true, Vec::new())));
     }
     let bytes = read_file(&file.path, use_mmap)?;
-    let forced_candidate = has_decoding_bom(bytes.as_ref());
+    let bytes = bytes.as_ref();
+    if super::classify::is_binary(bytes) {
+        return Ok(None);
+    }
+    let mut forced_candidate = super::classify::has_decoding_bom(bytes);
+    let content = Content::new(bytes);
     let mut hashes = Vec::new();
-    scan_hashes(table, bytes.as_ref(), &mut hashes);
+    sngram::scan_with(table, &content, super::postings::SCAN_PRIMARY, |_, hash| {
+        hashes.push(hash);
+    });
     hashes.sort_unstable();
     hashes.dedup();
-    Ok(FileGrams {
+    if super::classify::is_high_entropy(bytes.len(), hashes.len()) {
+        forced_candidate = true;
+        hashes.clear();
+    } else {
+        let primary_unique = hashes.len();
+        sngram::scan_with(table, &content, super::postings::SCAN_FOLDED, |_, hash| {
+            hashes.push(hash);
+        });
+        if let Some(folded) = hashes.get_mut(primary_unique..) {
+            folded.sort_unstable();
+        }
+        hashes.dedup();
+    }
+    Ok(Some(file_grams(file, forced_candidate, hashes)))
+}
+
+fn file_grams(file: &CurrentFile, forced_candidate: bool, hashes: Vec<u64>) -> FileGrams {
+    FileGrams {
         ord: file.ord,
         path_hash: file.path_hash(),
         forced_candidate,
         hashes,
-    })
+    }
 }
 
 fn read_file(path: &Path, use_mmap: bool) -> anyhow::Result<FileBytes> {
@@ -391,17 +498,6 @@ impl AsRef<[u8]> for FileBytes {
             Self::Owned(bytes) => bytes,
         }
     }
-}
-
-fn scan_hashes(table: &WeightTable, bytes: &[u8], hashes: &mut Vec<u64>) {
-    sngram::scan(table, &Content::new(bytes), |_, _, hash| hashes.push(hash));
-}
-
-fn has_decoding_bom(bytes: &[u8]) -> bool {
-    bytes.starts_with(&[0xFF, 0xFE])
-        || bytes.starts_with(&[0xFE, 0xFF])
-        || bytes.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
-        || bytes.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
 }
 
 fn forced_candidate_query(fields: IndexFields, query: Box<dyn Query>) -> Box<dyn Query> {

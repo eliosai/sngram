@@ -21,7 +21,7 @@ lit_numeric	4096
 lit_hex	0xdeadbeef
 lit_string_esc	\\n\\t
 lit_include	#include <linux/module.h>
-lit_comment	/* fallthrough */
+lit_comment	/* fallthrough */	-F
 
 # --- fixed strings (-F) with regex metachars ---
 fixed_parens	kfree(skb)	-F
@@ -249,3 +249,70 @@ unsup_negclass	[^x]+
 unsup_anchor_only	^
 unsup_short_gap	a.b
 unsup_alt_mixed	kfree|ab
+# --- production-readiness additions: numeric/hex/version (largest non-floor FP class) ---
+ver_semver	v[0-9]+\.[0-9]+\.[0-9]+
+rep_ip_octet	[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}
+hex_addr16	0x[0-9a-f]{16}
+num_mask	0x[0-9a-fA-F]{8}
+num_bit_shift	1 << [0-9]+
+# --- bounded-rep cap sentinels ---
+rep_x5	x{5}
+rep_ab5cd	ab{5}cd
+
+# --- nullable anchor bridges: optional indentation/trailing space can sever sentinel-to-literal seams ---
+anchor_indent_define	^[ \t]*#define CONFIG
+anchor_indent_static	^[ \t]*static inline
+anchor_trailing_ws	EXPORT_SYMBOL\(\w+\);[ \t]*$
+anchor_crlf_trailing_ws	EXPORT_SYMBOL\(\w+\);[ \t]*$	--crlf
+
+# --- wide mixed classes: ASCII plus Unicode boundary sets can collapse and admit bare literals ---
+wide_mixed_unicode_left	[A-Za-z\p{Greek}]term_var
+wide_mixed_unicode_mid	read[A-Za-z\p{Cyrillic}]lock
+# Branch-correlation sentinel: a merged wide class must not let different class bytes satisfy opposite seams.
+wide_mixed_branch_mix	read[A-Za-z\p{Cyrillic}]lock
+
+# --- structured IDs: large bounded classes should stay constrained without plan blowups ---
+uuid_hex	[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}
+mac_addr	[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}
+
+# --- folded-space class/seam stress ---
+ci_ascii_class_irq	READ[A-Z]lock_IRQ	-i
+ci_scoped_alt	(?i:(read|write|cmpxchg)_once)
+
+# --- harness sentinels: transparent scan fallback must not produce negative FP metrics ---
+harness_scan_fallback	.*
+harness_common_fallback	static int
+rep_word_ops	\w{4,8}_ops
+# --- CRLF/anchor floor sentinels ---
+anchor_export_crlf	EXPORT_SYMBOL$	--crlf
+anchor_define_crlf	^#define CONFIG	--crlf
+anchor_export_eol	EXPORT_SYMBOL\(\w+\);$
+anchor_define_bol	^#define CONFIG_[A-Z_]+
+# --- deep alternations ---
+alt_gfp	GFP_(KERNEL|ATOMIC|NOWAIT|NOFS|NOIO|USER)
+alt_irqf	IRQF_(SHARED|ONESHOT|TRIGGER_RISING|TRIGGER_FALLING|NO_SUSPEND)
+alt_netdev	((un)?register|(de)?activate)_netdev
+# --- realistic dev greps ---
+dev_fnptr	int \(\*\w+\)\(
+dev_ops_struct	static const struct \w+_operations
+dev_skb_data	skb->data
+dev_sock_cast	\(struct sock \*\)
+dev_pS	%pS	-F
+dev_hex_fmt	0x%08x	-F
+dev_pr_err	pr_err\("%s:
+dev_errno	-E(INVAL|NOMEM|BUSY|AGAIN)
+dev_err_ptr	ERR_PTR\(-E
+dev_spdx	SPDX-License-Identifier: GPL	-F
+dev_signed_off	Signed-off-by:	-F
+# --- smart case and non-ascii ---
+smart_spinlock	spin_lock_irqsave	-S
+smart_netif	netif_receive_skb_core	-S
+smart_taskstruct	TaskStruct	-S
+# Outer Unicode word-boundary edge: positive gram plans need indexed boundary context to reject word-prefixed occurrences.
+unicode_word_boundary_edge	\bµs\b
+nonascii_micro	µs
+nonascii_cjk	中文
+path_netdevice	include/linux/netdevice\.h
+# --- gap floor sentinels ---
+gap_spinlock_pair	spin_lock.*spin_unlock
+gap_static_err	static.*return -E

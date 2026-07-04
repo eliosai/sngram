@@ -83,6 +83,7 @@ fn assert_no_false_negative(
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "explicit soundness fixture corpus")]
 fn corpus() -> Vec<&'static [u8]> {
     vec![
         b"pub async fn read_content(hash: Hash) -> Result<Bytes, Error> {".as_slice(),
@@ -108,6 +109,7 @@ fn corpus() -> Vec<&'static [u8]> {
         b"static\tvoid  init and static void init with spaces".as_slice(),
         b"\xFF\xFEbinary\x00garbage\x80\x81 with high bytes".as_slice(),
         b"aaabcd abcd aaa bcd a{3}bcd literal braces".as_slice(),
+        b"abcdefghijklmno".as_slice(),
         // Wide-class boundary-byte seams: a real Greek/Cyrillic scalar
         // abutting a literal must keep satisfying the plan, which now
         // requires a <continuation-byte>literal (or literal<lead-byte>)
@@ -161,6 +163,7 @@ const PATTERNS: &[&str] = &[
     "(?i)max_\\w+_size",
     "v[0-9]+\\.[0-9]+",
     "[RT]X_RING|s[ck][bh]_buff",
+    r"(z*abcdefz*)(z*(ghijk|lmnop)z*)",
     "\u{5e8f}\u{5217}",
     // Wide unicode classes flanking literals: the boundary-byte seams must
     // never drop a real scalar-plus-literal match.
