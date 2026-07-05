@@ -11,13 +11,29 @@ pub struct ValidatedPrefix {
     bytes: Vec<u8>,
 }
 
+#[derive(Debug)]
+pub struct ValidatedInput<R> {
+    prefix: ValidatedPrefix,
+    input: R,
+}
+
 impl ValidatedPrefix {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 }
 
-pub fn read<R>(mut input: R) -> Result<(ValidatedPrefix, R), ScanError>
+impl<R> ValidatedInput<R> {
+    pub const fn prefix(&self) -> &ValidatedPrefix {
+        &self.prefix
+    }
+
+    pub fn into_input(self) -> R {
+        self.input
+    }
+}
+
+pub fn read<R>(mut input: R) -> Result<ValidatedInput<R>, ScanError>
 where
     R: BufRead,
 {
@@ -36,7 +52,7 @@ where
 
     let prefix = ValidatedPrefix { bytes };
     validate(prefix.bytes())?;
-    Ok((prefix, input))
+    Ok(ValidatedInput { prefix, input })
 }
 
 fn validate(prefix: &[u8]) -> Result<(), ScanError> {
@@ -55,9 +71,10 @@ mod tests {
 
     #[test]
     fn accepts_text_prefix() {
-        let (prefix, mut rest) = read(Cursor::new(b"fn main() {}\n")).expect("valid text");
+        let validated = read(Cursor::new(b"fn main() {}\n")).expect("valid text");
+        assert_eq!(validated.prefix().bytes(), b"fn main() {}\n");
+        let mut rest = validated.into_input();
 
-        assert_eq!(prefix.bytes(), b"fn main() {}\n");
         assert!(rest.fill_buf().expect("read rest").is_empty());
     }
 
@@ -79,9 +96,11 @@ mod tests {
     #[test]
     fn leaves_remaining_stream_after_sniff_cap() {
         let data = vec![b'a'; SNIFF_BYTES + 7];
-        let (prefix, mut rest) = read(Cursor::new(data)).expect("valid text");
+        let validated = read(Cursor::new(data)).expect("valid text");
+        let prefix_len = validated.prefix().bytes().len();
+        let mut rest = validated.into_input();
 
-        assert_eq!(prefix.bytes().len(), SNIFF_BYTES);
+        assert_eq!(prefix_len, SNIFF_BYTES);
         assert_eq!(rest.fill_buf().expect("read rest").len(), 7);
     }
 

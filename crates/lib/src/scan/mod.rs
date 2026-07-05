@@ -30,10 +30,11 @@ pub fn scan<R>(
 where
     R: BufRead,
 {
-    let (prefix, mut input) = validate::read(input)?;
+    let validated = validate::read(input)?;
     let mut scanner = engine::DocumentScanner::new(table);
     scanner.begin_document(&mut emit);
-    scanner.push_content(prefix.bytes(), &mut emit);
+    scanner.push_content(validated.prefix().bytes(), &mut emit);
+    let mut input = validated.into_input();
     loop {
         let chunk = input.fill_buf()?;
         if chunk.is_empty() {

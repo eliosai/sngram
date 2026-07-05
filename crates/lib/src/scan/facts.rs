@@ -153,12 +153,21 @@ impl SummaryBuilder {
     }
 
     fn record_flags(&mut self, byte: u8) {
+        self.record_line_flags(byte);
+        self.record_ascii_class_flags(byte);
+        self.record_non_ascii_flag(byte);
+    }
+
+    fn record_line_flags(&mut self, byte: u8) {
         if self.last == Some(b'\r') && byte == b'\n' {
             self.flags = self.flags.with_crlf();
         }
         if byte == b'\n' {
             self.flags = self.flags.with_lf();
         }
+    }
+
+    const fn record_ascii_class_flags(&mut self, byte: u8) {
         if byte.is_ascii_uppercase() {
             self.flags = self.flags.with_ascii_upper();
         }
@@ -174,6 +183,9 @@ impl SummaryBuilder {
         if byte.is_ascii_alphanumeric() || byte == b'_' {
             self.flags = self.flags.with_ascii_word();
         }
+    }
+
+    const fn record_non_ascii_flag(&mut self, byte: u8) {
         if !byte.is_ascii() {
             self.flags = self.flags.with_non_ascii();
         }

@@ -9,9 +9,9 @@ use super::{ScanSettings, engine};
 /// Minimal covering grams of a single literal.
 pub fn minimal_cover(table: &WeightTable, literal: &[u8]) -> Vec<Gram> {
     let mut grams = Vec::new();
-    emit_cover_spans(table, literal, |start, end| {
-        if ScanSettings::emits_len(end - start) {
-            grams.push(Gram::from(&literal[start..end]));
+    emit_cover_spans(table, literal, |span| {
+        if ScanSettings::emits_len(span.len()) {
+            grams.push(Gram::from(&literal[span.start..span.end]));
         }
     });
     grams
@@ -26,48 +26,104 @@ pub fn guaranteed_cover(table: &WeightTable, literal: &[u8]) -> Vec<Gram> {
     grams
 }
 
-fn emit_cover_spans(table: &WeightTable, literal: &[u8], mut emit: impl FnMut(usize, usize)) {
-    let mut stack: VecDeque<(u32, usize)> = VecDeque::new();
+fn emit_cover_spans(table: &WeightTable, literal: &[u8], mut emit: impl FnMut(CoverSpan)) {
+    let mut stack = CoverStack::new();
 
     for start in 0..literal.len().saturating_sub(1) {
         let weight = table.weight(literal[start], literal[start + 1]);
-        if stack.len() > 1
-            && start + ScanSettings::MIN_GRAM_LEN - stack[0].1 >= ScanSettings::MAX_GRAM_LEN
-        {
-            emit(stack[0].1, stack[1].1 + 2);
-            stack.pop_front();
-        }
-        while let Some(&(top_weight, top_start)) = stack.back() {
-            if weight <= top_weight {
-                break;
-            }
-            if stack[0].0 == top_weight {
-                glue_plateau(&mut stack, top_start, start + 2, &mut emit);
-            }
-            stack.pop_back();
-        }
-        stack.push_back((weight, start));
+        stack.observe(start, weight, &mut emit);
     }
-    drain(&mut stack, &mut emit);
+    stack.drain(&mut emit);
 }
 
-fn glue_plateau(
-    stack: &mut VecDeque<(u32, usize)>,
-    back_pos: usize,
+#[derive(Debug, Clone, Copy)]
+struct CoverSpan {
+    start: usize,
     end: usize,
-    emit: &mut impl FnMut(usize, usize),
-) {
-    emit(back_pos, end);
-    drain(stack, emit);
 }
 
-fn drain(stack: &mut VecDeque<(u32, usize)>, emit: &mut impl FnMut(usize, usize)) {
-    while stack.len() > 1 {
-        let Some((_, top)) = stack.pop_back() else {
-            break;
-        };
-        if let Some(&(_, below)) = stack.back() {
-            emit(below, top + 2);
+impl CoverSpan {
+    const fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+
+    const fn len(self) -> usize {
+        self.end - self.start
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CoverEntry {
+    start: usize,
+    weight: u32,
+}
+
+impl CoverEntry {
+    const fn new(start: usize, weight: u32) -> Self {
+        Self { start, weight }
+    }
+}
+
+struct CoverStack {
+    entries: VecDeque<CoverEntry>,
+}
+
+impl CoverStack {
+    const fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn observe(&mut self, start: usize, weight: u32, emit: &mut impl FnMut(CoverSpan)) {
+        self.evict_front_if_too_long(start, emit);
+        self.pop_lighter_back(start, weight, emit);
+        self.entries.push_back(CoverEntry::new(start, weight));
+    }
+
+    fn evict_front_if_too_long(&mut self, start: usize, emit: &mut impl FnMut(CoverSpan)) {
+        if self.entries.len() <= 1 {
+            return;
+        }
+        let front = self.entries[0].start;
+        if start + ScanSettings::MIN_GRAM_LEN - front < ScanSettings::MAX_GRAM_LEN {
+            return;
+        }
+        emit(CoverSpan::new(front, self.entries[1].start + 2));
+        self.entries.pop_front();
+    }
+
+    fn pop_lighter_back(&mut self, start: usize, weight: u32, emit: &mut impl FnMut(CoverSpan)) {
+        while let Some(&top) = self.entries.back() {
+            if weight <= top.weight {
+                return;
+            }
+            self.glue_plateau_if_needed(top, start + 2, emit);
+            self.entries.pop_back();
+        }
+    }
+
+    fn glue_plateau_if_needed(
+        &mut self,
+        top: CoverEntry,
+        end: usize,
+        emit: &mut impl FnMut(CoverSpan),
+    ) {
+        if self.entries[0].weight != top.weight {
+            return;
+        }
+        emit(CoverSpan::new(top.start, end));
+        self.drain(emit);
+    }
+
+    fn drain(&mut self, emit: &mut impl FnMut(CoverSpan)) {
+        while self.entries.len() > 1 {
+            let Some(top) = self.entries.pop_back() else {
+                break;
+            };
+            if let Some(&below) = self.entries.back() {
+                emit(CoverSpan::new(below.start, top.start + 2));
+            }
         }
     }
 }
@@ -107,9 +163,9 @@ mod tests {
     fn cover_never_emits_out_of_bounds_spans() {
         let table = table();
         let literal = b"short and longer literal";
-        emit_cover_spans(&table, literal, |start, end| {
-            assert!(start <= end);
-            assert!(end <= literal.len());
+        emit_cover_spans(&table, literal, |span| {
+            assert!(span.start <= span.end);
+            assert!(span.end <= literal.len());
         });
     }
 }
