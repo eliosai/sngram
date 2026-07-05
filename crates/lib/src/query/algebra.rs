@@ -206,10 +206,6 @@ fn factor(mut q: Query, mut r: Query, op: Op) -> Query {
 /// Remove the grams present in both sets and return them, leaving each input
 /// with only its own grams. Both are [`Order::Prefix`]-cleaned, so one merge
 /// walk finds the intersection.
-#[allow(
-    clippy::indexing_slicing,
-    reason = "qi, ri stay below the lengths checked"
-)]
 fn split_common(q: &mut StringSet, r: &mut StringSet) -> StringSet {
     let qs = std::mem::take(q).into_vec();
     let rs = std::mem::take(r).into_vec();
@@ -231,7 +227,6 @@ fn split_common(q: &mut StringSet, r: &mut StringSet) -> StringSet {
     common
 }
 
-#[allow(clippy::indexing_slicing, reason = "caller guards *i < src.len()")]
 fn take_one(out: &mut StringSet, src: &[Gram], i: &mut usize) {
     out.push(src[*i].clone());
     *i += 1;
@@ -359,6 +354,18 @@ mod tests {
         assert_eq!(actual.sub[0].op, Op::Or);
         assert_eq!(actual.sub[0].grams, cleaned(&[b"def", b"ghi"]));
         assert!(actual.sub[0].sub.is_empty());
+    }
+
+    #[test]
+    fn test_split_common_drains_both_unique_tails() {
+        let mut left = cleaned(&[b"abc", b"def", b"zzz"]);
+        let mut right = cleaned(&[b"abc", b"ghi"]);
+
+        let common = split_common(&mut left, &mut right);
+
+        assert_eq!(common, cleaned(&[b"abc"]));
+        assert_eq!(left, cleaned(&[b"def", b"zzz"]));
+        assert_eq!(right, cleaned(&[b"ghi"]));
     }
 
     #[test]

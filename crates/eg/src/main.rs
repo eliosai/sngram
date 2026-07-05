@@ -8,7 +8,6 @@ The main entry point into ripgrep.
     clippy::cast_sign_loss,
     clippy::cognitive_complexity,
     clippy::expect_used,
-    clippy::indexing_slicing,
     clippy::missing_const_for_fn,
     clippy::missing_errors_doc,
     clippy::nursery,

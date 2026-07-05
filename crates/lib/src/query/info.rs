@@ -5,7 +5,7 @@
 //! possible match prefixes and suffixes, and a [`Query`] already committed
 //! for everything in between. Combining rules live in `combine.rs`.
 
-use super::query::Query;
+use super::algebra::Query;
 use super::strings::StringSet;
 
 use sngram_types::Gram;

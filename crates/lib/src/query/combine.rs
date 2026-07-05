@@ -4,7 +4,7 @@
 //! exact/prefix/suffix sets and the match query from growing without bound,
 //! flushing their grams into the query as they get large. The structure is
 //! Google codesearch's; the bounds and the covering sets are sparse-native:
-//! literals cover to every gram [`extract::scan`] would emit for them (the
+//! literals cover to every gram [`crate::scan`] would emit for them (the
 //! maximal set guaranteed present in any containing document), and windows
 //! stay wide instead of degrading to trigrams after the first flush.
 
@@ -12,11 +12,11 @@ use std::mem;
 
 use sngram_types::Gram;
 
-use crate::extract::{self, MIN_LEN};
+use crate::scan;
 
+use super::algebra::{Op, Query};
 use super::analyze::{Analyzer, BOUNDARY_GROW, BOUNDARY_KEEP, MAX_EXACT, MAX_EXACT_BYTES, MAX_SET};
 use super::info::RegexpInfo;
-use super::query::{Op, Query};
 use super::strings::{Order, StringSet};
 
 /// Bound on the seam cross product flushed at a concat boundary. Beyond it
@@ -150,7 +150,7 @@ impl Analyzer<'_> {
     /// guaranteed containment (prefix-like sets, including exact sets,
     /// shorten from the tail; suffix sets from the head).
     pub fn and_grams(&self, q: Query, set: &StringSet, order: Order) -> Query {
-        if set.is_empty() || set.min_len() < MIN_LEN || !self.may_flush() {
+        if set.is_empty() || set.min_len() < scan::min_len() || !self.may_flush() {
             return q;
         }
         let cap = self.flush_cap();
@@ -170,11 +170,11 @@ impl Analyzer<'_> {
 
     fn truncated_cover(&self, q: Query, set: &StringSet, order: Order, cap: usize) -> Query {
         let mut fitted = set.clone();
-        while fitted.max_len() > MIN_LEN {
+        while fitted.max_len() > scan::min_len() {
             let keep = fitted.max_len() - 1;
             truncate_to(&mut fitted, order, keep);
             fitted.clean(order);
-            if fitted.min_len() < MIN_LEN {
+            if fitted.min_len() < scan::min_len() {
                 return q;
             }
             if let Some(covers) = self.branch_covers(&fitted, true, cap) {
@@ -193,7 +193,7 @@ impl Analyzer<'_> {
             let grams = if minimal {
                 self.minimal_cover_set(s)
             } else {
-                self.cover_set(s)
+                self.guaranteed_cover_set(s)
             };
             if grams.is_empty() {
                 return None;
@@ -230,11 +230,14 @@ impl Analyzer<'_> {
     /// The strongest single guaranteed gram for a branch: longest first,
     /// then lexicographic for stable plans.
     fn single_cover(&self, s: &[u8]) -> Option<Gram> {
-        self.cover_set(s).into_vec().into_iter().max_by(|a, b| {
-            a.len()
-                .cmp(&b.len())
-                .then_with(|| a.as_bytes().cmp(b.as_bytes()))
-        })
+        self.guaranteed_cover_set(s)
+            .into_vec()
+            .into_iter()
+            .max_by(|a, b| {
+                a.len()
+                    .cmp(&b.len())
+                    .then_with(|| a.as_bytes().cmp(b.as_bytes()))
+            })
     }
 
     fn and_or_grams(&self, q: Query, grams: StringSet) -> Query {
@@ -259,7 +262,7 @@ impl Analyzer<'_> {
     /// The minimal covering grams of `s`, chaining it end to end.
     fn minimal_cover_set(&self, s: &[u8]) -> StringSet {
         let mut set = StringSet::new();
-        for gram in extract::cover_one(self.table(), s) {
+        for gram in scan::minimal_cover(self.table(), s) {
             set.push(gram);
         }
         set.clean(Order::Prefix);
@@ -268,20 +271,16 @@ impl Analyzer<'_> {
 
     /// Every gram guaranteed to be indexed for a document containing `s`.
     ///
-    /// A gram's emission by [`extract::scan`] depends only on the bigram
+    /// A gram's emission by [`crate::scan`] depends only on the bigram
     /// weights inside its span, so each gram the scan emits for `s` alone is
     /// also emitted when scanning any document that contains `s`. This is the
     /// maximal sound constraint set; the minimal covering set is included for
     /// its equal-weight plateau grams the scan's dedup collapses.
-    fn cover_set(&self, s: &[u8]) -> StringSet {
-        let mut set = self.minimal_cover_set(s);
-        #[allow(
-            clippy::indexing_slicing,
-            reason = "scan emits start..end spans within s"
-        )]
-        extract::scan(self.table(), s, |start, end, _| {
-            set.push(Gram::from(&s[start..end]));
-        });
+    fn guaranteed_cover_set(&self, s: &[u8]) -> StringSet {
+        let mut set = StringSet::new();
+        for gram in scan::guaranteed_cover(self.table(), s) {
+            set.push(gram);
+        }
         set.clean(Order::Prefix);
         set
     }
@@ -490,14 +489,14 @@ fn seam(x: &RegexpInfo, y: &RegexpInfo) -> Option<StringSet> {
     if x.suffix.len() > MAX_SET || y.prefix.len() > MAX_SET {
         return None;
     }
-    if x.suffix.min_len() + y.prefix.min_len() < MIN_LEN {
+    if x.suffix.min_len() + y.prefix.min_len() < scan::min_len() {
         return None;
     }
     if x.suffix.len().saturating_mul(y.prefix.len()) <= MAX_SEAM_CROSS {
         return Some(x.suffix.cross(&y.prefix, Order::Prefix));
     }
     let (left, right) = shrink_seam(x.suffix.clone(), y.prefix.clone())?;
-    if left.min_len() + right.min_len() < MIN_LEN {
+    if left.min_len() + right.min_len() < scan::min_len() {
         return None;
     }
     Some(left.cross(&right, Order::Prefix))
@@ -529,12 +528,13 @@ fn should_flush_exact(info: &RegexpInfo, force: bool) -> bool {
         return false;
     };
     let min = exact.min_len();
-    exact.len() > MAX_EXACT || exact.byte_len() > MAX_EXACT_BYTES || (min >= MIN_LEN && force)
+    exact.len() > MAX_EXACT
+        || exact.byte_len() > MAX_EXACT_BYTES
+        || (min >= scan::min_len() && force)
 }
 
 /// Move each exact string into the prefix and suffix sets as a stub wide
 /// enough for the next windows to overlap the flushed one.
-#[allow(clippy::indexing_slicing, reason = "k is min(BOUNDARY_KEEP, len)")]
 fn spill_exact(info: &mut RegexpInfo, exact: &StringSet) {
     for s in exact.as_slice() {
         let k = BOUNDARY_KEEP.min(s.len());
@@ -584,7 +584,6 @@ fn reduce_set(t: &mut StringSet, order: Order) {
     }
 }
 
-#[allow(clippy::indexing_slicing, reason = "cut only when len > keep")]
 fn truncate_to(t: &mut StringSet, order: Order, keep: usize) {
     let items = mem::take(t).into_vec();
     for s in items {
@@ -646,6 +645,21 @@ mod tests {
         out
     }
 
+    fn set(items: &[&[u8]], order: Order) -> StringSet {
+        let mut out = StringSet::new();
+        for item in items {
+            out.push(Gram::from(*item));
+        }
+        out.clean(order);
+        out
+    }
+
+    fn contains_member(set: &StringSet, bytes: &[u8]) -> bool {
+        set.as_slice()
+            .iter()
+            .any(|member| member.as_bytes() == bytes)
+    }
+
     #[test]
     fn shrink_seam_bounds_large_cross_product_without_emptying_context() {
         let left = numbered_set(b'l', 64);
@@ -655,6 +669,56 @@ mod tests {
         assert!(left.len().saturating_mul(right.len()) <= MAX_SEAM_CROSS);
         assert!(left.min_len() > 0);
         assert!(right.min_len() > 0);
+    }
+
+    #[test]
+    fn spill_exact_keeps_prefix_and_suffix_slices_in_bounds() {
+        let exact = set(&[b"", b"a", b"abcdef", b"0123456789abcdef"], Order::Prefix);
+        let mut info = RegexpInfo::blank();
+
+        spill_exact(&mut info, &exact);
+        info.prefix.clean(Order::Prefix);
+        info.suffix.clean(Order::Suffix);
+
+        assert!(
+            info.prefix
+                .as_slice()
+                .iter()
+                .all(|member| member.len() <= BOUNDARY_KEEP)
+        );
+        assert!(
+            info.suffix
+                .as_slice()
+                .iter()
+                .all(|member| member.len() <= BOUNDARY_KEEP)
+        );
+        assert!(contains_member(&info.prefix, b""));
+        assert!(contains_member(&info.suffix, b""));
+        assert!(contains_member(&info.prefix, b"a"));
+        assert!(contains_member(&info.suffix, b"a"));
+        assert!(contains_member(&info.prefix, b"01234567"));
+        assert!(contains_member(&info.suffix, b"89abcdef"));
+    }
+
+    #[test]
+    fn truncate_to_respects_prefix_and_suffix_bounds() {
+        let mut prefixes = set(&[b"a", b"abcd", b"abcdef"], Order::Prefix);
+        truncate_to(&mut prefixes, Order::Prefix, 3);
+        prefixes.clean(Order::Prefix);
+
+        assert!(prefixes.as_slice().iter().all(|member| member.len() <= 3));
+        assert!(contains_member(&prefixes, b"a"));
+        assert!(contains_member(&prefixes, b"abc"));
+
+        let mut suffixes = set(&[b"a", b"abcd", b"zcd", b"abcdef"], Order::Suffix);
+        truncate_to(&mut suffixes, Order::Suffix, 3);
+        suffixes.clean(Order::Suffix);
+
+        assert!(suffixes.as_slice().iter().all(|member| member.len() <= 3));
+        assert!(contains_member(&suffixes, b"a"));
+        assert!(contains_member(&suffixes, b"bcd"));
+        assert!(contains_member(&suffixes, b"zcd"));
+        assert!(contains_member(&suffixes, b"def"));
     }
 
     #[test]

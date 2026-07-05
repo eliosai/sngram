@@ -3,8 +3,7 @@
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::cast_possible_truncation,
-    clippy::excessive_nesting,
-    clippy::indexing_slicing
+    clippy::excessive_nesting
 )]
 
 //! Benchmarks the real training ingest path: `LocalTally::count_buffer` is the

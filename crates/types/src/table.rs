@@ -68,7 +68,6 @@ impl WeightTable {
     ///
     /// The returned bytes are accepted by [`WeightTable::from_bytes`].
     #[must_use]
-    #[allow(clippy::indexing_slicing, reason = "fixed-size header and body")]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0u8; WeightTableSettings::TABLE_BINARY_SIZE];
         let version = if self.provenance.is_some() {
@@ -127,7 +126,6 @@ impl WeightTable {
     }
 
     /// The weight of one byte pair.
-    #[allow(clippy::indexing_slicing, reason = "u8<<8|u8 <= 65535 < 65536")]
     #[must_use]
     pub fn weight(&self, c1: u8, c2: u8) -> u32 {
         self.weights[usize::from(c1) << 8 | usize::from(c2)]
@@ -234,7 +232,6 @@ fn build_weights(
     weights
 }
 
-#[allow(clippy::indexing_slicing, reason = "buf is a full SPNG table buffer")]
 fn write_weights(weights: &[u32; WeightTableSettings::WEIGHTS_COUNT], buf: &mut [u8]) {
     let data = &mut buf[WeightTableSettings::HEADER_SIZE..];
     for (i, w) in weights.iter().enumerate() {
@@ -255,7 +252,6 @@ const fn low_pair_bytes(index: usize) -> [u8; 3] {
     ]
 }
 
-#[allow(clippy::indexing_slicing, reason = "data.len() == WEIGHTS_COUNT * 4")]
 fn parse_weights(data: &[u8]) -> Box<[u32; WeightTableSettings::WEIGHTS_COUNT]> {
     let mut weights = zero_weights();
     for (i, w) in weights.iter_mut().enumerate() {
@@ -326,6 +322,16 @@ mod tests {
         assert_eq!(table.version(), 1);
         assert_eq!(table.provenance(), None);
         assert_eq!(table.weight(b'f', b'n'), crc32fast::hash(b"fn"));
+    }
+
+    #[test]
+    fn weight_indexes_first_and_last_pairs() {
+        let table = WeightTable::from_weight_fn(|a, b| u32::from(a) << 8 | u32::from(b));
+
+        assert_eq!(table.weight(0, 0), 0);
+        assert_eq!(table.weight(0, u8::MAX), u32::from(u8::MAX));
+        assert_eq!(table.weight(u8::MAX, 0), u32::from(u8::MAX) << 8);
+        assert_eq!(table.weight(u8::MAX, u8::MAX), u32::from(u16::MAX));
     }
 
     #[test]

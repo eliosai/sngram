@@ -44,12 +44,13 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
 > (HashKey, mix(raw^key), folded-twin salt); mint-time valley tuning
 > (learn::Tuning — separators _./-:, case seam, \n/\r discounted toward a
 > floor; scripts/mint-tuned-tables.py re-mints existing bins without a
-> training run); ScanOptions (virtual \n sentinels as a finalize tweak +
-> ASCII-folded twin space + deployment key) with differential pins;
-> plan_query + IndexFormat (folded-space plans for -i/-S, terminator boundary
+> training run); standard streaming scan format (virtual \n sentinels +
+> ASCII-folded twin space) with differential pins;
+> query planning (folded-space plans for -i/-S, terminator boundary
 > grams for edge anchors, interior-anchor pruning preserved); DfStats +
 > QueryPlan::estimate_candidates + tune (rarest-first, stop-gram drops from
-> And bags only); try_scan; MSRV aligned at 1.96; README doctests wired;
+> And bags only); streaming scan API; MSRV aligned at 1.96; README examples
+> updated;
 > sngram-weights narrowed to feature-selected `weights() -> WeightTable`;
 > fp-queries.tsv +41 sentinel rows. NOT applied on purpose:
 > #[non_exhaustive] on QueryPlan/PlanOptions —
@@ -74,8 +75,8 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
 > gated behind `--debug`/`EG_INDEX_JSON_MANIFEST`; table.bin format v3 in
 > `postings-v4` dropping the offset column (offset is the prefix sum
 > reconstructed at open, ~50 % off table.bin); flags-only TSV rows in the fp/fn
-> harness scripts; `indexing_slicing` audit across `index/**` (`.get()` where
-> cheap, reasoned allows on the proven merge-join loops). Deliberately narrowed:
+> harness scripts; workspace-level indexing policy with invariant tests on the
+> proven merge-join loops. Deliberately narrowed:
 > merge stays single-threaded (documented), delta+varint postings deferred, and
 > per-subtree/tombstone delta for deletions and renames is unchanged.
 
@@ -117,12 +118,10 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
     Add file headers (magic, version, count, checksum). *(S)*
   - Corrupt index bricks search (hard error, no self-heal) until manual
     `--index=rebuild`; auto-rebuild on structural/checksum failure. *(S)*
-- [x] (lib side) **A ≥4 GiB file panics the whole index build** — `try_scan()` landed; eg wiring in the P0 CLI wave — `sngram::scan` asserts
-  `len < 4 GiB` inside the rayon build loop with no catch; also no file-size
-  skip and `--no-mmap` slurps whole files. Wire `StreamScanner` (exists,
-  unused by the indexer) or skip/force-candidate oversized files; align with
-  `--max-filesize`. Library side: add `try_scan() -> Result` so the panic is
-  opt-in. *(M)*
+- [x] (lib side) **A ≥4 GiB file panics the whole index build** — fixed by the
+  `BufRead` scan API; eg wiring in the P0 CLI wave. Oversized files should be
+  streamed, skipped, or forced as candidates according to `--max-filesize`.
+  *(M)*
 
 ---
 
@@ -178,12 +177,13 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
   (mutex'd VecDeque + per-candidate locked prints). Chunked/work-stealing queue,
   per-thread buffers, cap workers ~8. Do NOT lower the 4096 threshold (measured
   harmful). *(S–M)*
-- [ ] **P2 Dedup minimal⊂maximal cover redundancy** in `cover_set` (cost-only). *(S)*
+- [ ] **P2 Dedup minimal⊂maximal literal-cover redundancy** (cost-only). *(S)*
 - [ ] **P2 Plan-quality regression harness**: candidate-count / plan-gram-count
   ceilings per query class, so silent FP regressions get caught (soundness and
   shape tests don't). *(M)*
-- [ ] **P2 Audit `indexing_slicing` allows** on the skeletal/truncation paths
-  where `keep` reaches 1 (61 allows total, each a hand proof). *(S)*
+- [x] **P2 Audit indexing slices** — LANDED 2026-07-04: workspace-level policy
+  plus focused invariant tests on scanner spans, truncation/spill paths, and
+  sorted merge tails. *(S)*
 - [x] **P2 Harness tweak** — LANDED 2026-07-03: `eg-fp-rates.sh` and
   `eg-fn-check.sh` accept flags-only TSV rows (empty pattern column), so
   multi-`-e` invocations run without a positional pattern. *(S)*
@@ -249,7 +249,9 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
   floor (gap queries: `sched.*clock` 86%, `$`-anchored literals 99%+ FP;
   inherently invisible to a file-granular index). Sidecar file keeps old
   indexes valid. *(L)*
-- [x] **Case-folded gram field** — landed as the folded twin space (`ScanOptions::fold` + `plan_query`; same postings keyspace, FOLD-salted hashes) — collapses `-i`/smart-case OR-plans (hundreds
+- [x] **Case-folded gram field** — landed as the standard folded twin space
+  (`scan` emits it; `query` selects it; same postings keyspace,
+  FOLD-salted hashes) — collapses `-i`/smart-case OR-plans (hundreds
   of variant branches) into single folded lookups; ~+40–60% table size or
   replace-with-folded tradeoff. *(M)*
 - [ ] **Positional postings (codesearch-style)** — adjacency/order pruning;
@@ -280,7 +282,7 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
 - [x] **P1 Fix `crates/lib/README.md` examples** — fixed + wired as doctests (`ReadmeDoctests`) (pass `&table`; they don't
   compile) and wire READMEs/examples into doctests. *(S)*
 - [ ] **P2 Productionize the fuzzers** as cargo-fuzz targets: scan-vs-reference,
-  StreamScanner chunking, plan soundness vs regex oracle, table/pattern/hash
+  streaming chunking, plan soundness vs regex oracle, table/pattern/hash
   panic hunting. Add proptest for StringSet + Query algebra invariants. *(M)*
 - [x] **P2 Weight-table provenance** — v2 format embeds provenance; version validated in from_bytes: bins carry no corpus/date/commit record;
   `WeightTable.version` is loaded but never validated (always 1). Provenance

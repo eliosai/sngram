@@ -6,6 +6,7 @@ Sparse n-gram extraction and regex query planning for code search. Stateless,
 ```toml
 [dependencies]
 sngram = "0.5"
+sngram-types = "0.5"
 ```
 
 ## How it works
@@ -28,50 +29,57 @@ match; the real regex then verifies the candidates.
 ## API
 
 ```rust,no_run
-use sngram::{query, scan, QueryOptions, ScanOptions};
-use sngram_types::{Content, WeightTable};
+use sngram::{query, scan};
+use sngram_types::{ScanEvent, WeightTable};
+use std::io::Cursor;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read("crates/weights/data/5tb_weights.bin")?;
     let table = WeightTable::from_bytes(&bytes)?;
-    let doc = Content::new(b"fn max_file_size() -> u64 { 0 }");
+    let doc = b"fn max_file_size() -> u64 { 0 }";
 
     // index side: each gram arrives with its 64-bit index key
-    scan(&table, &doc, ScanOptions::default(), |gram| {
-        let _bytes = gram.bytes;
-        let _key = gram.hash; // store this in your inverted index
+    scan(&table, Cursor::new(doc), |event| {
+        if let ScanEvent::Gram(gram) = event {
+            let _bytes = gram.bytes;
+            let _key = gram.hash; // store this in your inverted index
+        }
     })?;
 
-    // query side: a regex becomes a boolean gram query; Gram::hash() yields
-    // the same key scan emitted for the same bytes
-    let planned = query(&table, &[r"max_\w+_size"], QueryOptions::default())?;
-    let _ = planned;
+    // query side: a regex becomes a boolean gram query
+    let plan = query(&table, r"max_\w+_size")?;
+    let _key = plan.hash_key(); // use with each plan gram's hash_keyed(...)
     Ok(())
 }
 ```
 
-For valid patterns, a query too broad to prefilter yields `QueryPlan::All`
-(scan everything, or reject it), and an impossible one yields `QueryPlan::None`.
+For valid patterns, a query too broad to prefilter yields `QueryExpr::All`
+(scan everything, or reject it), and an impossible one yields `QueryExpr::None`.
 
 ```rust,ignore
-pub enum QueryPlan {
+pub struct QueryPlan {
+    expr: QueryExpr,
+    space: GramSpace,
+}
+
+pub enum QueryExpr {
     All,
     None,
-    And { grams: Vec<Gram>, sub: Vec<QueryPlan> }, // all grams present AND every sub
-    Or  { grams: Vec<Gram>, sub: Vec<QueryPlan> }, // any gram present OR some sub
+    And { grams: Vec<Gram>, sub: Vec<QueryExpr> }, // all grams present AND every sub
+    Or  { grams: Vec<Gram>, sub: Vec<QueryExpr> }, // any gram present OR some sub
 }
 ```
 
-`Gram` stores up to 22 bytes inline (no heap allocation for typical grams),
-dereferences to `[u8]`, and `Gram::hash()` produces the same 64-bit key that
-`scan` emits — index side and query side always agree. The structure maps
-directly onto an integer-array index: with a postgres `int8[]` column, an
-`And` bag is `grams @> ARRAY[..]` and an `Or` bag is `grams && ARRAY[..]`.
+`Gram` stores up to 22 bytes inline (no heap allocation for typical grams) and
+dereferences to `[u8]`. Hash plan grams with `plan.hash_key()` so folded-space
+queries look up the same 64-bit keys that `scan` emitted. The structure maps
+directly onto an integer-array index: with a postgres `int8[]` column, an `And`
+bag is `grams @> ARRAY[..]` and an `Or` bag is `grams && ARRAY[..]`.
 
 | Item | Use it when |
 |---|---|
-| `scan` | You have one document in memory and need sparse grams plus hash keys. |
-| `query` | You have one or more patterns and need a planned gram prefilter. |
+| `scan` | You have one byte stream and need sparse grams, hash keys, and final scan metadata. |
+| `query` | You have one regex pattern and need a planned gram prefilter. |
 
 ### Training
 
@@ -80,14 +88,14 @@ LocalTally}` — the byte-pair counters that train fresh weight tables.
 `BigramCounter::to_table_bytes()` serializes the learned table in the format
 `WeightTable::from_bytes` loads.
 
-`Content` and `WeightTable` live in `sngram-types`. Load a table you minted
-with `WeightTable::from_bytes`; `sngram-weights` will embed the official 0.5
-tables as the training run mints them.
+`WeightTable` lives in `sngram_types`. Load a table you minted with
+`WeightTable::from_bytes`; `sngram-weights` embeds the official 0.5 tables.
 
 ## 0.5 migration
 
-- `scan` now takes `ScanOptions` and emits one `ScannedGram` per callback.
-- `query` now takes a pattern slice plus `QueryOptions` and returns `PlannedQuery`.
+- `scan` now takes a `BufRead` input and emits `ScanEvent::Gram` plus one
+  `ScanEvent::Finish` per callback.
+- `query` now takes one regex pattern and returns `QueryPlan`.
 - `index`, `IndexGram`, and `IndexGrams` are gone — collect from `scan` if you
   need a `Vec`, and use the emitted `hash` instead of hashing gram bytes.
 - `QueryPlan` grams are `Gram` (deref to `[u8]`) instead of `Vec<u8>`.

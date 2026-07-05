@@ -2,14 +2,12 @@
     missing_docs,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::indexing_slicing,
     clippy::cast_possible_truncation,
     clippy::unwrap_used,
     clippy::expect_used
 )]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use sngram::QueryOptions;
 use sngram_types::WeightTable;
 
 fn weight_table() -> WeightTable {
@@ -68,7 +66,7 @@ fn bench_query(c: &mut Criterion) {
 
     for &(name, pat) in PATTERNS {
         group.bench_with_input(BenchmarkId::new("query", name), &pat, |b, pat| {
-            b.iter(|| sngram::query(&table, core::slice::from_ref(pat), QueryOptions::default()));
+            b.iter(|| sngram::query(&table, pat));
         });
     }
 
@@ -83,7 +81,7 @@ fn bench_query(c: &mut Criterion) {
     ];
     for (name, pat) in &long_runs {
         group.bench_with_input(BenchmarkId::new("query", *name), pat, |b, pat| {
-            b.iter(|| sngram::query(&table, &[pat.as_str()], QueryOptions::default()));
+            b.iter(|| sngram::query(&table, pat));
         });
     }
     group.finish();

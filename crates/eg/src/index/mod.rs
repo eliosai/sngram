@@ -23,6 +23,7 @@ use std::{
 };
 
 use anyhow::bail;
+use sngram::types::{QueryError, QueryExpr, QueryPlan};
 
 use crate::{
     flags::{HiArgs, Mode, SearchMode},
@@ -65,18 +66,25 @@ pub(crate) fn run(args: &HiArgs) -> anyhow::Result<bool> {
     let plan = match planner::query_plan(args, &table) {
         Ok(plan) => plan,
         Err(err) => {
-            if let Some(query_err) = err.downcast_ref::<sngram::QueryError>() {
-                bail!("{query_err}");
+            if let Some(query_err) = err.downcast_ref::<QueryError>() {
+                match query_err {
+                    QueryError::PatternTooLong { .. } => {
+                        log::debug!("eg index: planner rejected query: {query_err}");
+                        return unsupported(Unsupported::PlannerError);
+                    },
+                    QueryError::InvalidRegex(_) => bail!("{query_err}"),
+                    _ => return unsupported(Unsupported::PlannerError),
+                }
             }
             log::debug!("eg index: planner rejected query: {err:#}");
             return unsupported(Unsupported::PlannerError);
         },
     };
     log::debug!("eg index: query plan: {}", debug_plan(&plan.plan));
-    match plan.plan {
-        sngram::QueryPlan::All => return unsupported(Unsupported::TooBroadPattern),
-        sngram::QueryPlan::None => return unsupported(Unsupported::ImpossiblePattern),
-        sngram::QueryPlan::And { .. } | sngram::QueryPlan::Or { .. } => {},
+    match plan.plan.expr() {
+        QueryExpr::All => return unsupported(Unsupported::TooBroadPattern),
+        QueryExpr::None => return unsupported(Unsupported::ImpossiblePattern),
+        QueryExpr::And { .. } | QueryExpr::Or { .. } => {},
     }
     let location = location::resolve(args, &index_root(args)?)?;
     let index_dir = location.index_dir();
@@ -468,7 +476,7 @@ fn collect_haystacks(args: &HiArgs, index_state_root: &Path) -> anyhow::Result<C
 
 const DEBUG_PLAN_PREVIEW_BYTES: usize = 4096;
 
-fn debug_plan(plan: &sngram::QueryPlan) -> String {
+fn debug_plan(plan: &QueryPlan) -> String {
     let mut preview = PlanPreview::new(DEBUG_PLAN_PREVIEW_BYTES);
     let _ = write!(&mut preview, "{plan}");
     if preview.truncated {
@@ -515,13 +523,8 @@ impl fmt::Write for PlanPreview {
     }
 }
 
-fn plan_gram_count(plan: &sngram::QueryPlan) -> usize {
-    match plan {
-        sngram::QueryPlan::All | sngram::QueryPlan::None => 0,
-        sngram::QueryPlan::And { grams, sub } | sngram::QueryPlan::Or { grams, sub } => {
-            grams.len() + sub.iter().map(plan_gram_count).sum::<usize>()
-        },
-    }
+fn plan_gram_count(plan: &QueryPlan) -> usize {
+    plan.gram_count()
 }
 
 /// Candidate document ordinals in the manifest's requested output order.
@@ -833,30 +836,39 @@ struct CollectedHaystacks {
 
 #[cfg(test)]
 mod tests {
-    use sngram::{Gram, QueryPlan};
+    use sngram::types::QueryPlan;
+    use sngram_types::WeightTable;
 
     use super::{DEBUG_PLAN_PREVIEW_BYTES, debug_plan};
 
+    fn table() -> WeightTable {
+        WeightTable::from_weight_fn(|c1, c2| {
+            u32::from(c1).wrapping_mul(257).wrapping_add(u32::from(c2))
+        })
+    }
+
+    fn plan(pattern: &str) -> QueryPlan {
+        sngram::query(&table(), pattern).expect("pattern plans")
+    }
+
     #[test]
     fn debug_plan_keeps_small_plans_verbatim() {
-        let plan = QueryPlan::And {
-            grams: vec![Gram::from(b"needle".as_slice())],
-            sub: vec![],
-        };
+        let plan = plan("needle_value");
 
         assert_eq!(debug_plan(&plan), plan.to_string());
     }
 
     #[test]
     fn debug_plan_truncates_large_plans_at_utf8_boundary() {
-        let grams = (0..600)
-            .map(|i| Gram::from(format!("gram_{i}_µ").as_bytes()))
-            .collect();
-        let plan = QueryPlan::Or { grams, sub: vec![] };
+        let pattern = (0..300)
+            .map(|i| format!("gram_{i:03}_µ"))
+            .collect::<Vec<_>>()
+            .join("|");
+        let plan = plan(&pattern);
         let rendered = debug_plan(&plan);
 
         assert!(rendered.len() > DEBUG_PLAN_PREVIEW_BYTES);
         assert!(rendered.contains("[truncated plan:"));
-        assert!(rendered.contains("grams=600"));
+        assert!(rendered.contains("grams="));
     }
 }

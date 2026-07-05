@@ -12,7 +12,7 @@ categories = ["text-processing", "algorithms", "data-structures"]
 publish = true
 
 [features]
-# stream adds StreamScanner::index_reader, pulling only tokio's io traits, no runtime
+# stream reserves async integration dependencies without changing the sync scan core
 stream = ["dep:tokio"]
 # learn adds the bigram counters used to train weight tables; off by default
 # because it is useless without a training pipeline driving it

@@ -1,7 +1,8 @@
 //! Query planning from eg patterns to Tantivy sparse-gram queries.
 
 use anyhow::{Context, bail};
-use sngram::{GramSpace, HashKey, QueryPlan};
+use sngram::types::{QueryExpr, QueryPlan};
+use sngram_types::HashKey;
 use sngram_types::WeightTable;
 use tantivy::{
     Term,
@@ -18,26 +19,20 @@ pub(super) struct KeyedPlan {
 }
 
 pub(super) fn query_plan(args: &HiArgs, table: &WeightTable) -> anyhow::Result<KeyedPlan> {
-    let patterns = args.patterns();
-    if patterns.is_empty() {
+    if args.patterns().is_empty() {
         bail!("indexed search requires at least one pattern");
     }
-    let opts = sngram::QueryOptions {
-        folded_space: true,
-        line_sentinels: true,
-        ..args.query_options()
+    let Some(pattern) = args.indexed_pattern() else {
+        bail!("indexed search cannot prefilter inverted matches; use --no-index");
     };
-    let planned = sngram::query(table, patterns, opts).with_context(|| {
-        format!("indexed query planner could not parse {patterns:?}; use --no-index")
+    let plan = sngram::query(table, &pattern).with_context(|| {
+        format!(
+            "indexed query planner could not parse {:?}; use --no-index",
+            args.patterns()
+        )
     })?;
-    let key = match planned.space {
-        GramSpace::Primary => HashKey::UNKEYED,
-        GramSpace::Folded => HashKey::UNKEYED.folded(),
-    };
-    Ok(KeyedPlan {
-        plan: planned.plan,
-        key,
-    })
+    let key = plan.hash_key();
+    Ok(KeyedPlan { plan, key })
 }
 
 pub(super) fn plan_to_query(
@@ -45,26 +40,32 @@ pub(super) fn plan_to_query(
     plan: &QueryPlan,
     key: HashKey,
 ) -> anyhow::Result<Box<dyn Query>> {
-    match plan {
-        QueryPlan::All => bail!("indexed query has no sparse n-gram constraints; use --no-index"),
-        QueryPlan::None => Ok(Box::new(EmptyQuery)),
-        QueryPlan::And { grams, sub } => {
+    expr_to_query(field, plan.expr(), key)
+}
+
+fn expr_to_query(field: Field, expr: &QueryExpr, key: HashKey) -> anyhow::Result<Box<dyn Query>> {
+    match expr {
+        QueryExpr::All => {
+            bail!("indexed query has no sparse n-gram constraints; use --no-index")
+        },
+        QueryExpr::None => Ok(Box::new(EmptyQuery)),
+        QueryExpr::And { grams, sub } => {
             let mut clauses = Vec::with_capacity(grams.len() + sub.len());
             for gram in grams {
                 clauses.push(term_query(field, gram.hash_keyed(key)));
             }
-            for plan in sub {
-                clauses.push(plan_to_query(field, plan, key)?);
+            for expr in sub {
+                clauses.push(expr_to_query(field, expr, key)?);
             }
             Ok(intersection_query(clauses))
         },
-        QueryPlan::Or { grams, sub } => {
+        QueryExpr::Or { grams, sub } => {
             let mut clauses = Vec::with_capacity(grams.len() + sub.len());
             for gram in grams {
                 clauses.push(term_query(field, gram.hash_keyed(key)));
             }
-            for plan in sub {
-                clauses.push(plan_to_query(field, plan, key)?);
+            for expr in sub {
+                clauses.push(expr_to_query(field, expr, key)?);
             }
             Ok(union_query(clauses))
         },

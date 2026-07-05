@@ -21,7 +21,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use sngram::learn::{BigramCounter, LocalTally};
-use sngram_types::Content;
+use std::io::Cursor;
+
+use sngram::types::{QueryExpr, QueryPlan};
+use sngram_types::{Gram, GramSpace, ScanEvent};
+
+type PyScannedGram = (u8, usize, usize, usize, usize, u8, u64);
 
 /// 256x256 byte-pair weight table.
 #[pyclass(frozen, name = "WeightTable", module = "sngram")]
@@ -63,18 +68,30 @@ impl PyWeightTable {
     }
 }
 
-/// Sparse grams of `data` as a list of `(start, end, hash)` tuples.
+/// Sparse grams of `data` as `(space, scanned_start, scanned_end,
+/// content_start, content_end, boundary_bits, hash)` tuples.
 #[pyfunction]
-fn scan(py: Python<'_>, table: &PyWeightTable, data: &[u8]) -> PyResult<Vec<(usize, usize, u64)>> {
+fn scan(py: Python<'_>, table: &PyWeightTable, data: &[u8]) -> PyResult<Vec<PyScannedGram>> {
     let table = &table.inner;
     py.detach(|| {
         let mut out = Vec::new();
-        sngram::scan(
-            table,
-            &Content::new(data),
-            sngram::ScanOptions::default(),
-            |gram| out.push((gram.start, gram.end, gram.hash)),
-        )
+        sngram::scan(table, Cursor::new(data), |event| {
+            if let ScanEvent::Gram(gram) = event {
+                let space = match gram.space {
+                    GramSpace::Primary => 0,
+                    GramSpace::Folded => 1,
+                };
+                out.push((
+                    space,
+                    gram.scanned_start,
+                    gram.scanned_end,
+                    gram.content_start,
+                    gram.content_end,
+                    gram.boundary.bits(),
+                    gram.hash,
+                ));
+            }
+        })
         .map_err(|e| PyRuntimeError::new_err(format!("scan failed: {e}")))?;
         Ok::<_, PyErr>(out)
     })
@@ -92,14 +109,11 @@ fn scan_hashes<'py>(
     let table = &table.inner;
     let bytes: Vec<u8> = py.detach(|| {
         let mut out = Vec::new();
-        sngram::scan(
-            table,
-            &Content::new(data),
-            sngram::ScanOptions::default(),
-            |gram| {
+        sngram::scan(table, Cursor::new(data), |event| {
+            if let ScanEvent::Gram(gram) = event {
                 out.extend_from_slice(&gram.hash.to_le_bytes());
-            },
-        )
+            }
+        })
         .map_err(|e| PyRuntimeError::new_err(format!("scan failed: {e}")))?;
         Ok::<_, PyErr>(out)
     })?;
@@ -110,7 +124,7 @@ fn scan_hashes<'py>(
 /// emits for the same bytes, and to `QueryPlan.gram_hashes` entries.
 #[pyfunction]
 fn gram_hash(data: &[u8]) -> u64 {
-    sngram::Gram::from(data).hash()
+    Gram::from(data).hash()
 }
 
 /// One node of a query plan: a boolean gram query over index keys.
@@ -139,26 +153,29 @@ impl PyQueryPlan {
     }
 }
 
-fn convert_plan(py: Python<'_>, plan: &sngram::QueryPlan) -> PyResult<PyQueryPlan> {
-    let expr = plan.to_string();
-    let (op, grams, sub) = match plan {
-        sngram::QueryPlan::All => ("all", &[][..], &[][..]),
-        sngram::QueryPlan::None => ("none", &[][..], &[][..]),
-        sngram::QueryPlan::And { grams, sub } => ("and", grams.as_slice(), sub.as_slice()),
-        sngram::QueryPlan::Or { grams, sub } => ("or", grams.as_slice(), sub.as_slice()),
+fn convert_plan(py: Python<'_>, plan: &QueryPlan) -> PyResult<PyQueryPlan> {
+    convert_expr(py, plan.expr())
+}
+
+fn convert_expr(py: Python<'_>, expr: &QueryExpr) -> PyResult<PyQueryPlan> {
+    let (op, grams, sub) = match expr {
+        QueryExpr::All => ("all", &[][..], &[][..]),
+        QueryExpr::None => ("none", &[][..], &[][..]),
+        QueryExpr::And { grams, sub } => ("and", grams.as_slice(), sub.as_slice()),
+        QueryExpr::Or { grams, sub } => ("or", grams.as_slice(), sub.as_slice()),
     };
     Ok(PyQueryPlan {
         op: op.to_owned(),
-        gram_hashes: grams.iter().map(sngram::Gram::hash).collect(),
+        gram_hashes: grams.iter().map(Gram::hash).collect(),
         grams: grams
             .iter()
             .map(|g| PyBytes::new(py, g.as_bytes()).unbind())
             .collect(),
         sub: sub
             .iter()
-            .map(|s| convert_plan(py, s).and_then(|p| Py::new(py, p)))
+            .map(|child| convert_expr(py, child).and_then(|plan| Py::new(py, plan)))
             .collect::<PyResult<_>>()?,
-        expr,
+        expr: expr.to_string(),
     })
 }
 
@@ -168,9 +185,9 @@ fn convert_plan(py: Python<'_>, plan: &sngram::QueryPlan) -> PyResult<PyQueryPla
 /// impossible one yields op "none". Raises `ValueError` on an invalid regex.
 #[pyfunction]
 fn query(py: Python<'_>, table: &PyWeightTable, pattern: &str) -> PyResult<PyQueryPlan> {
-    let planned = sngram::query(&table.inner, &[pattern], sngram::QueryOptions::default())
+    let planned = sngram::query(&table.inner, pattern)
         .map_err(|e| PyValueError::new_err(format!("invalid pattern: {e}")))?;
-    convert_plan(py, &planned.plan)
+    convert_plan(py, &planned)
 }
 
 /// Per-worker byte-pair tally; counts without atomics, merged into a shared

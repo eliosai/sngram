@@ -54,9 +54,9 @@ Search flow: parse rg args, build rg haystacks, run copied rg path for `--no-ind
 
 Use Tantivy as a numeric inverted index: one source file per Tantivy document, repeated indexed `u64` sparse n-gram hashes, fast `u64` `doc_ord`, external manifest for paths and metadata, mmap for normal runs, RAM only for `--index-backend=tantivy-ram`.
 
-Use `sngram::scan` or `StreamScanner` for build extraction. Use `sngram::query` for query plans. Deduplicate gram hashes per file before adding the document.
+Use `sngram::scan` for build extraction and `sngram::query` for query plans. Deduplicate gram hashes per file before adding the document.
 
-If a pattern produces `QueryPlan::All`, indexed mode errors and tells the user to run `--no-index`.
+If a pattern produces an unconstrained plan, indexed mode errors and tells the user to run `--no-index`.
 
 ## Freshness
 

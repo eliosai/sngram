@@ -49,10 +49,6 @@ impl Gram {
     /// allocation when the result fits inline.
     #[must_use]
     #[allow(
-        clippy::indexing_slicing,
-        reason = "a.len() + b.len() <= INLINE_CAP in the inline arm"
-    )]
-    #[allow(
         clippy::cast_possible_truncation,
         reason = "inline arm length <= INLINE_CAP < 256"
     )]
@@ -75,7 +71,6 @@ impl Gram {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         match &self.0 {
-            #[allow(clippy::indexing_slicing, reason = "len <= INLINE_CAP by construction")]
             Repr::Inline { len, buf } => &buf[..usize::from(*len)],
             Repr::Heap(b) => b,
         }
@@ -111,10 +106,6 @@ impl Gram {
         Self::from_inline_parts(len as u8, buf)
     }
 
-    #[allow(
-        clippy::indexing_slicing,
-        reason = "caller only enters this branch when bytes.len() <= INLINE_CAP"
-    )]
     fn from_inline_bytes(bytes: &[u8]) -> Self {
         let mut buf = Self::empty_inline_buf();
         buf[..bytes.len()].copy_from_slice(bytes);
@@ -221,6 +212,14 @@ mod tests {
         assert_eq!(g.len(), 24);
         assert_eq!(&g[..12], &[b'x'; 12]);
         assert_eq!(&g[12..], &[b'y'; 12]);
+    }
+
+    #[test]
+    fn concat_exact_inline_boundary_preserves_both_halves() {
+        let g = Gram::concat(&[b'a'; 11], &[b'b'; 11]);
+        assert_eq!(g.len(), GramSettings::INLINE_CAP);
+        assert_eq!(&g[..11], &[b'a'; 11]);
+        assert_eq!(&g[11..], &[b'b'; 11]);
     }
 
     #[test]

@@ -10,6 +10,7 @@ use std::{
 use {
     bstr::BString,
     grep::printer::{ColorSpecs, SummaryKind},
+    regex_syntax::ast::{self, Ast, ClassSet, ClassSetItem},
 };
 
 use crate::{
@@ -379,29 +380,19 @@ impl HiArgs {
         self.index.freshness
     }
 
-    /// The planner options mirroring [`Self::matcher_rust`]'s configuration,
-    /// so the gram plan is built from exactly the semantics the verifying
-    /// matcher applies. Smart case in particular resolves inside the planner
-    /// with grep-regex's literal-aware rule.
-    pub(crate) fn query_options(&self) -> sngram::QueryOptions {
-        sngram::QueryOptions {
-            syntax: if self.fixed_strings {
-                sngram::QuerySyntax::FixedStrings
-            } else {
-                sngram::QuerySyntax::Regex
-            },
-            case: match self.case {
-                CaseMode::Sensitive => sngram::QueryCase::Sensitive,
-                CaseMode::Insensitive => sngram::QueryCase::Insensitive,
-                CaseMode::Smart => sngram::QueryCase::Smart,
-            },
-            unicode: !self.no_unicode,
-            dotall: self.multiline && self.multiline_dotall,
-            crlf: self.crlf,
-            invert: self.invert_match,
-            folded_space: false,
-            line_sentinels: false,
+    /// Return one regex pattern with eg's CLI semantics encoded as inline
+    /// regex flags and alternation. `None` means indexed prefiltering is not
+    /// sound for this search mode.
+    pub(crate) fn indexed_pattern(&self) -> Option<String> {
+        if self.invert_match {
+            return None;
         }
+        let patterns = self.patterns();
+        if patterns.is_empty() {
+            return Some(String::new());
+        }
+        let joined = JoinedPattern::from_patterns(patterns, self.fixed_strings).into_regex();
+        Some(InlineFlags::from_args(self, &joined).wrap(joined))
     }
 
     /// Returns true when a non-default regex engine may be used.
@@ -1050,6 +1041,191 @@ impl HiArgs {
             }
         }
         Ok(builder)
+    }
+}
+
+struct JoinedPattern {
+    parts: Vec<String>,
+}
+
+impl JoinedPattern {
+    fn from_patterns(patterns: &[String], fixed_strings: bool) -> Self {
+        let parts = patterns
+            .iter()
+            .map(|pattern| {
+                if fixed_strings {
+                    regex_syntax::escape(pattern)
+                } else {
+                    pattern.clone()
+                }
+            })
+            .map(|pattern| format!("(?:{pattern})"))
+            .collect();
+        Self { parts }
+    }
+
+    fn into_regex(self) -> String {
+        self.parts.join("|")
+    }
+}
+
+struct InlineFlags {
+    case_insensitive: bool,
+    dot_matches_new_line: bool,
+    crlf: bool,
+    no_unicode: bool,
+}
+
+impl InlineFlags {
+    fn from_args(args: &HiArgs, joined: &str) -> Self {
+        Self {
+            case_insensitive: args.case_insensitive_for(joined),
+            dot_matches_new_line: args.multiline && args.multiline_dotall,
+            crlf: args.crlf,
+            no_unicode: args.no_unicode,
+        }
+    }
+
+    fn wrap(&self, pattern: String) -> String {
+        let spec = self.spec();
+        if spec.is_empty() {
+            return pattern;
+        }
+        format!("(?{spec}:{pattern})")
+    }
+
+    fn spec(&self) -> String {
+        let mut on = String::new();
+        if self.case_insensitive {
+            on.push('i');
+        }
+        if self.dot_matches_new_line {
+            on.push('s');
+        }
+        if self.crlf {
+            on.push('R');
+        }
+
+        let mut off = String::new();
+        if self.no_unicode {
+            off.push('u');
+        }
+
+        if off.is_empty() {
+            on
+        } else {
+            format!("{on}-{off}")
+        }
+    }
+}
+
+impl HiArgs {
+    fn case_insensitive_for(&self, pattern: &str) -> bool {
+        match self.case {
+            CaseMode::Sensitive => false,
+            CaseMode::Insensitive => true,
+            CaseMode::Smart => SmartCase::analyze(pattern).case_insensitive(),
+        }
+    }
+}
+
+struct SmartCase {
+    any_uppercase: bool,
+    any_literal: bool,
+}
+
+impl SmartCase {
+    fn analyze(pattern: &str) -> Self {
+        let Ok(parsed) = ast::parse::Parser::new().parse(pattern) else {
+            return Self::sensitive();
+        };
+        let mut analysis = Self::sensitive();
+        analysis.visit(&parsed);
+        analysis
+    }
+
+    const fn sensitive() -> Self {
+        Self {
+            any_uppercase: false,
+            any_literal: false,
+        }
+    }
+
+    const fn case_insensitive(&self) -> bool {
+        self.any_literal && !self.any_uppercase
+    }
+
+    const fn done(&self) -> bool {
+        self.any_uppercase && self.any_literal
+    }
+
+    fn visit(&mut self, node: &Ast) {
+        if self.done() {
+            return;
+        }
+        match *node {
+            Ast::Empty(_)
+            | Ast::Flags(_)
+            | Ast::Dot(_)
+            | Ast::Assertion(_)
+            | Ast::ClassUnicode(_)
+            | Ast::ClassPerl(_) => {},
+            Ast::Literal(ref literal) => self.literal(literal),
+            Ast::ClassBracketed(ref class) => self.class_set(&class.kind),
+            Ast::Repetition(ref repetition) => self.visit(&repetition.ast),
+            Ast::Group(ref group) => self.visit(&group.ast),
+            Ast::Alternation(ref alternation) => {
+                for child in &alternation.asts {
+                    self.visit(child);
+                }
+            },
+            Ast::Concat(ref concat) => {
+                for child in &concat.asts {
+                    self.visit(child);
+                }
+            },
+        }
+    }
+
+    fn class_set(&mut self, set: &ClassSet) {
+        if self.done() {
+            return;
+        }
+        match *set {
+            ClassSet::Item(ref item) => self.class_item(item),
+            ClassSet::BinaryOp(ref op) => {
+                self.class_set(&op.lhs);
+                self.class_set(&op.rhs);
+            },
+        }
+    }
+
+    fn class_item(&mut self, item: &ClassSetItem) {
+        if self.done() {
+            return;
+        }
+        match *item {
+            ClassSetItem::Empty(_)
+            | ClassSetItem::Ascii(_)
+            | ClassSetItem::Unicode(_)
+            | ClassSetItem::Perl(_) => {},
+            ClassSetItem::Literal(ref literal) => self.literal(literal),
+            ClassSetItem::Range(ref range) => {
+                self.literal(&range.start);
+                self.literal(&range.end);
+            },
+            ClassSetItem::Bracketed(ref bracketed) => self.class_set(&bracketed.kind),
+            ClassSetItem::Union(ref union) => {
+                for child in &union.items {
+                    self.class_item(child);
+                }
+            },
+        }
+    }
+
+    const fn literal(&mut self, literal: &ast::Literal) {
+        self.any_literal = true;
+        self.any_uppercase = self.any_uppercase || literal.c.is_uppercase();
     }
 }
 

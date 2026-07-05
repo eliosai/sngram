@@ -73,10 +73,6 @@ impl HashKey {
     }
 }
 
-#[allow(
-    clippy::indexing_slicing,
-    reason = "k stays <= MAX_GRAM_HASH_LEN < table length"
-)]
 const fn pow_table() -> [u64; HashSettings::MAX_GRAM_HASH_LEN + 1] {
     let mut table = [1u64; HashSettings::MAX_GRAM_HASH_LEN + 1];
     let mut k = 1;
@@ -102,10 +98,6 @@ const fn step(h: u64, byte: u8) -> u64 {
 }
 
 #[inline]
-#[allow(
-    clippy::indexing_slicing,
-    reason = "emitted gram lengths are <= MAX_GRAM_HASH_LEN"
-)]
 const fn from_prefixes(key: HashKey, h_end: u64, h_before_start: u64, len: usize) -> u64 {
     mix(h_end.wrapping_sub(
         h_before_start
@@ -114,7 +106,6 @@ const fn from_prefixes(key: HashKey, h_end: u64, h_before_start: u64, len: usize
     ) ^ key.0)
 }
 
-#[allow(clippy::indexing_slicing, reason = "i stays < bytes.len()")]
 const fn hash_bytes(key: HashKey, bytes: &[u8]) -> u64 {
     let mut h = 1u64;
     let mut i = 0;

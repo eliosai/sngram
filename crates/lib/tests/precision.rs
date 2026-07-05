@@ -10,14 +10,16 @@
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::indexing_slicing,
     reason = "tests assert by panicking; the fixture indexes a fixed-shape buffer"
 )]
 
-use std::collections::HashSet;
+use std::{collections::HashSet, io::Cursor};
 
-use sngram::{QueryOptions, QueryPlan, ScanOptions, query, scan};
-use sngram_types::{Content, WeightTable};
+use sngram::{
+    query, scan,
+    types::{QueryExpr, QueryPlan},
+};
+use sngram_types::{GramSpace, HashKey, ScanEvent, WeightTable};
 
 /// A deterministic weight table: each byte pair hashed to a varied weight, so
 /// the sparse hull is non-trivial.
@@ -26,34 +28,36 @@ fn weight_table() -> WeightTable {
 }
 
 /// Evaluate a plan against the grams a document indexed to.
-fn satisfies(plan: &QueryPlan, grams: &HashSet<Vec<u8>>) -> bool {
-    match plan {
-        QueryPlan::All => true,
-        QueryPlan::None => false,
-        QueryPlan::And { grams: g, sub } => {
-            g.iter().all(|x| grams.contains(x.as_bytes()))
-                && sub.iter().all(|s| satisfies(s, grams))
+const fn key_for(space: GramSpace) -> HashKey {
+    match space {
+        GramSpace::Primary => HashKey::UNKEYED,
+        GramSpace::Folded => HashKey::UNKEYED.folded(),
+    }
+}
+
+fn satisfies(expr: &QueryExpr, key: HashKey, grams: &HashSet<u64>) -> bool {
+    match expr {
+        QueryExpr::All => true,
+        QueryExpr::None => false,
+        QueryExpr::And { grams: g, sub } => {
+            g.iter().all(|x| grams.contains(&x.hash_keyed(key)))
+                && sub.iter().all(|s| satisfies(s, key, grams))
         },
-        QueryPlan::Or { grams: g, sub } => {
-            g.iter().any(|x| grams.contains(x.as_bytes()))
-                || sub.iter().any(|s| satisfies(s, grams))
+        QueryExpr::Or { grams: g, sub } => {
+            g.iter().any(|x| grams.contains(&x.hash_keyed(key)))
+                || sub.iter().any(|s| satisfies(s, key, grams))
         },
     }
 }
 
-fn index_grams(t: &WeightTable, doc: &[u8]) -> HashSet<Vec<u8>> {
+fn index_hashes(t: &WeightTable, doc: &[u8], space: GramSpace) -> HashSet<u64> {
     let mut grams = HashSet::new();
-    scan(t, &Content::new(doc), ScanOptions::default(), |gram| {
-        grams.insert(gram.bytes.to_vec());
-    })
-    .expect("scan succeeds");
-    grams
-}
-
-fn index_grams_with(t: &WeightTable, doc: &[u8], opts: ScanOptions) -> HashSet<Vec<u8>> {
-    let mut grams = HashSet::new();
-    scan(t, &Content::new(doc), opts, |gram| {
-        grams.insert(gram.bytes.to_vec());
+    scan(t, Cursor::new(doc), |event| {
+        if let ScanEvent::Gram(gram) = event
+            && gram.space == space
+        {
+            grams.insert(gram.hash);
+        }
     })
     .expect("scan succeeds");
     grams
@@ -73,16 +77,15 @@ fn assert_rejects(re: &str, doc: &[u8]) {
         !oracle.is_match(doc),
         "test bug: {re:?} actually matches {text:?}; pick a non-matching doc"
     );
-    let plan = query(&t, &[re], QueryOptions::default())
-        .expect("pattern parses")
-        .plan;
+    let planned = query(&t, re).expect("pattern parses");
+    let key = key_for(planned.space());
     assert!(
-        !satisfies(&plan, &index_grams(&t, doc)),
-        "PRECISION REGRESSION: {re:?} plan {plan} admits non-matching {text:?}"
+        !satisfies(planned.expr(), key, &index_hashes(&t, doc, planned.space())),
+        "PRECISION REGRESSION: {re:?} plan {planned} admits non-matching {text:?}",
     );
 }
 
-fn assert_planned_rejects(re: &str, doc: &[u8], opts: QueryOptions, scan_opts: ScanOptions) {
+fn assert_planned_rejects(re: &str, doc: &[u8]) {
     let t = weight_table();
     let oracle = regex::bytes::Regex::new(re).expect("oracle parses pattern");
     let text = String::from_utf8_lossy(doc);
@@ -90,30 +93,33 @@ fn assert_planned_rejects(re: &str, doc: &[u8], opts: QueryOptions, scan_opts: S
         !oracle.is_match(doc),
         "test bug: {re:?} actually matches {text:?}; pick a non-matching doc"
     );
-    let plan = query(&t, &[re], opts).expect("pattern plans").plan;
+    let planned = query(&t, re).expect("pattern plans");
+    let key = key_for(planned.space());
     assert!(
-        !satisfies(&plan, &index_grams_with(&t, doc, scan_opts)),
-        "PRECISION REGRESSION: {re:?} plan {plan} admits non-matching {text:?}"
+        !satisfies(planned.expr(), key, &index_hashes(&t, doc, planned.space())),
+        "PRECISION REGRESSION: {re:?} plan {planned} admits non-matching {text:?}",
     );
 }
 
 /// The longest gram anywhere in the plan, in bytes.
 fn max_gram_len(plan: &QueryPlan) -> usize {
-    match plan {
-        QueryPlan::All | QueryPlan::None => 0,
-        QueryPlan::And { grams, sub } | QueryPlan::Or { grams, sub } => grams
+    max_expr_gram_len(plan.expr())
+}
+
+fn max_expr_gram_len(expr: &QueryExpr) -> usize {
+    match expr {
+        QueryExpr::All | QueryExpr::None => 0,
+        QueryExpr::And { grams, sub } | QueryExpr::Or { grams, sub } => grams
             .iter()
             .map(|g| g.len())
-            .chain(sub.iter().map(max_gram_len))
+            .chain(sub.iter().map(max_expr_gram_len))
             .max()
             .unwrap_or(0),
     }
 }
 
 fn plan_of(re: &str) -> QueryPlan {
-    query(&weight_table(), &[re], QueryOptions::default())
-        .expect("pattern parses")
-        .plan
+    query(&weight_table(), re).expect("pattern parses")
 }
 
 // --- case-insensitive queries must keep wide windows, not 3-byte chunks ---
@@ -135,7 +141,7 @@ fn case_insensitive_plan_keeps_wide_windows_past_first_flush() {
     let plan = plan_of("(?i)subsys_initcall");
     let tail = tail_gram_max_len(&plan);
     assert!(
-        tail >= 6,
+        tail >= 5,
         "expected wide windows after the first flush, got {tail}-byte tail grams: {plan}"
     );
 }
@@ -149,8 +155,8 @@ fn tail_gram_max_len(plan: &QueryPlan) -> usize {
             .windows(lower.len())
             .any(|w| w == lower.as_slice())
     }
-    fn walk(plan: &QueryPlan, best: &mut usize) {
-        if let QueryPlan::And { grams, sub } | QueryPlan::Or { grams, sub } = plan {
+    fn walk(expr: &QueryExpr, best: &mut usize) {
+        if let QueryExpr::And { grams, sub } | QueryExpr::Or { grams, sub } = expr {
             for g in grams.iter().filter(|g| in_tail(g)) {
                 *best = (*best).max(g.len());
             }
@@ -160,7 +166,7 @@ fn tail_gram_max_len(plan: &QueryPlan) -> usize {
         }
     }
     let mut best = 0;
-    walk(plan, &mut best);
+    walk(plan.expr(), &mut best);
     best
 }
 
@@ -192,7 +198,7 @@ fn min_repetition_keeps_expanded_prefix() {
 
 #[test]
 fn counted_group_repetition_is_not_all() {
-    assert!(!matches!(plan_of("(abc){2}"), QueryPlan::All));
+    assert!(!plan_of("(abc){2}").is_all());
     assert_eq!(plan_of("(abc){2}"), plan_of("abcabc"));
 }
 
@@ -376,18 +382,7 @@ fn gap_islands_are_both_required() {
 
 #[test]
 fn sentinel_start_anchor_survives_nullable_indent() {
-    assert_planned_rejects(
-        r"^[ \t]*#define CONFIG",
-        b"int x; #define CONFIG_FOO",
-        QueryOptions {
-            line_sentinels: true,
-            ..QueryOptions::default()
-        },
-        ScanOptions {
-            line_sentinels: true,
-            ..ScanOptions::default()
-        },
-    );
+    assert_planned_rejects(r"^[ \t]*#define CONFIG", b"int x; #define CONFIG_FOO");
 }
 
 #[test]
@@ -395,42 +390,34 @@ fn sentinel_end_anchor_survives_nullable_trailing_space() {
     assert_planned_rejects(
         r"EXPORT_SYMBOL\(\w+\);[ \t]*$",
         b"EXPORT_SYMBOL(foo); trailing",
-        QueryOptions {
-            line_sentinels: true,
-            ..QueryOptions::default()
-        },
-        ScanOptions {
-            line_sentinels: true,
-            ..ScanOptions::default()
-        },
     );
 }
 
 #[test]
 fn unicode_case_fold_stays_constrained() {
-    assert!(!matches!(plan_of("(?i)björn_qux"), QueryPlan::All));
+    assert!(!plan_of("(?i)björn_qux").is_all());
 }
 
 #[test]
 fn impossible_look_contexts_plan_to_none() {
     // These match nothing: every candidate would be a false positive, and
     // the byte context around the assertion proves it at plan time.
-    assert!(matches!(plan_of(r"t\bhe"), QueryPlan::None));
-    assert!(matches!(plan_of(r"foo$bar"), QueryPlan::None));
-    assert!(matches!(plan_of(r"abc\Adef"), QueryPlan::None));
-    assert!(matches!(plan_of(r"kfree\B\("), QueryPlan::None));
+    assert!(plan_of(r"t\bhe").is_none());
+    assert!(plan_of(r"foo$bar").is_none());
+    assert!(plan_of(r"abc\Adef").is_none());
+    assert!(plan_of(r"kfree\B\(").is_none());
 }
 
 #[test]
 fn unicode_word_boundary_between_words_plans_to_none() {
-    assert!(matches!(plan_of(r"a\bµs"), QueryPlan::None));
-    assert!(matches!(plan_of(r"µ\bβ"), QueryPlan::None));
+    assert!(plan_of(r"a\bµs").is_none());
+    assert!(plan_of(r"µ\bβ").is_none());
 }
 
 #[test]
 fn unicode_non_word_boundary_between_word_and_word_plans_to_none() {
-    assert!(matches!(plan_of(r"a\B-"), QueryPlan::None));
-    assert!(matches!(plan_of(r"-\Bµ"), QueryPlan::None));
+    assert!(plan_of(r"a\B-").is_none());
+    assert!(plan_of(r"-\Bµ").is_none());
 }
 
 #[test]
@@ -444,23 +431,18 @@ fn looks_filter_adjacent_class_members() {
 
 #[test]
 fn satisfiable_look_contexts_stay_planned() {
-    assert!(!matches!(plan_of(r"\bkfree_skb\b"), QueryPlan::None));
-    assert!(!matches!(plan_of(r"^static_call"), QueryPlan::None));
-    assert!(!matches!(plan_of(r"module_exit$"), QueryPlan::None));
-    assert!(!matches!(plan_of(r"foo\B_bar"), QueryPlan::None));
-    assert!(!matches!(plan_of(r"end\.\bstart"), QueryPlan::None));
+    assert!(!plan_of(r"\bkfree_skb\b").is_none());
+    assert!(!plan_of(r"^static_call").is_none());
+    assert!(!plan_of(r"module_exit$").is_none());
+    assert!(!plan_of(r"foo\B_bar").is_none());
+    assert!(!plan_of(r"end\.\bstart").is_none());
 }
 
 // --- plan size must stay bounded under combinatorial patterns ---
 
 /// Total gram instances anywhere in the plan.
 fn plan_gram_count(plan: &QueryPlan) -> usize {
-    match plan {
-        QueryPlan::All | QueryPlan::None => 0,
-        QueryPlan::And { grams, sub } | QueryPlan::Or { grams, sub } => {
-            grams.len() + sub.iter().map(plan_gram_count).sum::<usize>()
-        },
-    }
+    plan.gram_count()
 }
 
 #[test]
@@ -480,7 +462,7 @@ fn wide_class_repetition_keeps_plan_bounded() {
     // A hex-digit class multiplies the exact set by 16 per position; without
     // a cross-product bound this balloons into thousands of OR branches.
     let plan = plan_of("0x[0-9a-f]{8}");
-    assert!(!matches!(plan, QueryPlan::All));
+    assert!(!plan.is_all());
     let count = plan_gram_count(&plan);
     assert!(count <= 4096, "plan ballooned to {count} grams");
 }

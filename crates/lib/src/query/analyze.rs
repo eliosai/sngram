@@ -12,8 +12,8 @@ use regex_syntax::{
 
 use sngram_types::{Gram, WeightTable};
 
+use super::algebra::Query;
 use super::info::RegexpInfo;
-use super::query::Query;
 use super::strings::{Order, StringSet};
 
 /// Flush the exact set once it holds more than this many strings.
@@ -128,17 +128,17 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Whether a flush may proceed: within budget, or finalizing.
-    pub(super) const fn may_flush(&self) -> bool {
+    pub const fn may_flush(&self) -> bool {
         self.within_budget() || self.finalizing.get()
     }
 
     /// Enter the final flush of the whole pattern's edges.
-    pub(crate) fn begin_final_flush(&self) {
+    pub fn begin_final_flush(&self) {
         self.finalizing.set(true);
     }
 
     /// Grams the plan may still add before hitting [`PLAN_GRAM_BUDGET`].
-    pub(super) const fn budget_left(&self) -> usize {
+    pub const fn budget_left(&self) -> usize {
         PLAN_GRAM_BUDGET.saturating_sub(self.flushed.get())
     }
 
@@ -146,7 +146,7 @@ impl<'a> Analyzer<'a> {
     /// so a nearly spent budget still covers something meaningful. The
     /// geometric halving guarantees every region of a long pattern gets a
     /// share instead of the head spending everything.
-    pub(super) fn flush_cap(&self) -> usize {
+    pub fn flush_cap(&self) -> usize {
         const MIN_FLUSH_GRAMS: usize = 256;
         (self.budget_left() / 2).max(MIN_FLUSH_GRAMS)
     }
@@ -162,6 +162,19 @@ impl<'a> Analyzer<'a> {
         }
         let affordable = u32::try_from(self.budget_left() / weight).unwrap_or(u32::MAX);
         wanted.min(affordable.max(1))
+    }
+
+    /// Analyze and finalize `hir` into the internal gram query.
+    pub fn plan(&self, hir: &Hir) -> Query {
+        let mut info = self.analyze(hir);
+        self.finalize(&mut info);
+        info.match_
+    }
+
+    fn finalize(&self, info: &mut RegexpInfo) {
+        self.begin_final_flush();
+        self.simplify(info, true);
+        self.add_exact(info);
     }
 
     /// Analyze `hir`, returning its conservative summary.
@@ -1167,7 +1180,6 @@ impl ByteSet {
         Self([false; 256])
     }
 
-    #[allow(clippy::indexing_slicing, reason = "a u8 index is always < 256")]
     const fn mark(&mut self, b: u8) {
         self.0[b as usize] = true;
     }
@@ -1203,7 +1215,6 @@ impl ByteSet {
 mod tests {
     #![allow(
         clippy::unwrap_used,
-        clippy::indexing_slicing,
         reason = "tests assert by panicking; UTF-8 encodings are 1..=4 bytes"
     )]
 
@@ -1339,6 +1350,19 @@ mod tests {
         bytes.mark_range(0, last);
         let set = bytes.into_boundary();
         assert_eq!(set, StringSet::of(Gram::empty()));
+    }
+
+    #[test]
+    fn byte_set_marks_first_and_last_byte_values() {
+        let mut bytes = ByteSet::new();
+        bytes.mark(0);
+        bytes.mark(u8::MAX);
+        let set = bytes.into_boundary();
+
+        assert_eq!(set.len(), 2);
+        assert!(accepts(&set, 0));
+        assert!(accepts(&set, u8::MAX));
+        assert!(!accepts(&set, 1));
     }
 
     #[test]

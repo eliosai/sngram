@@ -138,7 +138,6 @@ impl StringSet {
     /// Whether every string in `self` also appears in `other`.
     /// Assumes both sets are [`Order::Prefix`]-cleaned.
     #[must_use]
-    #[allow(clippy::indexing_slicing, reason = "j guarded by j < other.0.len()")]
     pub fn is_subset_of(&self, other: &Self) -> bool {
         let mut j = 0;
         for s in &self.0 {
@@ -155,7 +154,6 @@ impl StringSet {
 
 /// Compare two strings from their last byte back, then by length: the order
 /// that groups shared suffixes adjacently for deduplication and truncation.
-#[allow(clippy::indexing_slicing, reason = "ia, ib decremented within bounds")]
 fn cmp_suffix(a: &[u8], b: &[u8]) -> core::cmp::Ordering {
     let mut ia = a.len();
     let mut ib = b.len();
@@ -227,6 +225,29 @@ mod tests {
         sup.clean(Order::Prefix);
         assert!(sub.is_subset_of(&sup));
         assert!(!sup.is_subset_of(&sub));
+    }
+
+    #[test]
+    fn test_subset_handles_empty_and_end_of_superset() {
+        let mut empty = StringSet::new();
+        let mut tail = set(&[b"z"]);
+        let mut sup = set(&[b"a", b"m", b"z"]);
+        empty.clean(Order::Prefix);
+        tail.clean(Order::Prefix);
+        sup.clean(Order::Prefix);
+
+        assert!(empty.is_subset_of(&StringSet::new()));
+        assert!(empty.is_subset_of(&sup));
+        assert!(tail.is_subset_of(&sup));
+        assert!(!sup.is_subset_of(&tail));
+    }
+
+    #[test]
+    fn test_clean_suffix_handles_empty_and_single_byte_members() {
+        let mut fixture = set(&[b"ba", b"", b"a", b"ca", b"a"]);
+        fixture.clean(Order::Suffix);
+        let expected = set(&[b"", b"a", b"ba", b"ca"]);
+        assert_eq!(fixture, expected);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeSet,
     fs::{self, File},
+    io::Cursor,
     path::Path,
     sync::mpsc,
     thread,
@@ -11,8 +12,9 @@ use std::{
 use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
-use sngram::QueryPlan;
-use sngram_types::{Content, WeightTable};
+use sngram::types::{DfStats, QueryPlan};
+use sngram_types::WeightTable;
+use sngram_types::{Gram, GramSpace, HashKey, ScanError, ScanEvent};
 use tantivy::{
     DocId, Index, Score, Searcher, SegmentOrdinal, SegmentReader, TantivyDocument, Term,
     collector::{Collector, SegmentCollector},
@@ -97,7 +99,6 @@ pub(super) fn query_index(
     let df = TantivyDf {
         searcher: &searcher,
         fields,
-        key: keyed.key,
     };
     let mut plan = keyed.plan.clone();
     let raw_grams = count_plan_grams(&plan);
@@ -107,7 +108,7 @@ pub(super) fn query_index(
         raw_grams,
         count_plan_grams(&plan),
     );
-    if matches!(plan, QueryPlan::None) {
+    if plan.is_none() {
         return Ok(Some(BTreeSet::new()));
     }
     let estimate = estimate_with_forced(&searcher, fields, &plan, &df);
@@ -134,7 +135,7 @@ fn estimate_with_forced(
     plan: &QueryPlan,
     df: &TantivyDf<'_>,
 ) -> u64 {
-    if matches!(plan, QueryPlan::None) {
+    if plan.is_none() {
         return 0;
     }
     let forced = searcher
@@ -148,15 +149,14 @@ fn estimate_with_forced(
 struct TantivyDf<'a> {
     searcher: &'a Searcher,
     fields: IndexFields,
-    key: sngram::HashKey,
 }
 
-impl sngram::DfStats for TantivyDf<'_> {
-    fn doc_count(&self, gram: &sngram::Gram) -> u64 {
+impl DfStats for TantivyDf<'_> {
+    fn doc_count(&self, space: GramSpace, gram: &Gram) -> u64 {
         self.searcher
             .doc_freq(&Term::from_field_u64(
                 self.fields.gram,
-                gram.hash_keyed(self.key),
+                gram.hash_keyed(hash_key_for(space)),
             ))
             .unwrap_or(0)
     }
@@ -166,13 +166,15 @@ impl sngram::DfStats for TantivyDf<'_> {
     }
 }
 
-fn count_plan_grams(plan: &QueryPlan) -> usize {
-    match plan {
-        QueryPlan::All | QueryPlan::None => 0,
-        QueryPlan::And { grams, sub } | QueryPlan::Or { grams, sub } => {
-            grams.len() + sub.iter().map(count_plan_grams).sum::<usize>()
-        },
+const fn hash_key_for(space: GramSpace) -> HashKey {
+    match space {
+        GramSpace::Primary => HashKey::UNKEYED,
+        GramSpace::Folded => HashKey::UNKEYED.folded(),
     }
+}
+
+fn count_plan_grams(plan: &QueryPlan) -> usize {
+    plan.gram_count()
 }
 
 pub(super) fn schema() -> (Schema, IndexFields) {
@@ -450,26 +452,34 @@ fn scan_file(
         return Ok(None);
     }
     let mut forced_candidate = super::classify::has_decoding_bom(bytes);
-    let content = Content::new(bytes);
-    let mut hashes = Vec::new();
-    sngram::scan(table, &content, super::postings::SCAN_PRIMARY, |gram| {
-        hashes.push(gram.hash);
-    })?;
-    hashes.sort_unstable();
-    hashes.dedup();
-    if super::classify::is_high_entropy(bytes.len(), hashes.len()) {
-        forced_candidate = true;
-        hashes.clear();
-    } else {
-        let primary_unique = hashes.len();
-        sngram::scan(table, &content, super::postings::SCAN_FOLDED, |gram| {
-            hashes.push(gram.hash);
-        })?;
-        if let Some(folded) = hashes.get_mut(primary_unique..) {
-            folded.sort_unstable();
-        }
-        hashes.dedup();
+    if forced_candidate {
+        return Ok(Some(file_grams(file, true, Vec::new())));
     }
+    let mut primary = Vec::new();
+    let mut folded = Vec::new();
+    let scan = sngram::scan(table, Cursor::new(bytes), |event| {
+        if let ScanEvent::Gram(gram) = event {
+            match gram.space {
+                GramSpace::Primary => primary.push(gram.hash),
+                GramSpace::Folded => folded.push(gram.hash),
+            }
+        }
+    });
+    if matches!(scan, Err(ScanError::Binary)) {
+        return Ok(None);
+    }
+    scan?;
+    primary.sort_unstable();
+    primary.dedup();
+    let hashes = if super::classify::is_high_entropy(bytes.len(), primary.len()) {
+        forced_candidate = true;
+        Vec::new()
+    } else {
+        folded.sort_unstable();
+        primary.extend(folded);
+        primary.dedup();
+        primary
+    };
     Ok(Some(file_grams(file, forced_candidate, hashes)))
 }
 

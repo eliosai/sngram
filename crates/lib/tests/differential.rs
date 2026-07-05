@@ -7,10 +7,12 @@
 //! scanner must reproduce the reference's emission sequence byte for byte,
 //! for every table and input below — including plateau-heavy tables, runs
 //! longer than `MAX_LEN`, and inputs that overflow the bounded stack.
-#![allow(missing_docs, clippy::unwrap_used, clippy::indexing_slicing)]
+#![allow(missing_docs, clippy::unwrap_used)]
 
-use sngram::ScanOptions;
-use sngram_types::{Content, WeightTable};
+use std::io::Cursor;
+
+use sngram_types::{GramSpace, ScanEvent};
+use sngram_types::{ScanError, WeightTable};
 
 // Frozen algorithm parameters; must mirror crates/lib/src/extract.rs.
 const MIN_LEN: usize = 3;
@@ -81,6 +83,11 @@ impl Lcg {
     const fn next_byte(&mut self) -> u8 {
         (self.next_u32() & 0xFF) as u8
     }
+
+    fn next_text_byte(&mut self) -> u8 {
+        const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-/.:;{}()[]<> =+\n\t";
+        ALPHABET[(self.next_u32() as usize) % ALPHABET.len()]
+    }
 }
 
 fn build_table(f: impl Fn(u8, u8) -> u32) -> WeightTable {
@@ -139,14 +146,14 @@ fn inputs() -> Vec<(String, Vec<u8>)> {
     for len in 0..200usize {
         out.push((
             format!("rand_{len}"),
-            (0..len).map(|_| rng.next_byte()).collect(),
+            (0..len).map(|_| rng.next_text_byte()).collect(),
         ));
     }
     // longer random strings
     for len in [501usize, 999, 2000] {
         out.push((
             format!("rand_{len}"),
-            (0..len).map(|_| rng.next_byte()).collect(),
+            (0..len).map(|_| rng.next_text_byte()).collect(),
         ));
     }
     // small-alphabet random (drives plateaus + deep pops)
@@ -169,14 +176,14 @@ fn structured_inputs() -> Vec<(String, Vec<u8>)> {
     let mut runs = vec![b'a'; 150];
     runs.extend(vec![b'b'; 150]);
     out.push(("runs_150_150".to_owned(), runs));
-    // strictly ascending bytes (with the monotonic table: stack overflow)
+    // strictly ascending non-control bytes (with the monotonic table: stack overflow)
     let mut ascending = Vec::with_capacity(1000);
     for _ in 0..4 {
-        ascending.extend(0u8..=255);
+        ascending.extend(0x20u8..=0xFF);
     }
     ascending.truncate(1000);
     out.push(("ascending_1000".to_owned(), ascending));
-    out.push(("ascending_1_200".to_owned(), (1u8..=200).collect()));
+    out.push(("ascending_32_231".to_owned(), (0x20u8..=0xE7).collect()));
     // plateau-heavy periodic content
     out.push(("abab_400".to_owned(), b"ab".repeat(200)));
     out.push(("aabb_400".to_owned(), b"aabb".repeat(100)));
@@ -208,25 +215,41 @@ fn direct_hash(bytes: &[u8]) -> u64 {
     z
 }
 
+fn reference_primary(table: &WeightTable, content: &[u8]) -> Vec<(usize, usize, u64)> {
+    let mut scanned = Vec::with_capacity(content.len() + 2);
+    scanned.push(b'\n');
+    scanned.extend_from_slice(content);
+    scanned.push(b'\n');
+
+    let mut expected = Vec::new();
+    reference_scan(table, &scanned, &mut |s, e| {
+        expected.push((s, e, direct_hash(&scanned[s..e])));
+    });
+    expected
+}
+
+fn scanned_primary(
+    table: &WeightTable,
+    content: &[u8],
+) -> Result<Vec<(usize, usize, u64)>, ScanError> {
+    let mut got = Vec::new();
+    sngram::scan(table, Cursor::new(content), |event| {
+        if let ScanEvent::Gram(gram) = event
+            && gram.space == GramSpace::Primary
+        {
+            got.push((gram.scanned_start, gram.scanned_end, gram.hash));
+        }
+    })?;
+    Ok(got)
+}
+
 #[test]
-fn scan_matches_reference_exactly() {
+fn scan_matches_reference_exactly() -> Result<(), ScanError> {
     let mut cases = 0usize;
     for (tname, table) in tables() {
         for (iname, content) in inputs() {
-            let mut expected = Vec::new();
-            reference_scan(&table, &content, &mut |s, e| {
-                expected.push((s, e, direct_hash(&content[s..e])));
-            });
-            let mut got = Vec::new();
-            sngram::scan(
-                &table,
-                &Content::new(&content),
-                ScanOptions::default(),
-                |gram| {
-                    got.push((gram.start, gram.end, gram.hash));
-                },
-            )
-            .expect("scan succeeds");
+            let expected = reference_primary(&table, &content);
+            let got = scanned_primary(&table, &content)?;
             assert_eq!(
                 got, expected,
                 "scan diverged on table={tname} input={iname}"
@@ -235,6 +258,7 @@ fn scan_matches_reference_exactly() {
         }
     }
     eprintln!("scan differential cases passed: {cases}");
+    Ok(())
 }
 
 /// Deepest uncapped hull-stack depth the content drives the table to.

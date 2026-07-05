@@ -71,7 +71,6 @@ impl LocalTally {
     /// two-byte slice view. K-way split accumulators were measured a NET LOSS
     /// here — the bottleneck is histogram load latency, not the increment
     /// dependency — so this stays a single table.
-    #[allow(clippy::indexing_slicing, reason = "u8<<8|u8 < 65536")]
     pub fn count_buffer(&mut self, buf: &[u8]) {
         self.bytes += buf.len() as u64;
         let [first, rest @ ..] = buf else { return };
@@ -97,7 +96,6 @@ impl LocalTally {
     /// Merge another tally's counts into this one — used when decoding
     /// batches in a background task and folding the result back into
     /// a parent tally to preserve exactly-once semantics.
-    #[allow(clippy::indexing_slicing, reason = "PAIR_COUNT loop")]
     pub fn add_from(&mut self, other: &Self) {
         for i in 0..PAIR_COUNT {
             self.counts[i] = self.counts[i].saturating_add(other.counts[i]);
@@ -138,7 +136,6 @@ impl BigramCounter {
     }
 
     /// Fold a tally's counts and totals into the shared counter.
-    #[allow(clippy::indexing_slicing, reason = "PAIR_COUNT iteration")]
     pub fn merge(&self, tally: &LocalTally) {
         for (idx, &n) in tally.counts.iter().enumerate() {
             if n > 0 {
@@ -194,7 +191,6 @@ impl BigramCounter {
 
     /// Current count for one byte pair.
     #[must_use]
-    #[allow(clippy::indexing_slicing, reason = "u8<<8|u8 < 65536")]
     pub fn count(&self, c1: u8, c2: u8) -> u64 {
         let idx = usize::from(c1) << 8 | usize::from(c2);
         self.counts[idx].load(Ordering::Relaxed)
@@ -210,7 +206,6 @@ impl BigramCounter {
     }
 
     /// Add `n` to one byte pair's count — for checkpoint restore.
-    #[allow(clippy::indexing_slicing, reason = "u8<<8|u8 < 65536")]
     pub fn add(&self, c1: u8, c2: u8, n: u64) {
         let idx = usize::from(c1) << 8 | usize::from(c2);
         self.counts[idx].fetch_add(n, Ordering::Relaxed);
@@ -252,7 +247,6 @@ impl BigramCounter {
             .to_bytes())
     }
 
-    #[allow(clippy::indexing_slicing, reason = "u8<<8|u8 < 65536")]
     fn weight_table(&self, tuning: Tuning) -> WeightTable {
         let total = self.pairs_processed();
         WeightTable::from_weight_fn(|c1, c2| {
@@ -444,6 +438,44 @@ mod tests {
         assert_eq!(c.count(b'a', b'b'), 2);
         assert_eq!(c.pairs_processed(), 2);
         assert_eq!(c.bytes_processed(), 4);
+    }
+
+    #[test]
+    fn tally_counts_boundary_byte_pair_indices() {
+        let c = BigramCounter::new();
+        let mut tally = LocalTally::new();
+        tally.count_buffer(&[0, u8::MAX, 0]);
+        c.merge(&tally);
+
+        assert_eq!(c.count(0, u8::MAX), 1);
+        assert_eq!(c.count(u8::MAX, 0), 1);
+        assert_eq!(c.pairs_processed(), 2);
+        assert_eq!(c.bytes_processed(), 3);
+    }
+
+    #[test]
+    fn pair_index_edges_restore_and_serialize() {
+        let c = BigramCounter::new();
+        for (left, right, count) in [
+            (0u8, 0u8, 3u64),
+            (0, u8::MAX, 7),
+            (u8::MAX, 0, 11),
+            (u8::MAX, u8::MAX, 5),
+        ] {
+            c.add(left, right, count);
+        }
+        c.add_pairs(26);
+
+        assert_eq!(c.count(0, 0), 3);
+        assert_eq!(c.count(0, u8::MAX), 7);
+        assert_eq!(c.count(u8::MAX, 0), 11);
+        assert_eq!(c.count(u8::MAX, u8::MAX), 5);
+
+        let table = WeightTable::from_bytes(&c.to_table_bytes()).unwrap();
+        assert_eq!(table.weight(0, 0), 26 / 3);
+        assert_eq!(table.weight(0, u8::MAX), 26 / 7);
+        assert_eq!(table.weight(u8::MAX, 0), 26 / 11);
+        assert_eq!(table.weight(u8::MAX, u8::MAX), 26 / 5);
     }
 
     #[test]

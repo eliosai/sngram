@@ -4,7 +4,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeSet, BinaryHeap, HashMap},
     fs::{self, File, TryLockError},
-    io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     mem,
     path::{Path, PathBuf},
     rc::Rc,
@@ -15,8 +15,10 @@ use std::{
 use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
-use sngram::QueryPlan;
-use sngram_types::{Content, WeightTable};
+
+use sngram::types::{DfStats, QueryExpr, QueryPlan};
+use sngram_types::WeightTable;
+use sngram_types::{Gram, GramSpace, HashKey, ScanError, ScanEvent};
 
 use crate::flags::HiArgs;
 
@@ -97,10 +99,7 @@ pub(super) fn query_index(
     keyed: &super::planner::KeyedPlan,
 ) -> anyhow::Result<Option<BTreeSet<usize>>> {
     let started_at = Instant::now();
-    let df = PostingsDf {
-        index,
-        key: keyed.key,
-    };
+    let df = PostingsDf { index };
     let ceiling = selectivity_ceiling(index.doc_count as u64);
     let mut plan = keyed.plan.clone();
     let raw_grams = count_plan_grams(&plan);
@@ -110,7 +109,7 @@ pub(super) fn query_index(
         raw_grams,
         count_plan_grams(&plan),
     );
-    if matches!(plan, QueryPlan::None) {
+    if plan.is_none() {
         log::debug!(
             "eg index query: postings candidates=0 lookup_time={:?} total_query_time={:?}",
             Duration::ZERO,
@@ -162,7 +161,7 @@ fn estimate_with_forced(
     plan: &QueryPlan,
     df: &PostingsDf<'_>,
 ) -> anyhow::Result<u64> {
-    if matches!(plan, QueryPlan::None) {
+    if plan.is_none() {
         return Ok(0);
     }
     let forced = index.posting_len(FORCED_CANDIDATE_HASH)? as u64;
@@ -172,21 +171,27 @@ fn estimate_with_forced(
         .min(index.doc_count as u64))
 }
 
-/// Posting-list lengths as document-frequency priors, keyed per plan space.
+/// Posting-list lengths as document-frequency priors.
 struct PostingsDf<'a> {
     index: &'a PostingsIndex,
-    key: sngram::HashKey,
 }
 
-impl sngram::DfStats for PostingsDf<'_> {
-    fn doc_count(&self, gram: &sngram::Gram) -> u64 {
+impl DfStats for PostingsDf<'_> {
+    fn doc_count(&self, space: GramSpace, gram: &Gram) -> u64 {
         self.index
-            .posting_len(gram.hash_keyed(self.key))
+            .posting_len(gram.hash_keyed(hash_key_for(space)))
             .unwrap_or(0) as u64
     }
 
     fn total_docs(&self) -> u64 {
         self.index.doc_count as u64
+    }
+}
+
+const fn hash_key_for(space: GramSpace) -> HashKey {
+    match space {
+        GramSpace::Primary => HashKey::UNKEYED,
+        GramSpace::Folded => HashKey::UNKEYED.folded(),
     }
 }
 
@@ -705,30 +710,40 @@ fn classify_and_collect(
         return Ok(());
     }
     let mut forced = super::classify::has_decoding_bom(bytes);
-    let content = Content::new(bytes);
-    let mut emitted = 0usize;
-    let mut hashes = Vec::new();
-    sngram::scan(table, &content, SCAN_PRIMARY, |gram| {
-        emitted += 1;
-        hashes.push(gram.hash);
-    })?;
-    hashes.sort_unstable();
-    hashes.dedup();
-    if super::classify::is_high_entropy(bytes.len(), hashes.len()) {
-        forced = true;
-        hashes.clear();
-    }
     if forced {
         push_forced(pairs, ord, stats);
-    } else {
-        let primary_unique = hashes.len();
-        sngram::scan(table, &content, SCAN_FOLDED, |gram| {
+        return Ok(());
+    }
+    let mut emitted = 0usize;
+    let mut primary = Vec::new();
+    let mut folded = Vec::new();
+    let scan = sngram::scan(table, Cursor::new(bytes), |event| {
+        if let ScanEvent::Gram(gram) = event {
             emitted += 1;
-            hashes.push(gram.hash);
-        })?;
-        if let Some(folded) = hashes.get_mut(primary_unique..) {
-            folded.sort_unstable();
+            match gram.space {
+                GramSpace::Primary => primary.push(gram.hash),
+                GramSpace::Folded => folded.push(gram.hash),
+            }
         }
+    });
+    if matches!(scan, Err(ScanError::Binary)) {
+        return Ok(());
+    }
+    scan?;
+    primary.sort_unstable();
+    primary.dedup();
+    if super::classify::is_high_entropy(bytes.len(), primary.len()) {
+        forced = true;
+    }
+    let mut hashes = if forced {
+        push_forced(pairs, ord, stats);
+        Vec::new()
+    } else {
+        folded.sort_unstable();
+        primary.extend(folded);
+        primary
+    };
+    if !forced {
         hashes.dedup();
     }
     let selected = hashes.len();
@@ -923,27 +938,8 @@ impl AsRef<[u8]> for FileBytes {
     }
 }
 
-/// Primary-space build scan: virtual line sentinels on, raw bytes.
-pub(super) const SCAN_PRIMARY: sngram::ScanOptions = sngram::ScanOptions {
-    key: sngram::HashKey::UNKEYED,
-    line_sentinels: true,
-    fold: false,
-};
-
-/// Folded-twin build scan: same sentinels over the ASCII-folded stream.
-pub(super) const SCAN_FOLDED: sngram::ScanOptions = sngram::ScanOptions {
-    key: sngram::HashKey::UNKEYED,
-    line_sentinels: true,
-    fold: true,
-};
-
 fn count_plan_grams(plan: &QueryPlan) -> usize {
-    match plan {
-        QueryPlan::All | QueryPlan::None => 0,
-        QueryPlan::And { grams, sub } | QueryPlan::Or { grams, sub } => {
-            grams.len() + sub.iter().map(count_plan_grams).sum::<usize>()
-        },
-    }
+    plan.gram_count()
 }
 
 /// Posting lists shared between plan nodes: case-folded plans repeat the
@@ -975,25 +971,34 @@ fn lookup_cached(
 fn eval_plan_cached(
     index: &PostingsIndex,
     plan: &QueryPlan,
-    key: sngram::HashKey,
+    key: HashKey,
     cache: &mut PostingCache,
 ) -> anyhow::Result<Vec<usize>> {
-    match plan {
-        QueryPlan::All => {
+    eval_expr_cached(index, plan.expr(), key, cache)
+}
+
+fn eval_expr_cached(
+    index: &PostingsIndex,
+    expr: &QueryExpr,
+    key: HashKey,
+    cache: &mut PostingCache,
+) -> anyhow::Result<Vec<usize>> {
+    match expr {
+        QueryExpr::All => {
             anyhow::bail!("indexed query has no sparse n-gram constraints; use --no-index")
         },
-        QueryPlan::None => Ok(Vec::new()),
-        QueryPlan::And { grams, sub } => {
+        QueryExpr::None => Ok(Vec::new()),
+        QueryExpr::And { grams, sub } => {
             let mut lists = Vec::with_capacity(grams.len() + sub.len());
             for gram in grams {
                 lists.push(lookup_cached(index, cache, gram.hash_keyed(key))?);
             }
-            for plan in sub {
-                lists.push(Rc::new(eval_plan_cached(index, plan, key, cache)?));
+            for expr in sub {
+                lists.push(Rc::new(eval_expr_cached(index, expr, key, cache)?));
             }
             intersect_all_sorted(index.doc_count, lists)
         },
-        QueryPlan::Or { grams, sub } => {
+        QueryExpr::Or { grams, sub } => {
             // Concatenate every branch then sort+dedup once: folding the
             // union pairwise re-walks the accumulator per branch, quadratic
             // in branch count for the wide ORs case-folded plans build.
@@ -1001,8 +1006,8 @@ fn eval_plan_cached(
             for gram in grams {
                 acc.extend_from_slice(&lookup_cached(index, cache, gram.hash_keyed(key))?);
             }
-            for plan in sub {
-                acc.extend(eval_plan_cached(index, plan, key, cache)?);
+            for expr in sub {
+                acc.extend(eval_expr_cached(index, expr, key, cache)?);
             }
             acc.sort_unstable();
             acc.dedup();
@@ -1030,10 +1035,6 @@ fn intersect_all_sorted(
     Ok(acc)
 }
 
-#[allow(
-    clippy::indexing_slicing,
-    reason = "the while guard keeps i < left.len() and j < right.len()"
-)]
 fn intersect_sorted(left: &[usize], right: &[usize]) -> Vec<usize> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -1056,10 +1057,6 @@ fn union_sorted(left: Vec<usize>, right: Vec<usize>) -> Vec<usize> {
     union_sorted_ref(&left, &right)
 }
 
-#[allow(
-    clippy::indexing_slicing,
-    reason = "the while guard bounds i and j; the tail ranges start at i,j <= len"
-)]
 fn union_sorted_ref(left: &[usize], right: &[usize]) -> Vec<usize> {
     let mut out = Vec::with_capacity(left.len() + right.len());
     let mut i = 0;
@@ -1538,8 +1535,8 @@ impl PartialOrd for HeapItem {
 mod tests {
     use super::{
         FNV_OFFSET, POSTING_SIZE, POSTINGS_MAGIC, SECTION_HEADER_SIZE, TABLE_MAGIC,
-        TABLE_RECORD_SIZE, delta_should_fold, find_record, fnv1a_state, sampled_checksum,
-        section_header, suffixed_path, verify_section,
+        TABLE_RECORD_SIZE, delta_should_fold, find_record, fnv1a_state, intersect_sorted,
+        sampled_checksum, section_header, suffixed_path, union_sorted_ref, verify_section,
     };
     use std::path::Path;
 
@@ -1575,6 +1572,18 @@ mod tests {
         assert!(!delta_should_fold(64, 256), "exactly 25% does not fold");
         assert!(delta_should_fold(65, 256));
         assert!(!delta_should_fold(5, 0), "no base means no fold");
+    }
+
+    #[test]
+    fn sorted_list_ops_handle_empty_inputs_and_tail_boundaries() {
+        assert_eq!(intersect_sorted(&[], &[1, 2]), Vec::<usize>::new());
+        assert_eq!(intersect_sorted(&[1, 2, 4, 8], &[0, 2, 8, 9]), vec![2, 8]);
+        assert_eq!(union_sorted_ref(&[], &[1, 3]), vec![1, 3]);
+        assert_eq!(union_sorted_ref(&[1, 4], &[]), vec![1, 4]);
+        assert_eq!(
+            union_sorted_ref(&[1, 2, 8], &[0, 2, 9]),
+            vec![0, 1, 2, 8, 9]
+        );
     }
 
     fn framed(magic: [u8; 8], record_size: usize, records: usize) -> Vec<u8> {

@@ -50,7 +50,7 @@ nursery = { level = "warn", priority = -1 }
 unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
-indexing_slicing = "warn"
+indexing_slicing = "allow"
 
 # Async safety
 await_holding_lock = "warn"

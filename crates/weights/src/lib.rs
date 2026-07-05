@@ -4,7 +4,7 @@
 //! `500gb`, `1tb`, `2tb`, `3tb`, `4tb`, `5tb`, `6tb`, `7tb`, `8tb`, `9tb`,
 //! `10tb`, `11tb`, or `12tb`.
 
-pub use sngram_types::WeightTable;
+use sngram_types::WeightTable;
 
 /// Load the embedded table selected by this crate's enabled feature.
 #[cfg(any(

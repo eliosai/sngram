@@ -496,6 +496,43 @@ fn indexed_invalid_regex_reports_parse_error() {
 }
 
 #[test]
+fn indexed_many_patterns_past_planner_limit_errors_with_no_index_help() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), "needle_420\n").unwrap();
+    let mut args = vec!["--index=auto".to_owned()];
+    for i in 0..450 {
+        args.push("-e".to_owned());
+        args.push(format!("needle_{i:03}"));
+    }
+    args.push(fixture.root.to_string_lossy().into_owned());
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let output = eg(&refs);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(2), output.status.code());
+    assert!(stderr.contains("--no-index"), "{stderr}");
+}
+
+#[test]
+fn indexed_invert_match_errors_with_help() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), "alpha\n").unwrap();
+
+    let output = eg(&[
+        "--index=auto",
+        "-v",
+        "absent",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(2), output.status.code());
+    assert!(stderr.contains("inverted matches"), "{stderr}");
+    assert!(stderr.contains("--no-index"), "{stderr}");
+}
+
+#[test]
 fn non_search_modes_ignore_the_index() {
     // --files and --type-list never search content; the default index mode
     // must not reject them.
@@ -524,6 +561,23 @@ fn indexed_no_unicode_matches_through_the_index() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(Some(0), output.status.code());
     assert!(stdout.contains("constrained needle"), "{stdout}");
+}
+
+#[test]
+fn indexed_crlf_anchor_matches_through_the_index() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), b"crlf constrained needle\r\n").unwrap();
+    let root = fixture.root.to_str().unwrap();
+
+    let output = eg(&["--index=auto", "--crlf", r"crlf constrained needle$", root]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("crlf constrained needle"), "{stdout}");
 }
 
 #[test]

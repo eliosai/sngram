@@ -2,7 +2,6 @@
     missing_docs,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::indexing_slicing,
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::excessive_nesting,
@@ -10,11 +9,11 @@
     clippy::unwrap_used
 )]
 
-use std::hint::black_box;
+use std::{hint::black_box, io::Cursor};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use sngram::ScanOptions;
-use sngram_types::{Content, WeightTable};
+use sngram_types::ScanEvent;
+use sngram_types::WeightTable;
 
 fn crc32_table() -> WeightTable {
     WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
@@ -28,6 +27,15 @@ fn source_code(size: usize) -> Vec<u8> {
 fn prose(size: usize) -> Vec<u8> {
     let txt = b"The quick brown fox jumps over the lazy dog. ";
     (0..size).map(|i| txt[i % txt.len()]).collect()
+}
+
+fn count_grams(table: &WeightTable, data: &[u8]) -> u64 {
+    let mut count = 0u64;
+    sngram::scan(table, Cursor::new(data), |event| {
+        count += u64::from(matches!(event, ScanEvent::Gram(_)));
+    })
+    .expect("scan succeeds");
+    count
 }
 
 const SIZES: &[usize] = &[64, 256, 1024, 4096, 16384, 65536, 262_144, 1_048_576];
@@ -55,15 +63,9 @@ fn bench_scan_code(c: &mut Criterion) {
 
     for &size in SIZES {
         let data = source_code(size);
-        let content = Content::new(&data);
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
-            b.iter(|| {
-                let mut count = 0u64;
-                sngram::scan(&table, c, ScanOptions::default(), |_| count += 1)
-                    .expect("scan succeeds");
-                count
-            });
+        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, c| {
+            b.iter(|| count_grams(&table, c));
         });
     }
     group.finish();
@@ -75,15 +77,9 @@ fn bench_scan_prose(c: &mut Criterion) {
 
     for &size in SMALL {
         let data = prose(size);
-        let content = Content::new(&data);
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
-            b.iter(|| {
-                let mut count = 0u64;
-                sngram::scan(&table, c, ScanOptions::default(), |_| count += 1)
-                    .expect("scan succeeds");
-                count
-            });
+        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, c| {
+            b.iter(|| count_grams(&table, c));
         });
     }
     group.finish();
@@ -95,15 +91,9 @@ fn bench_scan_uniform(c: &mut Criterion) {
 
     for &size in SMALL {
         let data = vec![b'a'; size];
-        let content = Content::new(&data);
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
-            b.iter(|| {
-                let mut count = 0u64;
-                sngram::scan(&table, c, ScanOptions::default(), |_| count += 1)
-                    .expect("scan succeeds");
-                count
-            });
+        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, c| {
+            b.iter(|| count_grams(&table, c));
         });
     }
     group.finish();
@@ -115,15 +105,9 @@ fn bench_scan_ascending(c: &mut Criterion) {
 
     for &size in SMALL {
         let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
-        let content = Content::new(&data);
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
-            b.iter(|| {
-                let mut count = 0u64;
-                sngram::scan(&table, c, ScanOptions::default(), |_| count += 1)
-                    .expect("scan succeeds");
-                count
-            });
+        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, c| {
+            b.iter(|| count_grams(&table, c));
         });
     }
     group.finish();
@@ -140,25 +124,30 @@ fn bench_pipeline(c: &mut Criterion) {
 
     for &size in &[65_536usize, 1_048_576] {
         let data = source_code(size);
-        let content = Content::new(&data);
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::new("rehash", size), &content, |b, c| {
+        group.bench_with_input(BenchmarkId::new("rehash", size), &data, |b, c| {
             b.iter(|| {
                 let mut acc = 0u64;
-                sngram::scan(&table, c, ScanOptions::default(), |gram| {
-                    let mut hasher = rustc_hash::FxHasher::default();
-                    gram.bytes.hash(&mut hasher);
-                    acc ^= hasher.finish();
+                sngram::scan(&table, Cursor::new(c), |event| {
+                    if let ScanEvent::Gram(gram) = event {
+                        let mut hasher = rustc_hash::FxHasher::default();
+                        gram.bytes.hash(&mut hasher);
+                        acc ^= hasher.finish();
+                    }
                 })
                 .expect("scan succeeds");
                 black_box(acc)
             });
         });
-        group.bench_with_input(BenchmarkId::new("fused", size), &content, |b, c| {
+        group.bench_with_input(BenchmarkId::new("fused", size), &data, |b, c| {
             b.iter(|| {
                 let mut acc = 0u64;
-                sngram::scan(&table, c, ScanOptions::default(), |gram| acc ^= gram.hash)
-                    .expect("scan succeeds");
+                sngram::scan(&table, Cursor::new(c), |event| {
+                    if let ScanEvent::Gram(gram) = event {
+                        acc ^= gram.hash;
+                    }
+                })
+                .expect("scan succeeds");
                 black_box(acc)
             });
         });
@@ -172,12 +161,13 @@ fn report_density(_c: &mut Criterion) {
     let table = crc32_table();
     for &size in &[4096usize, 65536, 1_048_576] {
         let data = source_code(size);
-        let content = Content::new(&data);
         let mut emissions = 0u64;
         let mut distinct = std::collections::HashSet::new();
-        sngram::scan(&table, &content, ScanOptions::default(), |gram| {
-            emissions += 1;
-            distinct.insert(gram.hash);
+        sngram::scan(&table, Cursor::new(&data), |event| {
+            if let ScanEvent::Gram(gram) = event {
+                emissions += 1;
+                distinct.insert(gram.hash);
+            }
         })
         .expect("scan succeeds");
         eprintln!(

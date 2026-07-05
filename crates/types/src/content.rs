@@ -86,7 +86,6 @@ impl<'a> Content<'a> {
     }
 
     /// Control-byte sniff over the head: NULs or dense non-text bytes.
-    #[allow(clippy::indexing_slicing, reason = "sample bounds checked by min")]
     #[must_use]
     pub fn is_likely_binary(&self) -> bool {
         let end = self.0.len().min(8192);
@@ -145,6 +144,15 @@ mod tests {
     fn short_content_not_binary() {
         let c = Content::new(b"\x00\x00\x00");
         assert!(!c.is_likely_binary());
+    }
+
+    #[test]
+    fn binary_sniff_samples_at_the_cap_without_crossing_bounds() {
+        let text = vec![b'a'; 8193];
+        let binary = vec![0; 8193];
+
+        assert!(!Content::new(&text).is_likely_binary());
+        assert!(Content::new(&binary).is_likely_binary());
     }
 
     #[test]

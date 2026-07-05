@@ -21,40 +21,49 @@ multilingual web), and `sngram-weights` ships the trained tables once minted.
 ```toml
 [dependencies]
 sngram = "0.5"
+sngram-types = "0.5"
 ```
 
 ## Index and query
 
 ```rust
-use sngram::{query, scan, QueryOptions, ScanOptions};
-use sngram_types::{Content, WeightTable};
+use sngram::{query, scan};
+use sngram_types::{ScanEvent, WeightTable};
+use std::io::Cursor;
 
 let table = WeightTable::from_bytes(&std::fs::read("bins/5tb_weights.bin")?)?;
-let doc = Content::new(b"fn max_file_size() -> u64 { 0 }");
+let doc = b"fn max_file_size() -> u64 { 0 }";
 
 // Every sparse gram arrives with its 64-bit index key, computed in O(1)
 // from rolling prefix hashes — store it straight into your inverted index.
-scan(table, &doc, ScanOptions::default(), |gram| {
-    let _bytes = gram.bytes;
-    let _key = gram.hash;
+scan(&table, Cursor::new(doc), |event| {
+    if let ScanEvent::Gram(gram) = event {
+        let _bytes = gram.bytes;
+        let _key = gram.hash;
+    }
 })?;
 
 // Fold a regex into a boolean gram query to prefilter candidates.
-// Gram::hash() on the plan's grams yields the same keys scan emitted.
-let planned = query(table, &[r"max_\w+_size"], QueryOptions::default())?;
-let plan = planned.plan;
+let plan = query(&table, r"max_\w+_size")?;
+let _key = plan.hash_key(); // use with each plan gram's hash_keyed(...)
 ```
 
-`scan` allocates nothing; each emission carries the gram's span and its 64-bit
-rolling hash, so building index keys costs no second pass over the bytes.
+`scan` reads one `BufRead` stream, allocates nothing per gram, and emits
+`ScanEvent::Gram` plus one final `ScanEvent::Finish` summary. Each gram carries
+its space, spans, boundary flags, bytes, and 64-bit rolling hash, so building
+index keys costs no second pass over the bytes.
 `query` folds a regex into a `QueryPlan` (`All`, `None`, or nested `And`/`Or`
-over `Gram` bags; `Gram` stores up to 22 bytes inline and hashes to the same
-keys) to intersect against the index. The plan matches a superset of what the
-regex matches, so a prefilter built from it never misses a match the index
-could find; the real regex verifies the candidates.
+expression over `Gram` bags; `Gram` stores up to 22 bytes inline) to intersect
+against the index. Hash each plan gram with `plan.hash_key()` so primary and
+folded-space queries look up the same keys `scan` emitted. The plan matches a
+superset of what the regex matches, so a prefilter built from it never misses a
+match the index could find; the real regex verifies the candidates. CLI
+concerns such as fixed-string escaping, multiple-pattern OR joining, smart
+case, and CRLF/byte regex mode should be encoded into the single regex pattern
+before calling `query`.
 
-Upgrading from 0.4: `scan` now takes `ScanOptions` and emits `ScannedGram`,
-`query` now takes a pattern slice plus `QueryOptions`, `index`/`IndexGram(s)`
+Upgrading from 0.4: `scan` now takes a `BufRead` input and emits `ScanEvent`,
+`query` now takes one regex pattern and returns `QueryPlan`, `index`/`IndexGram(s)`
 are gone, and index keys changed — reindex.
 
 ## Weights
