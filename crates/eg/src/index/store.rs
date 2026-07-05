@@ -442,7 +442,6 @@ fn scan_file(
         return Ok(Some(file_grams(file, false, Vec::new())));
     }
     if super::classify::is_oversized(len) {
-        // TODO(lib): try_scan so oversized files scan instead of force-candidate
         return Ok(Some(file_grams(file, true, Vec::new())));
     }
     let bytes = read_file(&file.path, use_mmap)?;
@@ -453,9 +452,9 @@ fn scan_file(
     let mut forced_candidate = super::classify::has_decoding_bom(bytes);
     let content = Content::new(bytes);
     let mut hashes = Vec::new();
-    sngram::scan_with(table, &content, super::postings::SCAN_PRIMARY, |_, hash| {
-        hashes.push(hash);
-    });
+    sngram::scan(table, &content, super::postings::SCAN_PRIMARY, |gram| {
+        hashes.push(gram.hash);
+    })?;
     hashes.sort_unstable();
     hashes.dedup();
     if super::classify::is_high_entropy(bytes.len(), hashes.len()) {
@@ -463,9 +462,9 @@ fn scan_file(
         hashes.clear();
     } else {
         let primary_unique = hashes.len();
-        sngram::scan_with(table, &content, super::postings::SCAN_FOLDED, |_, hash| {
-            hashes.push(hash);
-        });
+        sngram::scan(table, &content, super::postings::SCAN_FOLDED, |gram| {
+            hashes.push(gram.hash);
+        })?;
         if let Some(folded) = hashes.get_mut(primary_unique..) {
             folded.sort_unstable();
         }

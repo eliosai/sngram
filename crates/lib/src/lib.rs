@@ -18,168 +18,115 @@
 //! lone literal, minimal per branch for wide variant sets), which are
 //! looked up in the inverted index.
 //!
-//! # Choosing an API
+//! # API
 //!
-//! - [`scan`] — zero-allocation callback over a whole in-memory slice; each
-//!   emission carries the gram's span and its 64-bit rolling hash, so hashing
-//!   into an inverted index costs nothing extra.
-//! - [`StreamScanner`] — the same extraction over chunked input with bounded
-//!   memory; emits each gram's bytes and hash as it closes.
-//! - [`query_with`] — decomposes patterns under the verifying engine's
-//!   match options (case, fixed strings, unicode, inversion); prefer this.
-//! - [`query`] — decomposes a bare regex with default semantics.
-//! - `learn` module (feature `learn`) — bigram counters for training fresh weight tables
+//! - [`scan`] extracts sparse n-grams from one document under explicit scan
+//!   options.
+//! - [`query`] decomposes one or more patterns under explicit verifier and
+//!   index-format options.
+//! - `learn` module (feature `learn`) trains fresh weight tables.
 
-pub mod error;
 #[cfg(feature = "learn")]
 pub mod learn;
-pub mod pattern;
-pub mod plan;
 
 mod extract;
+mod plan;
+mod types;
 
-pub use error::QueryError;
-#[doc(inline)]
-pub use extract::{ScanOptions, StreamScanner};
-pub use pattern::Pattern;
-pub use plan::{
-    DfStats, GramSpace, IndexFormat, PlanCase, PlanOptions, PlanSyntax, PlannedQuery, QueryPlan,
+pub use sngram_types::{Content, Gram, HashKey, WeightTable};
+pub use types::{
+    DfStats, GramSpace, PlannedQuery, QueryCase, QueryError, QueryOptions, QueryPlan, QuerySyntax,
+    ScanError, ScanOptions, ScannedGram,
 };
-pub use sngram_types::{Gram, HashKey};
-
-use sngram_types::{Content, WeightTable};
 
 /// Compiles the README's examples as doctests.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;
 
-/// Zero-allocation scan. Calls `emit(start, end, hash)` per gram.
+/// Extract sparse n-grams from one in-memory document.
 ///
-/// The hash is a 64-bit rolling polynomial over the gram's bytes, computed in
-/// O(1) per gram from prefix hashes maintained during the scan; hashing the
-/// same bytes through `Gram::hash` yields the identical value, keeping index
-/// keys and query keys consistent.
-///
-/// # Panics
-///
-/// Panics if `content` is 4 GiB or larger; feed inputs that large through
-/// [`StreamScanner`] instead.
-pub fn scan(table: &WeightTable, content: &Content<'_>, emit: impl FnMut(usize, usize, u64)) {
-    extract::scan(table, content.as_bytes(), emit);
-}
-
-/// Panic-free [`scan`]: rejects 4 GiB+ content instead of asserting.
+/// Each emitted [`ScannedGram`] carries the gram bytes in the selected scan
+/// space, its scanned-stream span, and its 64-bit hash key.
 ///
 /// # Errors
 ///
-/// Returns [`error::ScanError::TooLarge`] when `content` is 4 GiB or larger;
-/// feed such inputs through [`StreamScanner`], which has no size limit.
-// TODO: make this the default scan no try variant, make sure we do not assert
-pub fn try_scan(
-    table: &WeightTable,
-    content: &Content<'_>,
-    emit: impl FnMut(usize, usize, u64),
-) -> Result<(), error::ScanError> {
-    // TODO: how much does this cost?
-    let len = content.as_bytes().len();
-    if u32::try_from(len).is_err() {
-        return Err(error::ScanError::TooLarge { len });
-    }
-    extract::scan(table, content.as_bytes(), emit);
-    Ok(())
-}
-
-/// Scan under explicit [`ScanOptions`], emitting each gram's bytes and hash.
-///
-/// The options select the hash space (deployment key, folded twin space) and
-/// the virtual line sentinels; index build and query planning must use the
-/// same options or lookups miss.
-// TODO: merge this into a singlular scan. Have the default take opts.
-pub fn scan_with(
+/// Currently infallible for in-memory content; the result leaves room for
+/// future scan backends without adding another public entry point.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "the internal scanner emits spans bounded by the same content slice"
+)]
+pub fn scan(
     table: &WeightTable,
     content: &Content<'_>,
     opts: ScanOptions,
-    emit: impl FnMut(&[u8], u64),
-) {
-    extract::scan_with(table, content.as_bytes(), opts, emit);
+    mut emit: impl for<'a> FnMut(ScannedGram<'a>),
+) -> Result<(), ScanError> {
+    let bytes = content.as_bytes();
+    if opts == ScanOptions::default() && u32::try_from(bytes.len()).is_ok() {
+        extract::scan(table, bytes, |start, end, hash| {
+            emit(ScannedGram {
+                bytes: &bytes[start..end],
+                start,
+                end,
+                hash,
+            });
+        });
+    } else {
+        extract::scan_options(table, bytes, opts, emit);
+    }
+    Ok(())
 }
 
-/// Decompose a regex pattern into a sparse-gram [`QueryPlan`] for index lookup.
+/// Decompose one or more patterns into a sparse-gram query plan.
 ///
-/// Infallible: a too-broad pattern yields [`QueryPlan::All`] and an impossible
-/// one yields [`QueryPlan::None`].
-#[must_use]
-pub fn query(table: &WeightTable, pattern: &Pattern) -> QueryPlan {
-    plan::query(table, pattern)
-}
-
-/// Decompose one or more patterns into a [`QueryPlan`] under the verifying
-/// engine's match options.
-///
-/// Prefer this over [`query`] whenever the engine that verifies candidates
-/// is configured with anything beyond default Rust-regex semantics: the
-/// options carry case mode (including engine-rule smart case), fixed-string
-/// interpretation, Unicode mode, and inversion, so the plan is built from
-/// exactly the semantics the verifier will apply.
+/// [`QueryOptions`] carries both verifier semantics and index-format settings,
+/// so the returned [`PlannedQuery`] names the gram space its hashes must use.
 ///
 /// # Errors
 ///
 /// Returns [`QueryError`] when the joined patterns exceed the length limit
 /// or fail to parse.
-// TODO: merge this into a singlular query. Have the default take opts.
-pub fn query_with<P: AsRef<str>>(
+pub fn query<P: AsRef<str>>(
     table: &WeightTable,
     patterns: &[P],
-    opts: PlanOptions,
-) -> Result<QueryPlan, QueryError> {
-    plan::query_with(table, patterns, opts)
-}
-
-/// Decompose patterns against an index's physical format.
-///
-/// Beyond [`query_with`], the format unlocks two precision features the index
-/// must have been built with (see [`ScanOptions`]): a folded twin space turns
-/// case-insensitive queries into single folded-space plans instead of
-/// variant explosions, and line sentinels let edge anchors (`^`/`$`) demand
-/// terminator-bridging grams instead of planning as if unanchored. The
-/// returned [`PlannedQuery::space`] says which space to hash the plan's
-/// grams into.
-///
-/// # Errors
-///
-/// Returns [`QueryError`] when the joined patterns exceed the length limit
-/// or fail to parse.
-// TODO: merge this into a singlular plan. Have the default take opts.
-pub fn plan_query<P: AsRef<str>>(
-    table: &WeightTable,
-    patterns: &[P],
-    opts: PlanOptions,
-    format: IndexFormat,
+    opts: QueryOptions,
 ) -> Result<PlannedQuery, QueryError> {
-    plan::plan_query(table, patterns, opts, format)
+    plan::query(table, patterns, opts)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::QueryError;
+    #[cfg(feature = "stream")]
+    use crate::types::StreamScanner;
 
     fn table() -> WeightTable {
         WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
     }
 
+    fn scan_default(t: &WeightTable, doc: &[u8], emit: impl for<'a> FnMut(ScannedGram<'a>)) {
+        scan(t, &Content::new(doc), ScanOptions::default(), emit).expect("scan succeeds");
+    }
+
+    fn query_default(t: &WeightTable, pattern: &str) -> QueryPlan {
+        query(t, &[pattern], QueryOptions::default())
+            .expect("pattern parses")
+            .plan
+    }
+
     fn index_set(t: &WeightTable, doc: &[u8]) -> std::collections::HashSet<Vec<u8>> {
         let mut set = std::collections::HashSet::new();
-        scan(t, &Content::new(doc), |s, e, _| {
-            set.insert(doc[s..e].to_vec());
+        scan_default(t, doc, |gram| {
+            set.insert(gram.bytes.to_vec());
         });
         set
     }
 
     fn gram_count(t: &WeightTable, doc: &[u8]) -> usize {
         let mut n = 0usize;
-        scan(t, &Content::new(doc), |_, _, _| n += 1);
+        scan_default(t, doc, |_| n += 1);
         n
     }
 
@@ -332,8 +279,8 @@ mod tests {
         let t = table();
         let content = b"fn main() { let x = foo_bar(42); }";
 
-        scan(&t, &Content::new(content), |s, e, _| {
-            let bytes = &content[s..e];
+        scan_default(&t, content, |gram| {
+            let bytes = gram.bytes;
             if bytes.len() <= 3 {
                 return;
             }
@@ -387,7 +334,10 @@ mod tests {
         let content = Content::new(b"hello world");
         let collect = || {
             let mut hs = Vec::new();
-            scan(&t, &content, |_, _, h| hs.push(h));
+            scan(&t, &content, ScanOptions::default(), |gram| {
+                hs.push(gram.hash)
+            })
+            .expect("scan succeeds");
             hs
         };
         let h1 = collect();
@@ -401,28 +351,27 @@ mod tests {
     #[test]
     fn literal_pattern_extracts_grams() {
         let t = table();
-        let pat = Pattern::new("MAX_FILE_SIZE").unwrap();
-        assert!(matches!(query(&t, &pat), QueryPlan::And { .. }));
+        assert!(matches!(
+            query_default(&t, "MAX_FILE_SIZE"),
+            QueryPlan::And { .. }
+        ));
     }
 
     // -- query: too broad yields All (infallible, like codesearch) --
 
     #[test]
     fn pure_wildcard_is_all() {
-        let pat = Pattern::new(".*").unwrap();
-        assert_eq!(query(&table(), &pat), QueryPlan::All);
+        assert_eq!(query_default(&table(), ".*"), QueryPlan::All);
     }
 
     #[test]
     fn pure_class_is_all() {
-        let pat = Pattern::new(r"[a-z]+").unwrap();
-        assert_eq!(query(&table(), &pat), QueryPlan::All);
+        assert_eq!(query_default(&table(), r"[a-z]+"), QueryPlan::All);
     }
 
     #[test]
     fn short_literal_is_all() {
-        let pat = Pattern::new("ab").unwrap();
-        assert_eq!(query(&table(), &pat), QueryPlan::All);
+        assert_eq!(query_default(&table(), "ab"), QueryPlan::All);
     }
 
     // -- pattern: parse errors --
@@ -430,13 +379,13 @@ mod tests {
     #[test]
     fn oversized_pattern_returns_too_long() {
         let long = "a".repeat(5000);
-        let err = Pattern::new(&long).unwrap_err();
+        let err = query(&table(), &[long.as_str()], QueryOptions::default()).unwrap_err();
         assert!(matches!(err, QueryError::PatternTooLong { .. }));
     }
 
     #[test]
     fn invalid_regex_returns_error() {
-        let err = Pattern::new("(unclosed").unwrap_err();
+        let err = query(&table(), &["(unclosed"], QueryOptions::default()).unwrap_err();
         assert!(matches!(err, QueryError::InvalidRegex(_)));
     }
 
@@ -461,12 +410,15 @@ mod tests {
         let doc = b"pub async fn read(hash: Hash) -> Result<Bytes, Error> { todo!() }";
         let mut from_reader = Vec::new();
         let reader = tokio::io::BufReader::with_capacity(7, &doc[..]);
-        let mut scanner = StreamScanner::new(&t);
-        block_on(scanner.index_reader(reader, |g, h| from_reader.push((g.to_vec(), h)))).unwrap();
+        let mut scanner = StreamScanner::with_options(&t, ScanOptions::default());
+        block_on(scanner.index_reader(reader, |gram| {
+            from_reader.push((gram.bytes.to_vec(), gram.hash));
+        }))
+        .unwrap();
 
         let mut from_scan = Vec::new();
-        scan(&t, &Content::new(doc), |s, e, h| {
-            from_scan.push((doc[s..e].to_vec(), h));
+        scan_default(&t, doc, |gram| {
+            from_scan.push((gram.bytes.to_vec(), gram.hash));
         });
         assert_eq!(from_reader, from_scan);
     }

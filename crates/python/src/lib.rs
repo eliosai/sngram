@@ -16,7 +16,7 @@ mod arrow_ffi;
 
 use std::path::PathBuf;
 
-use pyo3::exceptions::{PyIOError, PyValueError};
+use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -65,12 +65,18 @@ impl PyWeightTable {
 
 /// Sparse grams of `data` as a list of `(start, end, hash)` tuples.
 #[pyfunction]
-fn scan(py: Python<'_>, table: &PyWeightTable, data: &[u8]) -> Vec<(usize, usize, u64)> {
+fn scan(py: Python<'_>, table: &PyWeightTable, data: &[u8]) -> PyResult<Vec<(usize, usize, u64)>> {
     let table = &table.inner;
     py.detach(|| {
         let mut out = Vec::new();
-        sngram::scan(table, &Content::new(data), |s, e, h| out.push((s, e, h)));
-        out
+        sngram::scan(
+            table,
+            &Content::new(data),
+            sngram::ScanOptions::default(),
+            |gram| out.push((gram.start, gram.end, gram.hash)),
+        )
+        .map_err(|e| PyRuntimeError::new_err(format!("scan failed: {e}")))?;
+        Ok::<_, PyErr>(out)
     })
 }
 
@@ -78,16 +84,26 @@ fn scan(py: Python<'_>, table: &PyWeightTable, data: &[u8]) -> Vec<(usize, usize
 ///
 /// Zero-copy view from Python: `np.frombuffer(buf, dtype=np.uint64)`.
 #[pyfunction]
-fn scan_hashes<'py>(py: Python<'py>, table: &PyWeightTable, data: &[u8]) -> Bound<'py, PyBytes> {
+fn scan_hashes<'py>(
+    py: Python<'py>,
+    table: &PyWeightTable,
+    data: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
     let table = &table.inner;
     let bytes: Vec<u8> = py.detach(|| {
         let mut out = Vec::new();
-        sngram::scan(table, &Content::new(data), |_, _, h| {
-            out.extend_from_slice(&h.to_le_bytes());
-        });
-        out
-    });
-    PyBytes::new(py, &bytes)
+        sngram::scan(
+            table,
+            &Content::new(data),
+            sngram::ScanOptions::default(),
+            |gram| {
+                out.extend_from_slice(&gram.hash.to_le_bytes());
+            },
+        )
+        .map_err(|e| PyRuntimeError::new_err(format!("scan failed: {e}")))?;
+        Ok::<_, PyErr>(out)
+    })?;
+    Ok(PyBytes::new(py, &bytes))
 }
 
 /// The 64-bit index key of one gram's bytes — identical to the hash `scan`
@@ -152,10 +168,9 @@ fn convert_plan(py: Python<'_>, plan: &sngram::QueryPlan) -> PyResult<PyQueryPla
 /// impossible one yields op "none". Raises `ValueError` on an invalid regex.
 #[pyfunction]
 fn query(py: Python<'_>, table: &PyWeightTable, pattern: &str) -> PyResult<PyQueryPlan> {
-    let pat = sngram::Pattern::new(pattern)
+    let planned = sngram::query(&table.inner, &[pattern], sngram::QueryOptions::default())
         .map_err(|e| PyValueError::new_err(format!("invalid pattern: {e}")))?;
-    let plan = sngram::query(&table.inner, &pat);
-    convert_plan(py, &plan)
+    convert_plan(py, &planned.plan)
 }
 
 /// Per-worker byte-pair tally; counts without atomics, merged into a shared

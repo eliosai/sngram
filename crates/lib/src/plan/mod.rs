@@ -12,64 +12,20 @@ mod options;
 mod query;
 mod strings;
 
-use core::fmt;
-
 use regex_syntax::hir::Hir;
-use sngram_types::{Gram, WeightTable};
+#[cfg(test)]
+use sngram_types::Gram;
+use sngram_types::WeightTable;
 
-use crate::error::QueryError;
-use crate::pattern::{self, Pattern};
+use crate::types::{MAX_PATTERN_LEN, QueryError};
 use analyze::{Analyzer, PlanContext};
 use query::{Op, Query};
 
-pub use options::{PlanCase, PlanOptions, PlanSyntax};
+pub use crate::types::{GramSpace, PlannedQuery, QueryCase, QueryOptions, QueryPlan, QuerySyntax};
 
 /// Nest limit matching `grep-regex`'s translator, so any pattern the
 /// verifier accepts also parses here.
 const VERIFIER_NEST_LIMIT: u32 = 250;
-
-/// A conservative boolean query over sparse-gram presence.
-///
-/// Every document the source regex matches satisfies this plan. The plan also
-/// admits non-matches, which the exact regex removes afterward.
-///
-/// The structure mirrors Google codesearch's `Query`: each [`Self::And`] and
-/// [`Self::Or`] node carries a bag of grams alongside its sub-plans, so the
-/// grams translate to a single array operation. With a postgres `int4[]`
-/// column of gram hashes, an `And` bag is `grams @> ARRAY[..]` (all present)
-/// and an `Or` bag is `grams && ARRAY[..]` (any present). Each [`Gram`]'s
-/// 64-bit key comes from [`Gram::hash`], matching the keys [`crate::scan`]
-/// emits.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueryPlan {
-    /// No constraint: the index cannot narrow this query.
-    All,
-    /// Provably empty: no document can match.
-    None,
-    /// All of `grams` are present and every sub-plan holds.
-    And {
-        /// Grams that must all be present.
-        grams: Vec<Gram>,
-        /// Sub-plans that must all hold.
-        sub: Vec<Self>,
-    },
-    /// At least one of `grams` is present, or some sub-plan holds.
-    Or {
-        /// Grams of which at least one must be present.
-        grams: Vec<Gram>,
-        /// Sub-plans of which at least one must hold.
-        sub: Vec<Self>,
-    },
-}
-
-/// Decompose a regex pattern into a sparse-gram query plan.
-///
-/// Infallible, like codesearch's `RegexpQuery`: a pattern with no usable grams
-/// yields [`QueryPlan::All`] (the caller decides whether to scan or reject),
-/// and an impossible pattern yields [`QueryPlan::None`].
-pub(crate) fn query(table: &WeightTable, pattern: &Pattern) -> QueryPlan {
-    query_hir(table, pattern.hir())
-}
 
 /// Decompose one or more patterns under the verifier's match options.
 ///
@@ -78,47 +34,75 @@ pub(crate) fn query(table: &WeightTable, pattern: &Pattern) -> QueryPlan {
 /// case — so the plan can never assume narrower semantics than the match
 /// run that follows. Inversion yields [`QueryPlan::All`]: every document may
 /// hold a non-matching line.
-pub(crate) fn query_with<P: AsRef<str>>(
+pub fn query<P: AsRef<str>>(
     table: &WeightTable,
     patterns: &[P],
-    opts: PlanOptions,
-) -> Result<QueryPlan, QueryError> {
+    opts: QueryOptions,
+) -> Result<PlannedQuery, QueryError> {
     if opts.invert || patterns.is_empty() {
-        return Ok(QueryPlan::All);
+        return Ok(PlannedQuery {
+            plan: QueryPlan::All,
+            space: GramSpace::Primary,
+        });
     }
     let joined = join_patterns(patterns, opts)?;
+    let global_insensitive = effective_insensitive(&joined, opts);
+    let inline_insensitive =
+        matches!(opts.syntax, QuerySyntax::Regex) && options::has_inline_case_insensitive(&joined);
+    let fold = opts.folded_space && (global_insensitive || inline_insensitive);
     let hir = parse_joined(&joined, opts)?;
-    Ok(query_hir(table, &hir))
+    let ctx = PlanContext {
+        fold,
+        line_sentinels: opts.line_sentinels,
+    };
+    Ok(PlannedQuery {
+        plan: query_hir_ctx(table, &hir, ctx),
+        space: if fold {
+            GramSpace::Folded
+        } else {
+            GramSpace::Primary
+        },
+    })
 }
 
 /// Escape (for fixed strings), wrap, and OR-join the patterns.
-fn join_patterns<P: AsRef<str>>(patterns: &[P], opts: PlanOptions) -> Result<String, QueryError> {
+fn join_patterns<P: AsRef<str>>(patterns: &[P], opts: QueryOptions) -> Result<String, QueryError> {
     let mut parts = Vec::with_capacity(patterns.len());
     for pattern in patterns {
         let pattern = pattern.as_ref();
         match opts.syntax {
-            PlanSyntax::Regex => parts.push(format!("(?:{pattern})")),
-            PlanSyntax::FixedStrings => {
+            QuerySyntax::Regex => parts.push(format!("(?:{pattern})")),
+            QuerySyntax::FixedStrings => {
                 parts.push(format!("(?:{})", regex_syntax::escape(pattern)));
             },
         }
     }
     let joined = parts.join("|");
-    pattern::check_length(&joined)?;
+    check_length(&joined)?;
     Ok(joined)
 }
 
+const fn check_length(regex: &str) -> Result<(), QueryError> {
+    if regex.len() > MAX_PATTERN_LEN {
+        return Err(QueryError::PatternTooLong {
+            len: regex.len(),
+            max: MAX_PATTERN_LEN,
+        });
+    }
+    Ok(())
+}
+
 /// Whether the verifier will match `joined` case-insensitively.
-fn effective_insensitive(joined: &str, opts: PlanOptions) -> bool {
+fn effective_insensitive(joined: &str, opts: QueryOptions) -> bool {
     match opts.case {
-        PlanCase::Sensitive => false,
-        PlanCase::Insensitive => true,
-        PlanCase::Smart => options::smart_case_insensitive(joined),
+        QueryCase::Sensitive => false,
+        QueryCase::Insensitive => true,
+        QueryCase::Smart => options::smart_case_insensitive(joined),
     }
 }
 
 /// Parse the joined pattern with the flags the verifying engine uses.
-fn parse_joined(joined: &str, opts: PlanOptions) -> Result<Hir, QueryError> {
+fn parse_joined(joined: &str, opts: QueryOptions) -> Result<Hir, QueryError> {
     let insensitive = effective_insensitive(joined, opts);
     regex_syntax::ParserBuilder::new()
         .nest_limit(VERIFIER_NEST_LIMIT)
@@ -137,11 +121,6 @@ fn parse_joined(joined: &str, opts: PlanOptions) -> Result<Hir, QueryError> {
         .map_err(|err| QueryError::InvalidRegex(Box::new(err)))
 }
 
-/// Fold an already-parsed HIR into a plan.
-fn query_hir(table: &WeightTable, hir: &Hir) -> QueryPlan {
-    query_hir_ctx(table, hir, PlanContext::default())
-}
-
 /// Fold an already-parsed HIR into a plan under an index-format context.
 fn query_hir_ctx(table: &WeightTable, hir: &Hir, ctx: PlanContext) -> QueryPlan {
     let analyzer = Analyzer::with_context(table, ctx);
@@ -150,187 +129,6 @@ fn query_hir_ctx(table: &WeightTable, hir: &Hir, ctx: PlanContext) -> QueryPlan 
     analyzer.simplify(&mut info, true);
     analyzer.add_exact(&mut info);
     to_plan(info.match_)
-}
-
-/// Which hash space a plan's grams key into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GramSpace {
-    /// The primary space: raw document bytes.
-    Primary,
-    /// The folded twin space: ASCII-case-folded bytes, hashes tagged with
-    /// [`crate::HashKey::folded`].
-    Folded,
-}
-
-/// What the target index physically contains, beyond the weight table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct IndexFormat {
-    /// The index carries a folded twin space for every gram.
-    pub folded_space: bool,
-    /// Documents were scanned with virtual line sentinels.
-    pub line_sentinels: bool,
-}
-
-/// A plan plus the space its grams must be hashed into.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedQuery {
-    /// The boolean gram query.
-    pub plan: QueryPlan,
-    /// Hash space for every gram in the plan.
-    pub space: GramSpace,
-}
-
-/// Document-frequency statistics a deployment feeds the planner.
-///
-/// The provider owns key hashing and unseen-gram policy: a sampled top-K
-/// stop-list provider returns its best estimate (typically 0 for grams
-/// outside the sample — unseen means rare).
-pub trait DfStats {
-    /// Estimated documents containing `gram`.
-    fn doc_count(&self, gram: &Gram) -> u64;
-    /// Total documents in the corpus.
-    fn total_docs(&self) -> u64;
-}
-
-/// Decompose patterns against an index format: folded-space plans for
-/// case-insensitive queries when the index has the twin space, and
-/// terminator boundary grams for edge anchors when it has line sentinels.
-///
-/// # Errors
-///
-/// Returns [`QueryError`] when the joined patterns exceed the length limit
-/// or fail to parse.
-pub(crate) fn plan_query<P: AsRef<str>>(
-    table: &WeightTable,
-    patterns: &[P],
-    opts: PlanOptions,
-    format: IndexFormat,
-) -> Result<PlannedQuery, QueryError> {
-    if opts.invert || patterns.is_empty() {
-        return Ok(PlannedQuery {
-            plan: QueryPlan::All,
-            space: GramSpace::Primary,
-        });
-    }
-    let joined = join_patterns(patterns, opts)?;
-    let global_insensitive = effective_insensitive(&joined, opts);
-    let inline_insensitive =
-        matches!(opts.syntax, PlanSyntax::Regex) && options::has_inline_case_insensitive(&joined);
-    let fold = format.folded_space && (global_insensitive || inline_insensitive);
-    let hir = parse_joined(&joined, opts)?;
-    let ctx = PlanContext {
-        fold,
-        line_sentinels: format.line_sentinels,
-    };
-    Ok(PlannedQuery {
-        plan: query_hir_ctx(table, &hir, ctx),
-        space: if fold {
-            GramSpace::Folded
-        } else {
-            GramSpace::Primary
-        },
-    })
-}
-
-impl QueryPlan {
-    /// Estimated candidate documents, from df priors: an `And` is bounded by
-    /// its rarest member, an `Or` by the sum of its members, everything
-    /// capped at the corpus size. The cost-model number that routes
-    /// low-selectivity plans to a scan instead of the index.
-    #[must_use]
-    pub fn estimate_candidates(&self, df: &dyn DfStats) -> u64 {
-        let total = df.total_docs();
-        match self {
-            Self::All => total,
-            Self::None => 0,
-            Self::And { grams, sub } => {
-                let g = grams.iter().map(|g| df.doc_count(g)).min();
-                let s = sub.iter().map(|p| p.estimate_candidates(df)).min();
-                g.into_iter().chain(s).min().unwrap_or(total)
-            },
-            Self::Or { grams, sub } => {
-                let g: u64 = grams.iter().map(|g| df.doc_count(g)).sum();
-                let s: u64 = sub.iter().map(|p| p.estimate_candidates(df)).sum();
-                g.saturating_add(s).min(total)
-            },
-        }
-    }
-
-    /// Reorder and thin the plan by df: `And` bags sort rarest-first and drop
-    /// stop grams (df at or above `stop_df`) while at least one discriminator
-    /// remains. Dropping an `And` member only widens the plan, so tuning is
-    /// always sound; `Or` bags are never thinned (every branch must stay
-    /// covered) but sort for stable output.
-    pub fn tune(&mut self, df: &dyn DfStats, stop_df: u64) {
-        match self {
-            Self::All | Self::None => {},
-            Self::And { grams, sub } => {
-                grams.sort_by_key(|g| df.doc_count(g));
-                let keep_first = sub.is_empty();
-                let mut kept = 0usize;
-                grams.retain(|g| {
-                    kept += 1;
-                    (keep_first && kept == 1) || df.doc_count(g) < stop_df
-                });
-                for p in sub.iter_mut() {
-                    p.tune(df, stop_df);
-                }
-            },
-            Self::Or { grams, sub } => {
-                grams.sort_by_key(|g| df.doc_count(g));
-                for p in sub.iter_mut() {
-                    p.tune(df, stop_df);
-                }
-            },
-        }
-    }
-}
-
-/// Renders like codesearch's `Query.String()`: `+` for all, `-` for none, a
-/// quoted gram for a lone leaf, space-joined for `And`, `(..)|(..)` for `Or`.
-impl fmt::Display for QueryPlan {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::All => f.write_str("+"),
-            Self::None => f.write_str("-"),
-            Self::And { grams, sub } => write_join(f, grams, sub, " ", false),
-            Self::Or { grams, sub } => write_join(f, grams, sub, "|", true),
-        }
-    }
-}
-
-/// Write the grams then sub-plans of an `And`/`Or` joined by `sep`; when
-/// `paren`, wrap each multi-token operand in parentheses.
-fn write_join(
-    f: &mut fmt::Formatter<'_>,
-    grams: &[Gram],
-    sub: &[QueryPlan],
-    sep: &str,
-    paren: bool,
-) -> fmt::Result {
-    let mut first = true;
-    for gram in grams {
-        delimit(f, &mut first, sep)?;
-        write!(f, "{:?}", String::from_utf8_lossy(gram.as_bytes()))?;
-    }
-    for plan in sub {
-        delimit(f, &mut first, sep)?;
-        if paren {
-            write!(f, "({plan})")?;
-        } else {
-            write!(f, "{plan}")?;
-        }
-    }
-    Ok(())
-}
-
-fn delimit(f: &mut fmt::Formatter<'_>, first: &mut bool, sep: &str) -> fmt::Result {
-    if *first {
-        *first = false;
-        Ok(())
-    } else {
-        f.write_str(sep)
-    }
 }
 
 /// Convert the internal query into the public plan. The internal `Query` is
@@ -359,9 +157,7 @@ mod tests {
 
     use sngram_types::WeightTable;
 
-    use super::QueryPlan;
-    use crate::pattern::Pattern;
-    use crate::query;
+    use super::{QueryOptions, QueryPlan, query};
 
     /// A deterministic weight table: each byte pair hashed to a varied weight,
     /// so the sparse hull is non-trivial.
@@ -370,7 +166,9 @@ mod tests {
     }
 
     fn plan_of(re: &str) -> QueryPlan {
-        query(&table(), &Pattern::new(re).unwrap())
+        query(&table(), &[re], QueryOptions::default())
+            .expect("pattern parses")
+            .plan
     }
 
     /// Render the operator tree, collapsing a conjunctive gram bag to `G` and a
@@ -521,15 +319,15 @@ mod tests {
     }
 
     mod options_spec {
-        //! `query_with` must build plans from exactly the verifier's
+        //! `query` must build plans from exactly the verifier's
         //! semantics: engine-rule smart case, fixed-string escaping,
         //! OR-joined multiple patterns, and All for inversion.
 
         use super::{plan_of, table};
-        use crate::plan::{PlanCase, PlanOptions, PlanSyntax, QueryPlan, query_with};
+        use crate::plan::{QueryCase, QueryOptions, QueryPlan, QuerySyntax, query};
 
-        fn with(opts: PlanOptions, patterns: &[&str]) -> QueryPlan {
-            query_with(&table(), patterns, opts).expect("patterns plan")
+        fn with(opts: QueryOptions, patterns: &[&str]) -> QueryPlan {
+            query(&table(), patterns, opts).expect("patterns plan").plan
         }
 
         #[test]
@@ -537,16 +335,16 @@ mod tests {
             // grep-regex treats \W as class, not literal: the verifier
             // matches insensitively, so the plan must too.
             let smart = with(
-                PlanOptions {
-                    case: PlanCase::Smart,
-                    ..PlanOptions::default()
+                QueryOptions {
+                    case: QueryCase::Smart,
+                    ..QueryOptions::default()
                 },
                 &[r"maxfile\Wsize"],
             );
             let insensitive = with(
-                PlanOptions {
-                    case: PlanCase::Insensitive,
-                    ..PlanOptions::default()
+                QueryOptions {
+                    case: QueryCase::Insensitive,
+                    ..QueryOptions::default()
                 },
                 &[r"maxfile\Wsize"],
             );
@@ -556,22 +354,22 @@ mod tests {
         #[test]
         fn smart_case_stays_sensitive_on_uppercase_literals() {
             let smart = with(
-                PlanOptions {
-                    case: PlanCase::Smart,
-                    ..PlanOptions::default()
+                QueryOptions {
+                    case: QueryCase::Smart,
+                    ..QueryOptions::default()
                 },
                 &["MaxFile"],
             );
-            let sensitive = with(PlanOptions::default(), &["MaxFile"]);
+            let sensitive = with(QueryOptions::default(), &["MaxFile"]);
             assert_eq!(smart, sensitive);
         }
 
         #[test]
         fn fixed_strings_escape_metacharacters() {
             let fixed = with(
-                PlanOptions {
-                    syntax: PlanSyntax::FixedStrings,
-                    ..PlanOptions::default()
+                QueryOptions {
+                    syntax: QuerySyntax::FixedStrings,
+                    ..QueryOptions::default()
                 },
                 &["max.*size"],
             );
@@ -581,9 +379,9 @@ mod tests {
         #[test]
         fn invert_plans_everything() {
             let inverted = with(
-                PlanOptions {
+                QueryOptions {
                     invert: true,
-                    ..PlanOptions::default()
+                    ..QueryOptions::default()
                 },
                 &["max_file_size"],
             );
@@ -592,7 +390,7 @@ mod tests {
 
         #[test]
         fn multiple_patterns_join_as_alternation() {
-            let joined = with(PlanOptions::default(), &["max_file", "min_file"]);
+            let joined = with(QueryOptions::default(), &["max_file", "min_file"]);
             assert_eq!(joined, plan_of("(?:max_file)|(?:min_file)"));
         }
 
@@ -602,9 +400,9 @@ mod tests {
             // path must plan identically.
             for pat in ["max_file_size", "sched[_-]clock", "mem+set"] {
                 let flagged = with(
-                    PlanOptions {
-                        case: PlanCase::Insensitive,
-                        ..PlanOptions::default()
+                    QueryOptions {
+                        case: QueryCase::Insensitive,
+                        ..QueryOptions::default()
                     },
                     &[pat],
                 );
@@ -618,12 +416,12 @@ mod tests {
             // pattern empty; with crlf the anchor accepts \r and the plan
             // must survive. Mis-plumbing this field would silently drop
             // real matches.
-            let default = with(PlanOptions::default(), &[r"foo$\r\nbar"]);
+            let default = with(QueryOptions::default(), &[r"foo$\r\nbar"]);
             assert_eq!(default, QueryPlan::None);
             let crlf = with(
-                PlanOptions {
+                QueryOptions {
                     crlf: true,
-                    ..PlanOptions::default()
+                    ..QueryOptions::default()
                 },
                 &[r"foo$\r\nbar"],
             );
@@ -632,29 +430,42 @@ mod tests {
 
         #[test]
         fn non_unicode_byte_patterns_parse() {
-            let opts = PlanOptions {
+            let opts = QueryOptions {
                 unicode: false,
-                ..PlanOptions::default()
+                ..QueryOptions::default()
             };
-            let plan = query_with(&table(), &[r"foobar\xFF"], opts).expect("bytes plan");
+            let plan = query(&table(), &[r"foobar\xFF"], opts)
+                .expect("bytes plan")
+                .plan;
             assert!(!matches!(plan, QueryPlan::All));
         }
     }
 
     mod format_spec {
-        //! `plan_query` under an index format: sentinel anchors and the
-        //! folded space, each gated on the index actually carrying them.
+        //! `query` under an index format: sentinel anchors and the folded
+        //! space, each gated on the index actually carrying them.
 
         use super::table;
-        use crate::plan::{
-            DfStats, GramSpace, IndexFormat, PlanCase, PlanOptions, QueryPlan, plan_query,
-        };
+        use crate::plan::{GramSpace, QueryCase, QueryOptions, QueryPlan, query};
+        use crate::types::DfStats;
         use sngram_types::Gram;
 
-        fn planned(patterns: &[&str], opts: PlanOptions, format: IndexFormat) -> super::QueryPlan {
-            plan_query(&table(), patterns, opts, format)
-                .expect("plan")
-                .plan
+        fn planned(patterns: &[&str], opts: QueryOptions) -> super::QueryPlan {
+            query(&table(), patterns, opts).expect("plan").plan
+        }
+
+        fn sentinels(opts: QueryOptions) -> QueryOptions {
+            QueryOptions {
+                line_sentinels: true,
+                ..opts
+            }
+        }
+
+        fn folded(opts: QueryOptions) -> QueryOptions {
+            QueryOptions {
+                folded_space: true,
+                ..opts
+            }
         }
 
         fn grams_of(plan: &QueryPlan, out: &mut Vec<Gram>) {
@@ -673,18 +484,9 @@ mod tests {
             out
         }
 
-        const SENTINELS: IndexFormat = IndexFormat {
-            folded_space: false,
-            line_sentinels: true,
-        };
-        const FOLDED: IndexFormat = IndexFormat {
-            folded_space: true,
-            line_sentinels: false,
-        };
-
         #[test]
         fn start_anchor_demands_terminator_grams() {
-            let plan = planned(&["^#define CONFIG"], PlanOptions::default(), SENTINELS);
+            let plan = planned(&["^#define CONFIG"], sentinels(QueryOptions::default()));
             assert!(
                 all_grams(&plan)
                     .iter()
@@ -695,7 +497,7 @@ mod tests {
 
         #[test]
         fn end_anchor_demands_terminator_grams() {
-            let plan = planned(&["EXPORT_SYMBOL$"], PlanOptions::default(), SENTINELS);
+            let plan = planned(&["EXPORT_SYMBOL$"], sentinels(QueryOptions::default()));
             assert!(
                 all_grams(&plan)
                     .iter()
@@ -706,19 +508,18 @@ mod tests {
 
         #[test]
         fn anchors_without_sentinels_stay_invisible() {
-            let format = IndexFormat::default();
-            let anchored = planned(&["^abcdef"], PlanOptions::default(), format);
-            let plain = planned(&["abcdef"], PlanOptions::default(), format);
+            let anchored = planned(&["^abcdef"], QueryOptions::default());
+            let plain = planned(&["abcdef"], QueryOptions::default());
             assert_eq!(anchored, plain);
         }
 
         #[test]
         fn crlf_end_anchor_covers_both_terminators() {
-            let opts = PlanOptions {
+            let opts = QueryOptions {
                 crlf: true,
-                ..PlanOptions::default()
+                ..QueryOptions::default()
             };
-            let plan = planned(&["EXPORT_SYMBOL$"], opts, SENTINELS);
+            let plan = planned(&["EXPORT_SYMBOL$"], sentinels(opts));
             let grams = all_grams(&plan);
             assert!(grams.iter().any(|g| g.as_bytes().last() == Some(&b'\n')));
             assert!(grams.iter().any(|g| g.as_bytes().last() == Some(&b'\r')));
@@ -726,7 +527,7 @@ mod tests {
 
         #[test]
         fn interior_anchor_pruning_survives_sentinels() {
-            let plan = planned(&["foo$bar"], PlanOptions::default(), SENTINELS);
+            let plan = planned(&["foo$bar"], sentinels(QueryOptions::default()));
             assert_eq!(
                 plan,
                 QueryPlan::None,
@@ -736,40 +537,38 @@ mod tests {
 
         #[test]
         fn ascii_insensitive_folds_to_the_lowercase_plan() {
-            let opts = PlanOptions {
-                case: PlanCase::Insensitive,
+            let opts = QueryOptions {
+                case: QueryCase::Insensitive,
                 unicode: false,
-                ..PlanOptions::default()
+                ..QueryOptions::default()
             };
-            let folded = plan_query(&table(), &["SchedClock"], opts, FOLDED).expect("plan");
-            assert_eq!(folded.space, GramSpace::Folded);
-            let lower = plan_query(
+            let folded_plan = query(&table(), &["SchedClock"], folded(opts)).expect("plan");
+            assert_eq!(folded_plan.space, GramSpace::Folded);
+            let lower = query(
                 &table(),
                 &["schedclock"],
-                PlanOptions {
+                QueryOptions {
                     unicode: false,
-                    ..PlanOptions::default()
+                    ..QueryOptions::default()
                 },
-                IndexFormat::default(),
             )
             .expect("plan");
             assert_eq!(
-                folded.plan, lower.plan,
+                folded_plan.plan, lower.plan,
                 "folded plan must equal the folded literal's"
             );
         }
 
         #[test]
         fn unicode_insensitive_collapses_the_ascii_explosion() {
-            let opts = PlanOptions {
-                case: PlanCase::Insensitive,
-                ..PlanOptions::default()
+            let opts = QueryOptions {
+                case: QueryCase::Insensitive,
+                ..QueryOptions::default()
             };
-            let folded = plan_query(&table(), &["SchedClock"], opts, FOLDED).expect("plan");
-            assert_eq!(folded.space, GramSpace::Folded);
-            let exploded =
-                plan_query(&table(), &["SchedClock"], opts, IndexFormat::default()).expect("plan");
-            let folded_count = all_grams(&folded.plan).len();
+            let folded_plan = query(&table(), &["SchedClock"], folded(opts)).expect("plan");
+            assert_eq!(folded_plan.space, GramSpace::Folded);
+            let exploded = query(&table(), &["SchedClock"], opts).expect("plan");
+            let folded_count = all_grams(&folded_plan.plan).len();
             let exploded_count = all_grams(&exploded.plan).len();
             assert!(
                 folded_count < exploded_count,
@@ -779,13 +578,12 @@ mod tests {
 
         #[test]
         fn inline_insensitive_uses_folded_space() {
-            let opts = PlanOptions::default();
+            let opts = QueryOptions::default();
             let pattern = "(?i)netif_receive_skb_list_internal";
-            let folded = plan_query(&table(), &[pattern], opts, FOLDED).expect("plan");
-            assert_eq!(folded.space, GramSpace::Folded);
-            let exploded = plan_query(&table(), &[pattern], opts, IndexFormat::default())
-                .expect("exploded plan");
-            let folded_count = all_grams(&folded.plan).len();
+            let folded_plan = query(&table(), &[pattern], folded(opts)).expect("plan");
+            assert_eq!(folded_plan.space, GramSpace::Folded);
+            let exploded = query(&table(), &[pattern], opts).expect("exploded plan");
+            let folded_count = all_grams(&folded_plan.plan).len();
             let exploded_count = all_grams(&exploded.plan).len();
             assert!(
                 folded_count.saturating_mul(4) < exploded_count,
@@ -795,11 +593,11 @@ mod tests {
 
         #[test]
         fn folded_plans_never_carry_uppercase() {
-            let opts = PlanOptions {
-                case: PlanCase::Insensitive,
-                ..PlanOptions::default()
+            let opts = QueryOptions {
+                case: QueryCase::Insensitive,
+                ..QueryOptions::default()
             };
-            let planned = plan_query(&table(), &["READ[A-Z]lock_IRQ"], opts, FOLDED).expect("plan");
+            let planned = query(&table(), &["READ[A-Z]lock_IRQ"], folded(opts)).expect("plan");
             assert_eq!(planned.space, GramSpace::Folded);
             for g in all_grams(&planned.plan) {
                 assert!(
@@ -811,8 +609,8 @@ mod tests {
 
         #[test]
         fn sensitive_queries_ignore_the_folded_space() {
-            let planned = plan_query(&table(), &["SchedClock"], PlanOptions::default(), FOLDED)
-                .expect("plan");
+            let planned =
+                query(&table(), &["SchedClock"], folded(QueryOptions::default())).expect("plan");
             assert_eq!(planned.space, GramSpace::Primary);
         }
 

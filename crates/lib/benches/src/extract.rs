@@ -13,6 +13,7 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use sngram::ScanOptions;
 use sngram_types::{Content, WeightTable};
 
 fn crc32_table() -> WeightTable {
@@ -59,7 +60,8 @@ fn bench_scan_code(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
             b.iter(|| {
                 let mut count = 0u64;
-                sngram::scan(&table, c, |_, _, _| count += 1);
+                sngram::scan(&table, c, ScanOptions::default(), |_| count += 1)
+                    .expect("scan succeeds");
                 count
             });
         });
@@ -78,7 +80,8 @@ fn bench_scan_prose(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
             b.iter(|| {
                 let mut count = 0u64;
-                sngram::scan(&table, c, |_, _, _| count += 1);
+                sngram::scan(&table, c, ScanOptions::default(), |_| count += 1)
+                    .expect("scan succeeds");
                 count
             });
         });
@@ -97,7 +100,8 @@ fn bench_scan_uniform(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
             b.iter(|| {
                 let mut count = 0u64;
-                sngram::scan(&table, c, |_, _, _| count += 1);
+                sngram::scan(&table, c, ScanOptions::default(), |_| count += 1)
+                    .expect("scan succeeds");
                 count
             });
         });
@@ -116,7 +120,8 @@ fn bench_scan_ascending(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &content, |b, c| {
             b.iter(|| {
                 let mut count = 0u64;
-                sngram::scan(&table, c, |_, _, _| count += 1);
+                sngram::scan(&table, c, ScanOptions::default(), |_| count += 1)
+                    .expect("scan succeeds");
                 count
             });
         });
@@ -140,53 +145,23 @@ fn bench_pipeline(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("rehash", size), &content, |b, c| {
             b.iter(|| {
                 let mut acc = 0u64;
-                sngram::scan(&table, c, |s, e, _| {
+                sngram::scan(&table, c, ScanOptions::default(), |gram| {
                     let mut hasher = rustc_hash::FxHasher::default();
-                    data[s..e].hash(&mut hasher);
+                    gram.bytes.hash(&mut hasher);
                     acc ^= hasher.finish();
-                });
+                })
+                .expect("scan succeeds");
                 black_box(acc)
             });
         });
         group.bench_with_input(BenchmarkId::new("fused", size), &content, |b, c| {
             b.iter(|| {
                 let mut acc = 0u64;
-                sngram::scan(&table, c, |_, _, h| acc ^= h);
+                sngram::scan(&table, c, ScanOptions::default(), |gram| acc ^= gram.hash)
+                    .expect("scan succeeds");
                 black_box(acc)
             });
         });
-    }
-    group.finish();
-}
-
-// Chunk sizes a streaming reader hands the scanner; the 64 B feed stresses the
-// per-chunk boundary path, the larger ones approach the batch hot loop.
-const CHUNKS: &[usize] = &[64, 4096, 65536];
-
-fn stream_count(table: &WeightTable, data: &[u8], chunk: usize) -> u64 {
-    let mut count = 0u64;
-    let mut scanner = sngram::StreamScanner::new(table);
-    for part in data.chunks(chunk) {
-        scanner.push(part, |_, _| count += 1);
-    }
-    scanner.finish();
-    count
-}
-
-fn bench_scan_stream_code(c: &mut Criterion) {
-    let table = crc32_table();
-    let mut group = c.benchmark_group("scan_stream/code");
-
-    for &size in SIZES {
-        let data = source_code(size);
-        for &chunk in CHUNKS {
-            group.throughput(Throughput::Bytes(size as u64));
-            group.bench_with_input(
-                BenchmarkId::new(format!("chunk_{chunk}"), size),
-                &data,
-                |b, data| b.iter(|| stream_count(&table, data, chunk)),
-            );
-        }
     }
     group.finish();
 }
@@ -200,10 +175,11 @@ fn report_density(_c: &mut Criterion) {
         let content = Content::new(&data);
         let mut emissions = 0u64;
         let mut distinct = std::collections::HashSet::new();
-        sngram::scan(&table, &content, |_, _, h| {
+        sngram::scan(&table, &content, ScanOptions::default(), |gram| {
             emissions += 1;
-            distinct.insert(h);
-        });
+            distinct.insert(gram.hash);
+        })
+        .expect("scan succeeds");
         eprintln!(
             "density {size:>8}B: {:.3} emissions/byte, {:.3} distinct/byte, {} distinct",
             emissions as f64 / size as f64,
@@ -221,7 +197,6 @@ criterion_group!(
     bench_scan_ascending,
     bench_weight_lookup,
     bench_pipeline,
-    bench_scan_stream_code,
     report_density,
 );
 criterion_main!(benches);

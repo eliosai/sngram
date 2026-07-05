@@ -1,7 +1,7 @@
 //! Query planning from eg patterns to Tantivy sparse-gram queries.
 
 use anyhow::{Context, bail};
-use sngram::{GramSpace, HashKey, IndexFormat, QueryPlan};
+use sngram::{GramSpace, HashKey, QueryPlan};
 use sngram_types::WeightTable;
 use tantivy::{
     Term,
@@ -10,13 +10,6 @@ use tantivy::{
 };
 
 use crate::flags::HiArgs;
-
-/// What every eg index physically contains: sentinel grams and the folded
-/// twin space, both scanned at build time
-pub(super) const INDEX_FORMAT: IndexFormat = IndexFormat {
-    folded_space: true,
-    line_sentinels: true,
-};
 
 /// A plan plus the hash key selecting the gram space its lookups use
 pub(super) struct KeyedPlan {
@@ -29,8 +22,12 @@ pub(super) fn query_plan(args: &HiArgs, table: &WeightTable) -> anyhow::Result<K
     if patterns.is_empty() {
         bail!("indexed search requires at least one pattern");
     }
-    let opts = args.plan_options();
-    let planned = sngram::plan_query(table, patterns, opts, INDEX_FORMAT).with_context(|| {
+    let opts = sngram::QueryOptions {
+        folded_space: true,
+        line_sentinels: true,
+        ..args.query_options()
+    };
+    let planned = sngram::query(table, patterns, opts).with_context(|| {
         format!("indexed query planner could not parse {patterns:?}; use --no-index")
     })?;
     let key = match planned.space {

@@ -13,22 +13,7 @@ use std::collections::VecDeque;
 
 use sngram_types::{Gram, HashKey, WeightTable};
 
-/// Scan-time format options; index build and query plan must agree on them.
-///
-/// `key` selects the hash space (see [`HashKey`]); `fold` scans the
-/// ASCII-case-folded stream into the folded twin space (the emitted hashes are
-/// automatically tagged with [`HashKey::folded`]); `line_sentinels` brackets
-/// every document with a virtual `\n` so anchored line-boundary grams exist at
-/// the document's first and last line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ScanOptions {
-    /// Deployment hash key for the emitted gram hashes.
-    pub key: HashKey,
-    /// Bracket the document with virtual line terminators.
-    pub line_sentinels: bool,
-    /// Scan the ASCII-folded stream, emitting into the folded twin space.
-    pub fold: bool,
-}
+use crate::types::{RING, STACK_CAP, ScanOptions, ScannedGram, StreamScanner, WINDOW_CAP};
 
 /// Shortest gram emitted or matched; a sparse gram spans at least one bigram.
 ///
@@ -39,15 +24,11 @@ pub const MIN_LEN: usize = 3;
 ///
 /// Frozen format vocabulary: changing it rekeys every index.
 pub const MAX_LEN: usize = 100;
-const STACK_CAP: usize = 128;
-
 /// prefix-hash ring: holds `H[p]` for the last `RING` positions; an emittable
 /// gram start is at most `MAX_LEN` behind the current position, well inside
-const RING: usize = 128;
 const RING_MASK: usize = RING - 1;
 
 /// streaming window: keeps recent bytes so an emitted gram stays contiguous; sized so compaction (a `WINDOW_KEEP`-byte memmove every `WINDOW_CAP - WINDOW_KEEP` bytes) amortizes to ~nothing while a fresh scanner's zero-init stays cheap for tiny documents (1 KiB measured equal to 4 KiB at steady state, +12% on 64 B docs)
-const WINDOW_CAP: usize = 1024;
 /// bytes kept on compaction, at least the longest gram so every still-emittable gram start stays in the window
 const WINDOW_KEEP: usize = 128;
 
@@ -171,34 +152,7 @@ const fn unpack_weight(entry: u64) -> u32 {
     entry as u32
 }
 
-/// streaming sparse n-gram extraction that holds a bounded window, never the whole document
-pub struct StreamScanner<'t> {
-    matrix: &'t [u32; 65536],
-    window: [u8; WINDOW_CAP],
-    wlen: usize,
-    base: usize,
-    /// monotonic stack of (absolute position, weight); positions are unbounded
-    /// in a stream, so entries stay unpacked
-    stack: [(usize, u32); STACK_CAP],
-    slen: usize,
-    /// rolling prefix hash of everything pushed since the last `finish`
-    hash: u64,
-    /// recent prefix-hash values `H[p]`, indexed by absolute position masked
-    ring: [u64; RING],
-    /// effective hash space: the deployment key, fold-tagged when folding
-    ekey: HashKey,
-    opts: ScanOptions,
-    /// whether the current document received its leading sentinel
-    started: bool,
-}
-
 impl<'t> StreamScanner<'t> {
-    /// new scanner bound to a weight table, ready to receive byte chunks
-    #[must_use]
-    pub fn new(table: &'t WeightTable) -> Self {
-        Self::with_options(table, ScanOptions::default())
-    }
-
     /// new scanner with explicit format options
     #[must_use]
     pub fn with_options(table: &'t WeightTable, opts: ScanOptions) -> Self {
@@ -221,9 +175,12 @@ impl<'t> StreamScanner<'t> {
         }
     }
 
-    /// feed the next chunk, emitting each gram's bytes and rolling hash as it
-    /// closes, identical to [`scan`](crate::scan) over the concatenation of all chunks
-    pub fn push(&mut self, chunk: &[u8], mut emit: impl FnMut(&[u8], u64)) {
+    /// feed the next chunk, emitting each gram as it closes, identical to
+    /// [`scan`](crate::scan) over the concatenation of all chunks
+    pub fn push<F>(&mut self, chunk: &[u8], mut emit: F)
+    where
+        F: for<'a> FnMut(ScannedGram<'a>),
+    {
         if self.opts.line_sentinels && !self.started {
             self.started = true;
             self.push_raw(b"\n", &mut emit);
@@ -241,7 +198,10 @@ impl<'t> StreamScanner<'t> {
         clippy::too_many_lines,
         reason = "the hot loop is kept as one linear automaton; splitting it costs measured throughput"
     )]
-    fn push_raw(&mut self, chunk: &[u8], mut emit: impl FnMut(&[u8], u64)) {
+    fn push_raw<F>(&mut self, chunk: &[u8], emit: &mut F)
+    where
+        F: for<'a> FnMut(ScannedGram<'a>),
+    {
         // register caches of stack[slen-1] and the prefix hash
         let (mut tpos, mut tw) = if self.slen > 0 {
             self.stack[self.slen - 1]
@@ -288,30 +248,12 @@ impl<'t> StreamScanner<'t> {
                 let end = self.base + j + 1;
                 while self.slen > 0 {
                     if tw >= w {
-                        emit_window(
-                            &self.window,
-                            &self.ring,
-                            self.base,
-                            h,
-                            tpos,
-                            end,
-                            key,
-                            &mut emit,
-                        );
+                        emit_window(&self.window, &self.ring, self.base, h, tpos, end, key, emit);
                         self.slen -= usize::from(tw == w);
                         break;
                     }
                     self.slen -= 1;
-                    emit_window(
-                        &self.window,
-                        &self.ring,
-                        self.base,
-                        h,
-                        tpos,
-                        end,
-                        key,
-                        &mut emit,
-                    );
+                    emit_window(&self.window, &self.ring, self.base, h, tpos, end, key, emit);
                     if self.slen == 0 {
                         break;
                     }
@@ -342,7 +284,10 @@ impl<'t> StreamScanner<'t> {
 
     /// end the current document honoring the options: feeds the trailing
     /// sentinel (which can close grams, hence the emit), then resets
-    pub fn finish_doc(&mut self, mut emit: impl FnMut(&[u8], u64)) {
+    pub fn finish_doc<F>(&mut self, mut emit: F)
+    where
+        F: for<'a> FnMut(ScannedGram<'a>),
+    {
         if self.opts.line_sentinels && self.started {
             self.push_raw(b"\n", &mut emit);
         }
@@ -370,7 +315,7 @@ impl<'t> StreamScanner<'t> {
     clippy::too_many_arguments,
     reason = "hot-path free function over disjoint scanner fields; a struct would force whole-self borrows"
 )]
-fn emit_window(
+fn emit_window<F>(
     window: &[u8; WINDOW_CAP],
     ring: &[u64; RING],
     base: usize,
@@ -378,8 +323,10 @@ fn emit_window(
     start: usize,
     end: usize,
     key: HashKey,
-    emit: &mut impl FnMut(&[u8], u64),
-) {
+    emit: &mut F,
+) where
+    F: for<'a> FnMut(ScannedGram<'a>),
+{
     let len = end - start;
     if (MIN_LEN..=MAX_LEN).contains(&len) {
         let h_before = if start == 0 {
@@ -387,10 +334,12 @@ fn emit_window(
         } else {
             ring[(start - 1) & RING_MASK]
         };
-        emit(
-            &window[start - base..end - base],
-            key.hash_from_prefixes(h_end, h_before, len),
-        );
+        emit(ScannedGram {
+            bytes: &window[start - base..end - base],
+            start,
+            end,
+            hash: key.hash_from_prefixes(h_end, h_before, len),
+        });
     }
 }
 
@@ -399,11 +348,11 @@ fn emit_window(
 /// The bytes each emission sees are the scanned stream's — folded when `fold`
 /// is on, including the virtual `\n` sentinels when `line_sentinels` is on —
 /// which is exactly what an index stores and a plan queries.
-pub fn scan_with(
+pub fn scan_options(
     table: &WeightTable,
     content: &[u8],
     opts: ScanOptions,
-    mut emit: impl FnMut(&[u8], u64),
+    mut emit: impl for<'a> FnMut(ScannedGram<'a>),
 ) {
     let mut scanner = StreamScanner::with_options(table, opts);
     scanner.push(content, &mut emit);
@@ -421,7 +370,7 @@ impl StreamScanner<'_> {
     pub async fn index_reader<R>(
         &mut self,
         mut reader: R,
-        mut emit: impl FnMut(&[u8], u64),
+        mut emit: impl for<'a> FnMut(ScannedGram<'a>),
     ) -> std::io::Result<()>
     where
         R: tokio::io::AsyncBufRead + Unpin,
@@ -522,7 +471,9 @@ mod tests {
 
     fn collect(table: &WeightTable, doc: &[u8], opts: ScanOptions) -> Vec<(Vec<u8>, u64)> {
         let mut out = Vec::new();
-        scan_with(table, doc, opts, |g, h| out.push((g.to_vec(), h)));
+        scan_options(table, doc, opts, |gram| {
+            out.push((gram.bytes.to_vec(), gram.hash));
+        });
         out
     }
 
@@ -654,12 +605,20 @@ mod tests {
         };
         let mut scanner = StreamScanner::with_options(&t, opts);
         let mut first = Vec::new();
-        scanner.push(b"first document body", |g, h| first.push((g.to_vec(), h)));
-        scanner.finish_doc(|g, h| first.push((g.to_vec(), h)));
+        scanner.push(b"first document body", |gram| {
+            first.push((gram.bytes.to_vec(), gram.hash));
+        });
+        scanner.finish_doc(|gram| {
+            first.push((gram.bytes.to_vec(), gram.hash));
+        });
         assert!(!first.is_empty(), "first document must emit grams");
         let mut second = Vec::new();
-        scanner.push(b"second document body", |g, h| second.push((g.to_vec(), h)));
-        scanner.finish_doc(|g, h| second.push((g.to_vec(), h)));
+        scanner.push(b"second document body", |gram| {
+            second.push((gram.bytes.to_vec(), gram.hash));
+        });
+        scanner.finish_doc(|gram| {
+            second.push((gram.bytes.to_vec(), gram.hash));
+        });
         assert_eq!(second, collect(&t, b"second document body", opts));
     }
 }

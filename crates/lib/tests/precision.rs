@@ -16,9 +16,7 @@
 
 use std::collections::HashSet;
 
-use sngram::{
-    IndexFormat, Pattern, PlanOptions, QueryPlan, ScanOptions, plan_query, query, scan, scan_with,
-};
+use sngram::{QueryOptions, QueryPlan, ScanOptions, query, scan};
 use sngram_types::{Content, WeightTable};
 
 /// A deterministic weight table: each byte pair hashed to a varied weight, so
@@ -45,17 +43,19 @@ fn satisfies(plan: &QueryPlan, grams: &HashSet<Vec<u8>>) -> bool {
 
 fn index_grams(t: &WeightTable, doc: &[u8]) -> HashSet<Vec<u8>> {
     let mut grams = HashSet::new();
-    scan(t, &Content::new(doc), |s, e, _| {
-        grams.insert(doc[s..e].to_vec());
-    });
+    scan(t, &Content::new(doc), ScanOptions::default(), |gram| {
+        grams.insert(gram.bytes.to_vec());
+    })
+    .expect("scan succeeds");
     grams
 }
 
 fn index_grams_with(t: &WeightTable, doc: &[u8], opts: ScanOptions) -> HashSet<Vec<u8>> {
     let mut grams = HashSet::new();
-    scan_with(t, &Content::new(doc), opts, |gram, _| {
-        grams.insert(gram.to_vec());
-    });
+    scan(t, &Content::new(doc), opts, |gram| {
+        grams.insert(gram.bytes.to_vec());
+    })
+    .expect("scan succeeds");
     grams
 }
 
@@ -73,20 +73,16 @@ fn assert_rejects(re: &str, doc: &[u8]) {
         !oracle.is_match(doc),
         "test bug: {re:?} actually matches {text:?}; pick a non-matching doc"
     );
-    let plan = query(&t, &Pattern::new(re).expect("pattern parses"));
+    let plan = query(&t, &[re], QueryOptions::default())
+        .expect("pattern parses")
+        .plan;
     assert!(
         !satisfies(&plan, &index_grams(&t, doc)),
         "PRECISION REGRESSION: {re:?} plan {plan} admits non-matching {text:?}"
     );
 }
 
-fn assert_planned_rejects(
-    re: &str,
-    doc: &[u8],
-    opts: PlanOptions,
-    format: IndexFormat,
-    scan_opts: ScanOptions,
-) {
+fn assert_planned_rejects(re: &str, doc: &[u8], opts: QueryOptions, scan_opts: ScanOptions) {
     let t = weight_table();
     let oracle = regex::bytes::Regex::new(re).expect("oracle parses pattern");
     let text = String::from_utf8_lossy(doc);
@@ -94,9 +90,7 @@ fn assert_planned_rejects(
         !oracle.is_match(doc),
         "test bug: {re:?} actually matches {text:?}; pick a non-matching doc"
     );
-    let plan = plan_query(&t, &[re], opts, format)
-        .expect("pattern plans")
-        .plan;
+    let plan = query(&t, &[re], opts).expect("pattern plans").plan;
     assert!(
         !satisfies(&plan, &index_grams_with(&t, doc, scan_opts)),
         "PRECISION REGRESSION: {re:?} plan {plan} admits non-matching {text:?}"
@@ -117,7 +111,9 @@ fn max_gram_len(plan: &QueryPlan) -> usize {
 }
 
 fn plan_of(re: &str) -> QueryPlan {
-    query(&weight_table(), &Pattern::new(re).expect("pattern parses"))
+    query(&weight_table(), &[re], QueryOptions::default())
+        .expect("pattern parses")
+        .plan
 }
 
 // --- case-insensitive queries must keep wide windows, not 3-byte chunks ---
@@ -383,10 +379,9 @@ fn sentinel_start_anchor_survives_nullable_indent() {
     assert_planned_rejects(
         r"^[ \t]*#define CONFIG",
         b"int x; #define CONFIG_FOO",
-        PlanOptions::default(),
-        IndexFormat {
-            folded_space: false,
+        QueryOptions {
             line_sentinels: true,
+            ..QueryOptions::default()
         },
         ScanOptions {
             line_sentinels: true,
@@ -400,10 +395,9 @@ fn sentinel_end_anchor_survives_nullable_trailing_space() {
     assert_planned_rejects(
         r"EXPORT_SYMBOL\(\w+\);[ \t]*$",
         b"EXPORT_SYMBOL(foo); trailing",
-        PlanOptions::default(),
-        IndexFormat {
-            folded_space: false,
+        QueryOptions {
             line_sentinels: true,
+            ..QueryOptions::default()
         },
         ScanOptions {
             line_sentinels: true,

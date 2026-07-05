@@ -28,7 +28,7 @@ match; the real regex then verifies the candidates.
 ## API
 
 ```rust,no_run
-use sngram::{query, scan, Pattern};
+use sngram::{query, scan, QueryOptions, ScanOptions};
 use sngram_types::{Content, WeightTable};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,21 +37,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let doc = Content::new(b"fn max_file_size() -> u64 { 0 }");
 
     // index side: each gram arrives with its 64-bit index key
-    scan(&table, &doc, |start, end, hash| {
-        let _gram = &doc.as_bytes()[start..end];
-        let _key = hash; // store this in your inverted index
-    });
+    scan(&table, &doc, ScanOptions::default(), |gram| {
+        let _bytes = gram.bytes;
+        let _key = gram.hash; // store this in your inverted index
+    })?;
 
     // query side: a regex becomes a boolean gram query; Gram::hash() yields
     // the same key scan emitted for the same bytes
-    let plan = query(&table, &Pattern::new(r"max_\w+_size")?);
-    let _ = plan;
+    let planned = query(&table, &[r"max_\w+_size"], QueryOptions::default())?;
+    let _ = planned;
     Ok(())
 }
 ```
 
-`query` is infallible: a pattern too broad to prefilter yields `QueryPlan::All`
-(scan everything, or reject it), an impossible one yields `QueryPlan::None`.
+For valid patterns, a query too broad to prefilter yields `QueryPlan::All`
+(scan everything, or reject it), and an impossible one yields `QueryPlan::None`.
 
 ```rust,ignore
 pub enum QueryPlan {
@@ -70,35 +70,8 @@ directly onto an integer-array index: with a postgres `int8[]` column, an
 
 | Item | Use it when |
 |---|---|
-| `scan` | You have the whole document in memory. The fastest path. |
-| `StreamScanner` | You index content from a reader without buffering it whole; same grams and hashes as `scan`, bounded memory. |
-| `query` | You have a regex and need its gram query plan. |
-
-### Streaming
-
-`StreamScanner` extracts from a document fed in chunks, holding only a bounded
-window, so you can index large content straight from a reader without buffering
-it whole. It emits exactly the grams and hashes `scan` would over the
-concatenation. Reuse one scanner across documents — `finish()` resets it.
-
-```rust,no_run
-use sngram::StreamScanner;
-use sngram_types::WeightTable;
-
-fn index(table: &WeightTable) {
-    let mut scanner = StreamScanner::new(table);
-    scanner.push(b"fn max_file", |_gram, _hash| { /* insert into your index */ });
-    scanner.push(b"_size() {}", |_gram, _hash| { /* ... */ });
-    scanner.finish();
-}
-```
-
-Enable the `stream` feature for `StreamScanner::index_reader`, which drives the
-scanner from any `tokio::io::AsyncBufRead`, reusing the reader's own buffer:
-
-```toml
-sngram = { version = "0.5", features = ["stream"] }
-```
+| `scan` | You have one document in memory and need sparse grams plus hash keys. |
+| `query` | You have one or more patterns and need a planned gram prefilter. |
 
 ### Training
 
@@ -113,8 +86,8 @@ tables as the training run mints them.
 
 ## 0.5 migration
 
-- `scan`'s callback gained a third argument: `emit(start, end, hash)`.
-- `StreamScanner::push` callbacks are now `emit(gram, hash)`.
+- `scan` now takes `ScanOptions` and emits one `ScannedGram` per callback.
+- `query` now takes a pattern slice plus `QueryOptions` and returns `PlannedQuery`.
 - `index`, `IndexGram`, and `IndexGrams` are gone — collect from `scan` if you
   need a `Vec`, and use the emitted `hash` instead of hashing gram bytes.
 - `QueryPlan` grams are `Gram` (deref to `[u8]`) instead of `Vec<u8>`.

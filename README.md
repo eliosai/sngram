@@ -26,7 +26,7 @@ sngram = "0.5"
 ## Index and query
 
 ```rust
-use sngram::{query, scan, Pattern};
+use sngram::{query, scan, QueryOptions, ScanOptions};
 use sngram_types::{Content, WeightTable};
 
 let table = WeightTable::from_bytes(&std::fs::read("bins/5tb_weights.bin")?)?;
@@ -34,14 +34,15 @@ let doc = Content::new(b"fn max_file_size() -> u64 { 0 }");
 
 // Every sparse gram arrives with its 64-bit index key, computed in O(1)
 // from rolling prefix hashes — store it straight into your inverted index.
-scan(table, &doc, |start, end, hash| {
-    let _gram = &doc.as_bytes()[start..end];
-    let _key = hash;
-});
+scan(table, &doc, ScanOptions::default(), |gram| {
+    let _bytes = gram.bytes;
+    let _key = gram.hash;
+})?;
 
 // Fold a regex into a boolean gram query to prefilter candidates.
 // Gram::hash() on the plan's grams yields the same keys scan emitted.
-let plan = query(table, &Pattern::new(r"max_\w+_size").unwrap());
+let planned = query(table, &[r"max_\w+_size"], QueryOptions::default())?;
+let plan = planned.plan;
 ```
 
 `scan` allocates nothing; each emission carries the gram's span and its 64-bit
@@ -52,13 +53,9 @@ keys) to intersect against the index. The plan matches a superset of what the
 regex matches, so a prefilter built from it never misses a match the index
 could find; the real regex verifies the candidates.
 
-`StreamScanner` indexes content fed in chunks, holding only a bounded window
-instead of the whole document, and emits exactly the grams and hashes `scan`
-would over the concatenation. Enable the `stream` feature for
-`StreamScanner::index_reader`, which drives it from any
-`tokio::io::AsyncBufRead`, reusing the reader's buffer. Upgrading from 0.4:
-the emit callbacks gained the hash argument, `index`/`IndexGram(s)` are gone,
-and index keys changed — reindex.
+Upgrading from 0.4: `scan` now takes `ScanOptions` and emits `ScannedGram`,
+`query` now takes a pattern slice plus `QueryOptions`, `index`/`IndexGram(s)`
+are gone, and index keys changed — reindex.
 
 ## Weights
 

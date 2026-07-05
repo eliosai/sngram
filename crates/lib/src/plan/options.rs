@@ -1,79 +1,9 @@
-//! Planner options mirroring the verifier's matcher configuration.
+//! Planner option helpers mirroring the verifier's matcher configuration.
 //!
-//! The gram plan is only sound when it is built from the same match
-//! semantics the verifying engine uses. [`PlanOptions`] carries the
-//! semantics-bearing knobs; anything affecting only output, traversal, or
-//! engine resource limits stays out on purpose. Word/line anchoring is also
-//! absent: it only restricts the language, so a plan built without it is
-//! already a sound superset (and a boundary the byte context refutes still
-//! proves the pattern empty). Anchor flavors that change WHICH byte counts
-//! as a line terminator do matter — that is the `crlf` field.
+//! The public option types live in `crate::types`; this module keeps parser
+//! analyses that interpret those options.
 
 use regex_syntax::ast::{self, Ast, ClassSet, ClassSetItem};
-
-/// How the verifying engine interprets the pattern text.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum PlanSyntax {
-    /// Rust `regex` crate syntax, the engine default.
-    #[default]
-    Regex,
-    /// Patterns are literal strings (`grep -F`); metacharacters are escaped
-    /// before parsing, exactly as `grep-regex` does.
-    FixedStrings,
-}
-
-/// The verifying engine's case mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum PlanCase {
-    /// Match case sensitively.
-    #[default]
-    Sensitive,
-    /// Match case insensitively.
-    Insensitive,
-    /// Insensitive when no pattern contains an uppercase literal
-    /// (`ripgrep -S`); resolved here with the same rule `grep-regex` applies,
-    /// so the plan and the verifier can never disagree.
-    Smart,
-}
-
-/// Options a caller passes alongside its patterns; every field must mirror
-/// the engine that verifies candidates, or the plan may drop real matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "each bool mirrors an independent matcher flag; a state machine would misrepresent them"
-)]
-pub struct PlanOptions {
-    /// Pattern text interpretation.
-    pub syntax: PlanSyntax,
-    /// Case mode, including engine-rule smart case.
-    pub case: PlanCase,
-    /// Unicode mode (`--no-unicode` disables).
-    pub unicode: bool,
-    /// Whether `.` matches line terminators (`-U --multiline-dotall`).
-    /// Currently plan-inert — `.` over-approximates to any character either
-    /// way — but kept so the planner's HIR always equals the verifier's.
-    pub dotall: bool,
-    /// CRLF-aware anchors (`--crlf`).
-    pub crlf: bool,
-    /// Match-sense inversion (`-v`). The only sound prefilter for "lines
-    /// that do NOT match" is every document, so this forces
-    /// [`super::QueryPlan::All`].
-    pub invert: bool,
-}
-
-impl Default for PlanOptions {
-    fn default() -> Self {
-        Self {
-            syntax: PlanSyntax::default(),
-            case: PlanCase::default(),
-            unicode: true,
-            dotall: false,
-            crlf: false,
-            invert: false,
-        }
-    }
-}
 
 /// Whether smart case resolves to case-insensitive for `pattern`: true iff
 /// the pattern has at least one literal character and no uppercase literal.

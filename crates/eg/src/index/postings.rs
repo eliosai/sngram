@@ -681,7 +681,6 @@ fn scan_file_pairs(
     }
     let ord = u32::try_from(file.ord).context("indexed document ordinal does not fit in u32")?;
     if super::classify::is_oversized(len) {
-        // TODO(lib): try_scan so oversized files scan instead of force-candidate
         log::debug!(
             "eg index: forcing oversized file {} ({len} bytes) as candidate",
             file.path.display()
@@ -690,7 +689,7 @@ fn scan_file_pairs(
         return Ok(());
     }
     let bytes = read_file(&file.path, use_mmap)?;
-    classify_and_collect(table, bytes.as_ref(), ord, pairs, stats);
+    classify_and_collect(table, bytes.as_ref(), ord, pairs, stats)?;
     Ok(())
 }
 
@@ -701,18 +700,18 @@ fn classify_and_collect(
     ord: u32,
     pairs: &mut Vec<Pair>,
     stats: &BuildStats,
-) {
+) -> anyhow::Result<()> {
     if super::classify::is_binary(bytes) {
-        return;
+        return Ok(());
     }
     let mut forced = super::classify::has_decoding_bom(bytes);
     let content = Content::new(bytes);
     let mut emitted = 0usize;
     let mut hashes = Vec::new();
-    sngram::scan_with(table, &content, SCAN_PRIMARY, |_, hash| {
+    sngram::scan(table, &content, SCAN_PRIMARY, |gram| {
         emitted += 1;
-        hashes.push(hash);
-    });
+        hashes.push(gram.hash);
+    })?;
     hashes.sort_unstable();
     hashes.dedup();
     if super::classify::is_high_entropy(bytes.len(), hashes.len()) {
@@ -723,10 +722,10 @@ fn classify_and_collect(
         push_forced(pairs, ord, stats);
     } else {
         let primary_unique = hashes.len();
-        sngram::scan_with(table, &content, SCAN_FOLDED, |_, hash| {
+        sngram::scan(table, &content, SCAN_FOLDED, |gram| {
             emitted += 1;
-            hashes.push(hash);
-        });
+            hashes.push(gram.hash);
+        })?;
         if let Some(folded) = hashes.get_mut(primary_unique..) {
             folded.sort_unstable();
         }
@@ -736,6 +735,7 @@ fn classify_and_collect(
     pairs.extend(hashes.into_iter().map(|hash| Pair { hash, ord }));
     stats.emitted.fetch_add(emitted, AtomicOrdering::Relaxed);
     stats.selected.fetch_add(selected, AtomicOrdering::Relaxed);
+    Ok(())
 }
 
 /// Record a forced-candidate posting for a file whose grams are not indexed.

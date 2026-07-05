@@ -9,7 +9,7 @@
 )]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use sngram::pattern::Pattern;
+use sngram::QueryOptions;
 use sngram_types::WeightTable;
 
 fn weight_table() -> WeightTable {
@@ -62,27 +62,13 @@ const PATTERNS: &[(&str, &str)] = &[
     ),
 ];
 
-fn bench_pattern_parse(c: &mut Criterion) {
-    let mut group = c.benchmark_group("pattern/parse");
-
-    for &(name, pat) in PATTERNS {
-        group.bench_with_input(BenchmarkId::new("parse", name), &pat, |b, pat| {
-            b.iter(|| Pattern::new(pat));
-        });
-    }
-    group.finish();
-}
-
 fn bench_query(c: &mut Criterion) {
     let table = weight_table();
     let mut group = c.benchmark_group("query/extract");
 
     for &(name, pat) in PATTERNS {
-        let Ok(pattern) = Pattern::new(pat) else {
-            continue;
-        };
-        group.bench_with_input(BenchmarkId::new("query", name), &pattern, |b, p| {
-            b.iter(|| sngram::query(&table, p));
+        group.bench_with_input(BenchmarkId::new("query", name), &pat, |b, pat| {
+            b.iter(|| sngram::query(&table, core::slice::from_ref(pat), QueryOptions::default()));
         });
     }
 
@@ -96,9 +82,8 @@ fn bench_query(c: &mut Criterion) {
         ),
     ];
     for (name, pat) in &long_runs {
-        let pattern = Pattern::new(pat).expect("long pattern parses");
-        group.bench_with_input(BenchmarkId::new("query", *name), &pattern, |b, p| {
-            b.iter(|| sngram::query(&table, p));
+        group.bench_with_input(BenchmarkId::new("query", *name), pat, |b, pat| {
+            b.iter(|| sngram::query(&table, &[pat.as_str()], QueryOptions::default()));
         });
     }
     group.finish();
@@ -112,5 +97,5 @@ fn bench_table_load(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_pattern_parse, bench_query, bench_table_load);
+criterion_group!(benches, bench_query, bench_table_load);
 criterion_main!(benches);

@@ -1,5 +1,5 @@
-//! Differential tests: production `scan` and `StreamScanner` against a frozen
-//! reference implementation of the sparse-gram hull.
+//! Differential tests: production `scan` against a frozen reference
+//! implementation of the sparse-gram hull.
 //!
 //! The reference is the original three-pass monotonic-stack algorithm
 //! (drain-emit, top-emit, dedup, capped push), written for clarity and kept
@@ -9,7 +9,7 @@
 //! longer than `MAX_LEN`, and inputs that overflow the bounded stack.
 #![allow(missing_docs, clippy::unwrap_used, clippy::indexing_slicing)]
 
-use sngram::StreamScanner;
+use sngram::ScanOptions;
 use sngram_types::{Content, WeightTable};
 
 // Frozen algorithm parameters; must mirror crates/lib/src/extract.rs.
@@ -218,9 +218,15 @@ fn scan_matches_reference_exactly() {
                 expected.push((s, e, direct_hash(&content[s..e])));
             });
             let mut got = Vec::new();
-            sngram::scan(&table, &Content::new(&content), |s, e, h| {
-                got.push((s, e, h));
-            });
+            sngram::scan(
+                &table,
+                &Content::new(&content),
+                ScanOptions::default(),
+                |gram| {
+                    got.push((gram.start, gram.end, gram.hash));
+                },
+            )
+            .expect("scan succeeds");
             assert_eq!(
                 got, expected,
                 "scan diverged on table={tname} input={iname}"
@@ -229,85 +235,6 @@ fn scan_matches_reference_exactly() {
         }
     }
     eprintln!("scan differential cases passed: {cases}");
-}
-
-/// Chunk `content` into pieces whose sizes are drawn from `sizes` round-robin.
-fn chunkings(content: &[u8], rng: &mut Lcg) -> Vec<(String, Vec<Vec<u8>>)> {
-    let mut out = Vec::new();
-    for &fixed in &[1usize, 7, 64, 4096] {
-        out.push((
-            format!("fixed_{fixed}"),
-            content.chunks(fixed).map(<[u8]>::to_vec).collect(),
-        ));
-    }
-    out.push(("whole".to_owned(), vec![content.to_vec()]));
-    // three random chunkings with sizes in 1..=97
-    for round in 0..3 {
-        let mut chunks = Vec::new();
-        let mut pos = 0;
-        while pos < content.len() {
-            let take = (rng.next_u32() as usize % 97 + 1).min(content.len() - pos);
-            chunks.push(content[pos..pos + take].to_vec());
-            pos += take;
-        }
-        out.push((format!("random_{round}"), chunks));
-    }
-    out
-}
-
-#[test]
-fn stream_scanner_matches_reference_under_any_chunking() {
-    let mut rng = Lcg(0xC0FF_EE00);
-    let mut cases = 0usize;
-    for (tname, table) in tables() {
-        // a representative input subset: streaming is O(per-byte), the full
-        // matrix above would make this test slow without adding coverage
-        for (iname, content) in inputs().into_iter().filter(|(_, c)| c.len() >= 50) {
-            let mut expected: Vec<(Vec<u8>, u64)> = Vec::new();
-            reference_scan(&table, &content, &mut |s, e| {
-                let bytes = content[s..e].to_vec();
-                let h = direct_hash(&bytes);
-                expected.push((bytes, h));
-            });
-            for (cname, chunks) in chunkings(&content, &mut rng) {
-                let got = run_chunks(&table, &chunks);
-                assert_eq!(
-                    got, expected,
-                    "stream diverged on table={tname} input={iname} chunking={cname}"
-                );
-                cases += 1;
-            }
-        }
-    }
-    eprintln!("stream differential cases passed: {cases}");
-}
-
-/// Stream the chunks through a fresh scanner, collecting every emission.
-fn run_chunks(table: &WeightTable, chunks: &[Vec<u8>]) -> Vec<(Vec<u8>, u64)> {
-    let mut got: Vec<(Vec<u8>, u64)> = Vec::new();
-    let mut scanner = StreamScanner::new(table);
-    for chunk in chunks {
-        scanner.push(chunk, |g, h| got.push((g.to_vec(), h)));
-    }
-    scanner.finish();
-    got
-}
-
-#[test]
-fn stream_scanner_resets_between_documents() {
-    let table = build_table(|a, b| crc32fast::hash(&[a, b]));
-    let doc = b"fn main() { let x = foo_bar(42); }";
-
-    let mut first: Vec<(Vec<u8>, u64)> = Vec::new();
-    let mut scanner = StreamScanner::new(&table);
-    scanner.push(doc, |g, h| first.push((g.to_vec(), h)));
-    scanner.finish();
-
-    let mut second: Vec<(Vec<u8>, u64)> = Vec::new();
-    scanner.push(doc, |g, h| second.push((g.to_vec(), h)));
-    scanner.finish();
-
-    assert_eq!(first, second, "finish() must fully reset scanner state");
 }
 
 /// Deepest uncapped hull-stack depth the content drives the table to.

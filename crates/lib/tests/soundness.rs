@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use sngram::{Pattern, QueryPlan, query, scan};
+use sngram::{QueryOptions, QueryPlan, ScanOptions, query, scan};
 use sngram_types::{Content, WeightTable};
 
 /// A deterministic weight table: each byte pair hashed to a varied weight, so
@@ -40,9 +40,10 @@ fn satisfies(plan: &QueryPlan, grams: &HashSet<Vec<u8>>) -> bool {
 
 fn index_grams(t: &WeightTable, doc: &[u8]) -> HashSet<Vec<u8>> {
     let mut grams = HashSet::new();
-    scan(t, &Content::new(doc), |s, e, _| {
-        grams.insert(doc[s..e].to_vec());
-    });
+    scan(t, &Content::new(doc), ScanOptions::default(), |gram| {
+        grams.insert(gram.bytes.to_vec());
+    })
+    .expect("scan succeeds");
     grams
 }
 
@@ -55,7 +56,9 @@ fn assert_no_false_negative(
     docs: &[&[u8]],
     indexed: &[HashSet<Vec<u8>>],
 ) {
-    let plan = query(t, &Pattern::new(re).expect("pattern parses"));
+    let plan = query(t, &[re], QueryOptions::default())
+        .expect("pattern parses")
+        .plan;
     if plan == QueryPlan::All {
         return; // too broad to prefilter; the caller scans instead
     }
@@ -178,7 +181,7 @@ fn plan_never_misses_on_exhaustive_small_alphabet_sweep() {
     let docs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     let indexed: Vec<_> = docs.iter().map(|d| index_grams(&t, d)).collect();
     for re in sweep_patterns() {
-        if Pattern::new(&re).is_ok() {
+        if query(&t, &[re.as_str()], QueryOptions::default()).is_ok() {
             assert_no_false_negative(&t, &re, &docs, &indexed);
         }
     }
@@ -195,7 +198,7 @@ fn plan_never_misses_on_case_folded_sweep() {
     let indexed: Vec<_> = docs.iter().map(|d| index_grams(&t, d)).collect();
     for re in sweep_patterns() {
         let folded = format!("(?i){re}");
-        if Pattern::new(&folded).is_ok() {
+        if query(&t, &[folded.as_str()], QueryOptions::default()).is_ok() {
             assert_no_false_negative(&t, &folded, &docs, &indexed);
         }
     }

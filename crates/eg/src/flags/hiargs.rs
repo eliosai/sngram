@@ -383,22 +383,24 @@ impl HiArgs {
     /// so the gram plan is built from exactly the semantics the verifying
     /// matcher applies. Smart case in particular resolves inside the planner
     /// with grep-regex's literal-aware rule.
-    pub(crate) fn plan_options(&self) -> sngram::PlanOptions {
-        sngram::PlanOptions {
+    pub(crate) fn query_options(&self) -> sngram::QueryOptions {
+        sngram::QueryOptions {
             syntax: if self.fixed_strings {
-                sngram::PlanSyntax::FixedStrings
+                sngram::QuerySyntax::FixedStrings
             } else {
-                sngram::PlanSyntax::Regex
+                sngram::QuerySyntax::Regex
             },
             case: match self.case {
-                CaseMode::Sensitive => sngram::PlanCase::Sensitive,
-                CaseMode::Insensitive => sngram::PlanCase::Insensitive,
-                CaseMode::Smart => sngram::PlanCase::Smart,
+                CaseMode::Sensitive => sngram::QueryCase::Sensitive,
+                CaseMode::Insensitive => sngram::QueryCase::Insensitive,
+                CaseMode::Smart => sngram::QueryCase::Smart,
             },
             unicode: !self.no_unicode,
             dotall: self.multiline && self.multiline_dotall,
             crlf: self.crlf,
             invert: self.invert_match,
+            folded_space: false,
+            line_sentinels: false,
         }
     }
 
