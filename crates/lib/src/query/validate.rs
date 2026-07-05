@@ -1,6 +1,6 @@
 //! Query input validation.
 
-use crate::types::QueryError;
+use sngram_types::QueryError;
 
 use super::settings::QuerySettings;
 

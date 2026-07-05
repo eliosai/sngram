@@ -12,8 +12,8 @@
 
 use std::{collections::HashSet, io::Cursor};
 
-use sngram::{query, scan, types::QueryExpr};
-use sngram_types::{GramSpace, HashKey, ScanEvent, WeightTable};
+use sngram::{query, scan};
+use sngram_types::{GramNeedle, PlanExpr, ScanEvent, ScanSummary, WeightTable};
 
 /// A deterministic weight table: each byte pair hashed to a varied weight, so
 /// the sparse hull is non-trivial.
@@ -21,40 +21,46 @@ fn weight_table() -> WeightTable {
     WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
 }
 
-/// Evaluate a plan against the grams a document indexed to.
-const fn key_for(space: GramSpace) -> HashKey {
-    match space {
-        GramSpace::Primary => HashKey::UNKEYED,
-        GramSpace::Folded => HashKey::UNKEYED.folded(),
-    }
-}
-
-fn satisfies(expr: &QueryExpr, key: HashKey, grams: &HashSet<u64>) -> bool {
+fn satisfies(expr: &PlanExpr, grams: &HashSet<u64>, summary: &ScanSummary) -> bool {
     match expr {
-        QueryExpr::All => true,
-        QueryExpr::None => false,
-        QueryExpr::And { grams: g, sub } => {
-            g.iter().all(|x| grams.contains(&x.hash_keyed(key)))
-                && sub.iter().all(|s| satisfies(s, key, grams))
+        PlanExpr::All => true,
+        PlanExpr::None => false,
+        PlanExpr::AllOf {
+            grams: g,
+            needs,
+            children,
+        } => {
+            g.iter().all(|x| needle_satisfied(x, grams))
+                && needs.iter().all(|need| need.satisfied_by(summary))
+                && children.iter().all(|s| satisfies(s, grams, summary))
         },
-        QueryExpr::Or { grams: g, sub } => {
-            g.iter().any(|x| grams.contains(&x.hash_keyed(key)))
-                || sub.iter().any(|s| satisfies(s, key, grams))
+        PlanExpr::AnyOf {
+            grams: g,
+            needs,
+            children,
+        } => {
+            g.iter().any(|x| needle_satisfied(x, grams))
+                || needs.iter().any(|need| need.satisfied_by(summary))
+                || children.iter().any(|s| satisfies(s, grams, summary))
         },
     }
 }
 
-fn index_hashes(t: &WeightTable, doc: &[u8], space: GramSpace) -> HashSet<u64> {
+fn needle_satisfied(needle: &GramNeedle, grams: &HashSet<u64>) -> bool {
+    needle.keys().any(|key| grams.contains(&key.value()))
+}
+
+fn index_scan(t: &WeightTable, doc: &[u8]) -> (HashSet<u64>, ScanSummary) {
     let mut grams = HashSet::new();
-    scan(t, Cursor::new(doc), |event| {
-        if let ScanEvent::Gram(gram) = event
-            && gram.space == space
-        {
-            grams.insert(gram.hash);
-        }
+    let mut summary = None;
+    scan(t, Cursor::new(doc), |event| match event {
+        ScanEvent::Gram(gram) => {
+            grams.insert(gram.key.value());
+        },
+        ScanEvent::Finish(done) => summary = Some(*done),
     })
     .expect("scan succeeds");
-    grams
+    (grams, summary.expect("scan emits summary"))
 }
 
 /// Assert no document the oracle matches is rejected by the plan. The oracle
@@ -65,13 +71,12 @@ fn assert_no_false_negative(t: &WeightTable, re: &str, docs: &[&[u8]]) {
     if planned.is_all() {
         return; // too broad to prefilter; the caller scans instead
     }
-    let key = key_for(planned.space());
     let oracle = regex::bytes::Regex::new(re).expect("oracle parses pattern");
     for doc in docs {
-        let grams = index_hashes(t, doc, planned.space());
+        let (grams, summary) = index_scan(t, doc);
         if oracle.is_match(doc) {
             assert!(
-                satisfies(planned.expr(), key, &grams),
+                satisfies(planned.root(), &grams, &summary),
                 "FALSE NEGATIVE: {re:?} matches {:?} but the plan rejects it",
                 String::from_utf8_lossy(doc),
             );

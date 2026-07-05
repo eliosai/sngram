@@ -29,8 +29,9 @@ mod scan;
 
 #[cfg(feature = "learn")]
 pub mod learn;
-pub mod types;
 
 pub use query::query;
 pub use scan::scan;
-pub use types::{DfStats, QueryError, QueryExpr, QueryPlan};
+pub use sngram_types::{
+    DfStats, GramNeedle, LearnError, PlanExpr, QueryError, QueryPlan, ScanError, ScanNeed,
+};

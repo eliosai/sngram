@@ -13,20 +13,17 @@ Index side::
 Query side::
 
     plan = sngram.query(table, r"max_\\w+_size")
-    plan.op, plan.gram_hashes, plan.sub                  # boolean key query
+    plan.op, plan.grams, plan.children                   # boolean key query
 
 Training::
 
-    tally = sngram.LocalTally()
-    tally.count_arrow(arrow_table)                       # GIL-free, zero-copy
     counter = sngram.BigramCounter()
-    counter.merge(tally)
+    counter.count_arrow(arrow_table)                     # GIL-free, zero-copy
     open("weights.bin", "wb").write(counter.to_table_bytes())
 """
 
 from sngram._core import (
     BigramCounter,
-    LocalTally,
     QueryPlan,
     WeightTable,
     gram_hash,
@@ -39,7 +36,6 @@ __version__ = "0.5.0"
 
 __all__ = [
     "BigramCounter",
-    "LocalTally",
     "QueryPlan",
     "WeightTable",
     "__version__",

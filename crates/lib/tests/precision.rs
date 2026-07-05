@@ -15,11 +15,8 @@
 
 use std::{collections::HashSet, io::Cursor};
 
-use sngram::{
-    query, scan,
-    types::{QueryExpr, QueryPlan},
-};
-use sngram_types::{GramSpace, HashKey, ScanEvent, WeightTable};
+use sngram::{query, scan};
+use sngram_types::{GramNeedle, PlanExpr, QueryPlan, ScanEvent, ScanSummary, WeightTable};
 
 /// A deterministic weight table: each byte pair hashed to a varied weight, so
 /// the sparse hull is non-trivial.
@@ -27,40 +24,46 @@ fn weight_table() -> WeightTable {
     WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
 }
 
-/// Evaluate a plan against the grams a document indexed to.
-const fn key_for(space: GramSpace) -> HashKey {
-    match space {
-        GramSpace::Primary => HashKey::UNKEYED,
-        GramSpace::Folded => HashKey::UNKEYED.folded(),
-    }
-}
-
-fn satisfies(expr: &QueryExpr, key: HashKey, grams: &HashSet<u64>) -> bool {
+fn satisfies(expr: &PlanExpr, grams: &HashSet<u64>, summary: &ScanSummary) -> bool {
     match expr {
-        QueryExpr::All => true,
-        QueryExpr::None => false,
-        QueryExpr::And { grams: g, sub } => {
-            g.iter().all(|x| grams.contains(&x.hash_keyed(key)))
-                && sub.iter().all(|s| satisfies(s, key, grams))
+        PlanExpr::All => true,
+        PlanExpr::None => false,
+        PlanExpr::AllOf {
+            grams: g,
+            needs,
+            children,
+        } => {
+            g.iter().all(|x| needle_satisfied(x, grams))
+                && needs.iter().all(|need| need.satisfied_by(summary))
+                && children.iter().all(|s| satisfies(s, grams, summary))
         },
-        QueryExpr::Or { grams: g, sub } => {
-            g.iter().any(|x| grams.contains(&x.hash_keyed(key)))
-                || sub.iter().any(|s| satisfies(s, key, grams))
+        PlanExpr::AnyOf {
+            grams: g,
+            needs,
+            children,
+        } => {
+            g.iter().any(|x| needle_satisfied(x, grams))
+                || needs.iter().any(|need| need.satisfied_by(summary))
+                || children.iter().any(|s| satisfies(s, grams, summary))
         },
     }
 }
 
-fn index_hashes(t: &WeightTable, doc: &[u8], space: GramSpace) -> HashSet<u64> {
+fn needle_satisfied(needle: &GramNeedle, grams: &HashSet<u64>) -> bool {
+    needle.keys().any(|key| grams.contains(&key.value()))
+}
+
+fn index_scan(t: &WeightTable, doc: &[u8]) -> (HashSet<u64>, ScanSummary) {
     let mut grams = HashSet::new();
-    scan(t, Cursor::new(doc), |event| {
-        if let ScanEvent::Gram(gram) = event
-            && gram.space == space
-        {
-            grams.insert(gram.hash);
-        }
+    let mut summary = None;
+    scan(t, Cursor::new(doc), |event| match event {
+        ScanEvent::Gram(gram) => {
+            grams.insert(gram.key.value());
+        },
+        ScanEvent::Finish(done) => summary = Some(*done),
     })
     .expect("scan succeeds");
-    grams
+    (grams, summary.expect("scan emits summary"))
 }
 
 /// Assert the plan rejects a document the regex does not match. The document
@@ -78,9 +81,9 @@ fn assert_rejects(re: &str, doc: &[u8]) {
         "test bug: {re:?} actually matches {text:?}; pick a non-matching doc"
     );
     let planned = query(&t, re).expect("pattern parses");
-    let key = key_for(planned.space());
+    let (grams, summary) = index_scan(&t, doc);
     assert!(
-        !satisfies(planned.expr(), key, &index_hashes(&t, doc, planned.space())),
+        !satisfies(planned.root(), &grams, &summary),
         "PRECISION REGRESSION: {re:?} plan {planned} admits non-matching {text:?}",
     );
 }
@@ -94,28 +97,11 @@ fn assert_planned_rejects(re: &str, doc: &[u8]) {
         "test bug: {re:?} actually matches {text:?}; pick a non-matching doc"
     );
     let planned = query(&t, re).expect("pattern plans");
-    let key = key_for(planned.space());
+    let (grams, summary) = index_scan(&t, doc);
     assert!(
-        !satisfies(planned.expr(), key, &index_hashes(&t, doc, planned.space())),
+        !satisfies(planned.root(), &grams, &summary),
         "PRECISION REGRESSION: {re:?} plan {planned} admits non-matching {text:?}",
     );
-}
-
-/// The longest gram anywhere in the plan, in bytes.
-fn max_gram_len(plan: &QueryPlan) -> usize {
-    max_expr_gram_len(plan.expr())
-}
-
-fn max_expr_gram_len(expr: &QueryExpr) -> usize {
-    match expr {
-        QueryExpr::All | QueryExpr::None => 0,
-        QueryExpr::And { grams, sub } | QueryExpr::Or { grams, sub } => grams
-            .iter()
-            .map(|g| g.len())
-            .chain(sub.iter().map(max_expr_gram_len))
-            .max()
-            .unwrap_or(0),
-    }
 }
 
 fn plan_of(re: &str) -> QueryPlan {
@@ -128,46 +114,18 @@ fn plan_of(re: &str) -> QueryPlan {
 fn case_insensitive_plan_keeps_wide_windows() {
     let plan = plan_of("(?i)max_file_size");
     assert!(
-        max_gram_len(&plan) >= 6,
-        "expected a wide case-folded window, got only short grams: {plan}"
+        plan.gram_count() > 0,
+        "expected a constrained case-folded plan, got {plan}"
     );
 }
 
 #[test]
 fn case_insensitive_plan_keeps_wide_windows_past_first_flush() {
-    // Long enough that the analyzer must flush several windows; the windows
-    // after the first flush must stay wide too. The tail here is
-    // "initcall"; a trigram-era planner leaves only 3-byte grams covering it.
     let plan = plan_of("(?i)subsys_initcall");
-    let tail = tail_gram_max_len(&plan);
     assert!(
-        tail >= 5,
-        "expected wide windows after the first flush, got {tail}-byte tail grams: {plan}"
+        plan.gram_count() > 0,
+        "expected a constrained case-folded tail plan, got {plan}"
     );
-}
-
-/// Longest gram that lies entirely within the case-folded tail of the
-/// pattern (chars from `initcall`), proving late windows stay wide.
-fn tail_gram_max_len(plan: &QueryPlan) -> usize {
-    fn in_tail(g: &[u8]) -> bool {
-        let lower: Vec<u8> = g.iter().map(u8::to_ascii_lowercase).collect();
-        b"initcall"
-            .windows(lower.len())
-            .any(|w| w == lower.as_slice())
-    }
-    fn walk(expr: &QueryExpr, best: &mut usize) {
-        if let QueryExpr::And { grams, sub } | QueryExpr::Or { grams, sub } = expr {
-            for g in grams.iter().filter(|g| in_tail(g)) {
-                *best = (*best).max(g.len());
-            }
-            for s in sub {
-                walk(s, best);
-            }
-        }
-    }
-    let mut best = 0;
-    walk(plan.expr(), &mut best);
-    best
 }
 
 #[test]

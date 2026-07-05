@@ -1,5 +1,7 @@
 //! Query parser settings.
 
+use crate::scan::ScanSettings;
+
 /// Internal parser constants matching the verifier defaults this crate plans
 /// against.
 #[derive(Debug, Clone, Copy)]
@@ -8,6 +10,17 @@ pub struct QuerySettings;
 impl QuerySettings {
     /// Maximum accepted regex pattern length in bytes.
     pub const MAX_PATTERN_LEN: usize = 4096;
+
+    /// Shortest gram that the scanner can emit.
+    pub const MIN_GRAM_LEN: usize = ScanSettings::MIN_GRAM_LEN;
+
+    /// Query plans may include line-boundary sentinels when the scanner emits
+    /// matching document sentinels.
+    pub const LINE_SENTINELS: bool = ScanSettings::DOCUMENT_SENTINELS;
+
+    /// Query plans may include folded keys when the scanner emits folded
+    /// supplement grams.
+    pub const CASE_FOLDED_SUPPLEMENTS: bool = ScanSettings::CASE_FOLDED_SUPPLEMENTS;
 
     /// Nest limit matching `grep-regex`'s translator, so any pattern the
     /// verifier accepts also parses here.

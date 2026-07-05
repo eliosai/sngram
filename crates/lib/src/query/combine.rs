@@ -17,6 +17,7 @@ use crate::scan;
 use super::algebra::{Op, Query};
 use super::analyze::{Analyzer, BOUNDARY_GROW, BOUNDARY_KEEP, MAX_EXACT, MAX_EXACT_BYTES, MAX_SET};
 use super::info::RegexpInfo;
+use super::settings::QuerySettings;
 use super::strings::{Order, StringSet};
 
 /// Bound on the seam cross product flushed at a concat boundary. Beyond it
@@ -150,7 +151,7 @@ impl Analyzer<'_> {
     /// guaranteed containment (prefix-like sets, including exact sets,
     /// shorten from the tail; suffix sets from the head).
     pub fn and_grams(&self, q: Query, set: &StringSet, order: Order) -> Query {
-        if set.is_empty() || set.min_len() < scan::min_len() || !self.may_flush() {
+        if set.is_empty() || set.min_len() < QuerySettings::MIN_GRAM_LEN || !self.may_flush() {
             return q;
         }
         let cap = self.flush_cap();
@@ -170,11 +171,11 @@ impl Analyzer<'_> {
 
     fn truncated_cover(&self, q: Query, set: &StringSet, order: Order, cap: usize) -> Query {
         let mut fitted = set.clone();
-        while fitted.max_len() > scan::min_len() {
+        while fitted.max_len() > QuerySettings::MIN_GRAM_LEN {
             let keep = fitted.max_len() - 1;
             truncate_to(&mut fitted, order, keep);
             fitted.clean(order);
-            if fitted.min_len() < scan::min_len() {
+            if fitted.min_len() < QuerySettings::MIN_GRAM_LEN {
                 return q;
             }
             if let Some(covers) = self.branch_covers(&fitted, true, cap) {
@@ -262,7 +263,7 @@ impl Analyzer<'_> {
     /// The minimal covering grams of `s`, chaining it end to end.
     fn minimal_cover_set(&self, s: &[u8]) -> StringSet {
         let mut set = StringSet::new();
-        for gram in scan::minimal_cover(self.table(), s) {
+        for gram in scan::cover::minimal_cover(self.table(), s) {
             set.push(gram);
         }
         set.clean(Order::Prefix);
@@ -278,7 +279,7 @@ impl Analyzer<'_> {
     /// its equal-weight plateau grams the scan's dedup collapses.
     fn guaranteed_cover_set(&self, s: &[u8]) -> StringSet {
         let mut set = StringSet::new();
-        for gram in scan::guaranteed_cover(self.table(), s) {
+        for gram in scan::cover::guaranteed_cover(self.table(), s) {
             set.push(gram);
         }
         set.clean(Order::Prefix);
@@ -489,14 +490,14 @@ fn seam(x: &RegexpInfo, y: &RegexpInfo) -> Option<StringSet> {
     if x.suffix.len() > MAX_SET || y.prefix.len() > MAX_SET {
         return None;
     }
-    if x.suffix.min_len() + y.prefix.min_len() < scan::min_len() {
+    if x.suffix.min_len() + y.prefix.min_len() < QuerySettings::MIN_GRAM_LEN {
         return None;
     }
     if x.suffix.len().saturating_mul(y.prefix.len()) <= MAX_SEAM_CROSS {
         return Some(x.suffix.cross(&y.prefix, Order::Prefix));
     }
     let (left, right) = shrink_seam(x.suffix.clone(), y.prefix.clone())?;
-    if left.min_len() + right.min_len() < scan::min_len() {
+    if left.min_len() + right.min_len() < QuerySettings::MIN_GRAM_LEN {
         return None;
     }
     Some(left.cross(&right, Order::Prefix))
@@ -530,7 +531,7 @@ fn should_flush_exact(info: &RegexpInfo, force: bool) -> bool {
     let min = exact.min_len();
     exact.len() > MAX_EXACT
         || exact.byte_len() > MAX_EXACT_BYTES
-        || (min >= scan::min_len() && force)
+        || (min >= QuerySettings::MIN_GRAM_LEN && force)
 }
 
 /// Move each exact string into the prefix and suffix sets as a stub wide

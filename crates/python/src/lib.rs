@@ -20,13 +20,12 @@ use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use sngram::learn::{BigramCounter, LocalTally};
+use sngram::learn::BigramCounter;
 use std::io::Cursor;
 
-use sngram::types::{QueryExpr, QueryPlan};
-use sngram_types::{Gram, GramSpace, ScanEvent};
+use sngram_types::{Gram, GramNeedle, PlanExpr, QueryPlan, ScanEvent, ScanNeed};
 
-type PyScannedGram = (u8, usize, usize, usize, usize, u8, u64);
+type PyScannedGram = (usize, usize, u64);
 
 /// 256x256 byte-pair weight table.
 #[pyclass(frozen, name = "WeightTable", module = "sngram")]
@@ -68,8 +67,7 @@ impl PyWeightTable {
     }
 }
 
-/// Sparse grams of `data` as `(space, scanned_start, scanned_end,
-/// content_start, content_end, boundary_bits, hash)` tuples.
+/// Sparse grams of `data` as `(content_start, content_end, key)` tuples.
 #[pyfunction]
 fn scan(py: Python<'_>, table: &PyWeightTable, data: &[u8]) -> PyResult<Vec<PyScannedGram>> {
     let table = &table.inner;
@@ -77,19 +75,7 @@ fn scan(py: Python<'_>, table: &PyWeightTable, data: &[u8]) -> PyResult<Vec<PySc
         let mut out = Vec::new();
         sngram::scan(table, Cursor::new(data), |event| {
             if let ScanEvent::Gram(gram) = event {
-                let space = match gram.space {
-                    GramSpace::Primary => 0,
-                    GramSpace::Folded => 1,
-                };
-                out.push((
-                    space,
-                    gram.scanned_start,
-                    gram.scanned_end,
-                    gram.content_start,
-                    gram.content_end,
-                    gram.boundary.bits(),
-                    gram.hash,
-                ));
+                out.push((gram.span.start, gram.span.end, gram.key.value()));
             }
         })
         .map_err(|e| PyRuntimeError::new_err(format!("scan failed: {e}")))?;
@@ -111,7 +97,7 @@ fn scan_hashes<'py>(
         let mut out = Vec::new();
         sngram::scan(table, Cursor::new(data), |event| {
             if let ScanEvent::Gram(gram) = event {
-                out.extend_from_slice(&gram.hash.to_le_bytes());
+                out.extend_from_slice(&gram.key.value().to_le_bytes());
             }
         })
         .map_err(|e| PyRuntimeError::new_err(format!("scan failed: {e}")))?;
@@ -120,29 +106,32 @@ fn scan_hashes<'py>(
     Ok(PyBytes::new(py, &bytes))
 }
 
-/// The 64-bit index key of one gram's bytes — identical to the hash `scan`
-/// emits for the same bytes, and to `QueryPlan.gram_hashes` entries.
+/// The raw unkeyed 64-bit key of one gram's bytes.
+///
+/// Scan events already carry their final index key. Use that key directly:
+/// virtual sentinel grams and case-folded supplement grams are intentionally
+/// not equivalent to hashing only the returned content span.
 #[pyfunction]
 fn gram_hash(data: &[u8]) -> u64 {
     Gram::from(data).hash()
 }
 
-/// One node of a query plan: a boolean gram query over index keys.
+/// One node of a query plan: a boolean candidate query over index keys.
 #[pyclass(frozen, get_all, name = "QueryPlan", module = "sngram")]
 pub struct PyQueryPlan {
     /// "all" | "none" | "and" | "or"
     op: String,
-    /// gram byte strings of this node's bag
-    grams: Vec<Py<PyBytes>>,
-    /// 64-bit index keys of `grams`, same order
-    gram_hashes: Vec<u64>,
-    /// sub-plans (all must hold under "and", any under "or")
+    /// key alternatives for each logical gram needle
+    grams: Vec<Vec<u64>>,
+    /// scan-summary needs, rendered for inspection
+    needs: Vec<String>,
+    /// children (all must hold under "and", any under "or")
     #[allow(
         clippy::use_self,
         reason = "pyclass get_all macro cannot name Self here"
     )]
-    sub: Vec<Py<PyQueryPlan>>,
-    /// codesearch-style rendering of the whole plan
+    children: Vec<Py<PyQueryPlan>>,
+    /// rendering of the whole plan
     expr: String,
 }
 
@@ -154,29 +143,93 @@ impl PyQueryPlan {
 }
 
 fn convert_plan(py: Python<'_>, plan: &QueryPlan) -> PyResult<PyQueryPlan> {
-    convert_expr(py, plan.expr())
+    convert_expr(py, plan.root())
 }
 
-fn convert_expr(py: Python<'_>, expr: &QueryExpr) -> PyResult<PyQueryPlan> {
-    let (op, grams, sub) = match expr {
-        QueryExpr::All => ("all", &[][..], &[][..]),
-        QueryExpr::None => ("none", &[][..], &[][..]),
-        QueryExpr::And { grams, sub } => ("and", grams.as_slice(), sub.as_slice()),
-        QueryExpr::Or { grams, sub } => ("or", grams.as_slice(), sub.as_slice()),
-    };
+fn convert_expr(py: Python<'_>, expr: &PlanExpr) -> PyResult<PyQueryPlan> {
+    let parts = plan_parts(expr);
     Ok(PyQueryPlan {
-        op: op.to_owned(),
-        gram_hashes: grams.iter().map(Gram::hash).collect(),
-        grams: grams
-            .iter()
-            .map(|g| PyBytes::new(py, g.as_bytes()).unbind())
-            .collect(),
-        sub: sub
-            .iter()
-            .map(|child| convert_expr(py, child).and_then(|plan| Py::new(py, plan)))
-            .collect::<PyResult<_>>()?,
+        op: parts.op.to_owned(),
+        grams: parts.grams.iter().map(needle_keys).collect(),
+        needs: render_needs(parts.needs),
+        children: convert_children(py, parts.children)?,
         expr: expr.to_string(),
     })
+}
+
+struct PlanParts<'a> {
+    op: &'static str,
+    grams: &'a [GramNeedle],
+    needs: &'a [ScanNeed],
+    children: &'a [PlanExpr],
+}
+
+fn plan_parts(expr: &PlanExpr) -> PlanParts<'_> {
+    match expr {
+        PlanExpr::All => ("all", &[][..], &[][..], &[][..]),
+        PlanExpr::None => ("none", &[][..], &[][..], &[][..]),
+        PlanExpr::AllOf {
+            grams,
+            needs,
+            children,
+        } => (
+            "and",
+            grams.as_slice(),
+            needs.as_slice(),
+            children.as_slice(),
+        ),
+        PlanExpr::AnyOf {
+            grams,
+            needs,
+            children,
+        } => (
+            "or",
+            grams.as_slice(),
+            needs.as_slice(),
+            children.as_slice(),
+        ),
+    }
+    .into()
+}
+
+impl<'a>
+    From<(
+        &'static str,
+        &'a [GramNeedle],
+        &'a [ScanNeed],
+        &'a [PlanExpr],
+    )> for PlanParts<'a>
+{
+    fn from(
+        (op, grams, needs, children): (
+            &'static str,
+            &'a [GramNeedle],
+            &'a [ScanNeed],
+            &'a [PlanExpr],
+        ),
+    ) -> Self {
+        Self {
+            op,
+            grams,
+            needs,
+            children,
+        }
+    }
+}
+
+fn render_needs(needs: &[ScanNeed]) -> Vec<String> {
+    needs.iter().map(|need| format!("{need:?}")).collect()
+}
+
+fn convert_children(py: Python<'_>, children: &[PlanExpr]) -> PyResult<Vec<Py<PyQueryPlan>>> {
+    children
+        .iter()
+        .map(|child| convert_expr(py, child).and_then(|plan| Py::new(py, plan)))
+        .collect()
+}
+
+fn needle_keys(needle: &GramNeedle) -> Vec<u64> {
+    needle.keys().map(sngram_types::GramKey::value).collect()
 }
 
 /// Fold a regex into a boolean gram query for index lookup.
@@ -188,58 +241,6 @@ fn query(py: Python<'_>, table: &PyWeightTable, pattern: &str) -> PyResult<PyQue
     let planned = sngram::query(&table.inner, pattern)
         .map_err(|e| PyValueError::new_err(format!("invalid pattern: {e}")))?;
     convert_plan(py, &planned)
-}
-
-/// Per-worker byte-pair tally; counts without atomics, merged into a shared
-/// `BigramCounter` when a unit of work (one shard) completes.
-#[pyclass(name = "LocalTally", module = "sngram")]
-pub struct PyLocalTally {
-    inner: LocalTally,
-}
-
-#[pymethods]
-impl PyLocalTally {
-    #[new]
-    fn new() -> Self {
-        Self {
-            inner: LocalTally::new(),
-        }
-    }
-
-    /// Count every overlapping byte pair of one document.
-    fn count(&mut self, py: Python<'_>, data: &[u8]) {
-        let inner = &mut self.inner;
-        py.detach(|| inner.count_buffer(data));
-    }
-
-    /// Count every row of an Arrow object, per row (no pair straddles rows).
-    ///
-    /// Accepts anything exporting the Arrow `PyCapsule` interface with a
-    /// struct/record-batch schema: a `pyarrow.Table`, `RecordBatch`, or
-    /// `RecordBatchReader`. All string/binary columns are counted; nulls are
-    /// skipped. The GIL is released for the whole call. Returns the number of
-    /// text bytes counted.
-    fn count_arrow(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<u64> {
-        arrow_ffi::count_arrow(py, data, &mut self.inner)
-    }
-
-    /// Text bytes counted so far.
-    #[getter]
-    fn bytes_counted(&self) -> u64 {
-        self.inner.bytes()
-    }
-
-    /// Fold another tally's counts (and byte/pair totals) into this one.
-    ///
-    /// Lets a worker count each parquet row group into a throwaway sub-tally and
-    /// commit it into a per-file tally only once the row group has streamed
-    /// cleanly: a mid-file connection drop discards just the in-progress row
-    /// group and retries it, instead of re-reading the whole multi-GB shard.
-    fn add_from(&mut self, py: Python<'_>, other: &Self) {
-        let inner = &mut self.inner;
-        let o = &other.inner;
-        py.detach(|| inner.add_from(o));
-    }
 }
 
 /// Shared, lock-free byte-pair counter: the training accumulator.
@@ -257,17 +258,28 @@ impl PyBigramCounter {
         }
     }
 
-    /// Fold a completed tally into the shared counts. Thread-safe.
-    fn merge(&self, py: Python<'_>, tally: &PyLocalTally) {
+    /// Fold a completed staging counter into this counter. Thread-safe.
+    fn merge(&self, py: Python<'_>, other: &Self) {
         let inner = &self.inner;
-        let t = &tally.inner;
-        py.detach(|| inner.merge(t));
+        let o = &other.inner;
+        py.detach(|| inner.merge(o));
     }
 
     /// Count one document directly (convenience; prefer tallies in workers).
     fn process(&self, py: Python<'_>, data: &[u8]) {
         let inner = &self.inner;
         py.detach(|| inner.process(data));
+    }
+
+    /// Count every row of an Arrow object, per row (no pair straddles rows).
+    ///
+    /// Accepts anything exporting the Arrow `PyCapsule` interface with a
+    /// struct/record-batch schema: a `pyarrow.Table`, `RecordBatch`, or
+    /// `RecordBatchReader`. All string/binary columns are counted; nulls are
+    /// skipped. The GIL is released for the whole call. Returns the number of
+    /// text bytes counted.
+    fn count_arrow(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<u64> {
+        arrow_ffi::count_arrow(py, data, &self.inner)
     }
 
     /// Current count for one byte pair.
@@ -278,11 +290,6 @@ impl PyBigramCounter {
     /// Record `n` completed files/shards.
     fn add_files(&self, n: u64) {
         self.inner.add_files(n);
-    }
-
-    /// Record `n` compressed bytes downloaded.
-    fn add_downloaded(&self, n: u64) {
-        self.inner.add_downloaded(n);
     }
 
     #[getter]
@@ -300,46 +307,17 @@ impl PyBigramCounter {
         self.inner.files_processed()
     }
 
-    #[getter]
-    fn downloaded_bytes(&self) -> u64 {
-        self.inner.downloaded_bytes()
-    }
-
     /// All 65,536 pair counts as little-endian u64 bytes — for checkpointing.
     fn snapshot<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        let counts = self.inner.counts_vec();
-        let mut out = Vec::with_capacity(counts.len() * 8);
-        for c in counts {
-            out.extend_from_slice(&c.to_le_bytes());
-        }
-        PyBytes::new(py, &out)
+        PyBytes::new(py, &self.inner.snapshot())
     }
 
     /// Restore a checkpoint into a fresh counter: pair counts from
     /// `snapshot()` bytes plus the saved totals.
     fn restore(&self, counts: &[u8], pairs: u64, bytes: u64, files: u64) -> PyResult<()> {
-        if counts.len() != 65_536 * 8 {
-            return Err(PyValueError::new_err(format!(
-                "snapshot must be {} bytes, got {}",
-                65_536 * 8,
-                counts.len()
-            )));
-        }
-        for (i, chunk) in counts.chunks_exact(8).enumerate() {
-            let n = u64::from_le_bytes(
-                chunk
-                    .try_into()
-                    .map_err(|_| PyValueError::new_err("snapshot chunk conversion failed"))?,
-            );
-            if n > 0 {
-                #[allow(clippy::cast_possible_truncation, reason = "i < 65536")]
-                self.inner.add((i >> 8) as u8, (i & 0xFF) as u8, n);
-            }
-        }
-        self.inner.add_pairs(pairs);
-        self.inner.add_bytes(bytes);
-        self.inner.add_files(files);
-        Ok(())
+        self.inner
+            .restore(counts, pairs, bytes, files)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     /// Serialize the learned weight table (SPNG `.bin` bytes, loadable by
@@ -364,7 +342,6 @@ impl PyBigramCounter {
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWeightTable>()?;
     m.add_class::<PyQueryPlan>()?;
-    m.add_class::<PyLocalTally>()?;
     m.add_class::<PyBigramCounter>()?;
     m.add_function(wrap_pyfunction!(scan, m)?)?;
     m.add_function(wrap_pyfunction!(scan_hashes, m)?)?;

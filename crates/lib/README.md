@@ -41,40 +41,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // index side: each gram arrives with its 64-bit index key
     scan(&table, Cursor::new(doc), |event| {
         if let ScanEvent::Gram(gram) = event {
-            let _bytes = gram.bytes;
-            let _key = gram.hash; // store this in your inverted index
+            let _span = gram.span;
+            let _key = gram.key; // store this in your inverted index
         }
     })?;
 
     // query side: a regex becomes a boolean gram query
     let plan = query(&table, r"max_\w+_size")?;
-    let _key = plan.hash_key(); // use with each plan gram's hash_keyed(...)
+    let _root = plan.root();
     Ok(())
 }
 ```
 
-For valid patterns, a query too broad to prefilter yields `QueryExpr::All`
-(scan everything, or reject it), and an impossible one yields `QueryExpr::None`.
+For valid patterns, a query too broad to prefilter yields `PlanExpr::All`
+(scan everything, or reject it), and an impossible one yields `PlanExpr::None`.
 
 ```rust,ignore
 pub struct QueryPlan {
-    expr: QueryExpr,
-    space: GramSpace,
+    root: PlanExpr,
 }
 
-pub enum QueryExpr {
+pub enum PlanExpr {
     All,
     None,
-    And { grams: Vec<Gram>, sub: Vec<QueryExpr> }, // all grams present AND every sub
-    Or  { grams: Vec<Gram>, sub: Vec<QueryExpr> }, // any gram present OR some sub
+    AllOf { grams: Vec<GramNeedle>, needs: Vec<ScanNeed>, children: Vec<PlanExpr> },
+    AnyOf { grams: Vec<GramNeedle>, needs: Vec<ScanNeed>, children: Vec<PlanExpr> },
 }
 ```
 
-`Gram` stores up to 22 bytes inline (no heap allocation for typical grams) and
-dereferences to `[u8]`. Hash plan grams with `plan.hash_key()` so folded-space
-queries look up the same 64-bit keys that `scan` emitted. The structure maps
-directly onto an integer-array index: with a postgres `int8[]` column, an `And`
-bag is `grams @> ARRAY[..]` and an `Or` bag is `grams && ARRAY[..]`.
+`GramNeedle` stores finalized `GramKey` values, so query execution looks up the
+same 64-bit keys that `scan` emitted. `ScanNeed` stores document-level metadata
+requirements mined by the scanner. The structure maps directly onto an
+integer-array index: an `AllOf` gram bag is containment/intersection and an
+`AnyOf` gram bag is union.
 
 | Item | Use it when |
 |---|---|
@@ -83,10 +82,11 @@ bag is `grams @> ARRAY[..]` and an `Or` bag is `grams && ARRAY[..]`.
 
 ### Training
 
-The `learn` feature (off by default) adds `sngram::learn::{BigramCounter,
-LocalTally}` — the byte-pair counters that train fresh weight tables.
-`BigramCounter::to_table_bytes()` serializes the learned table in the format
-`WeightTable::from_bytes` loads.
+The `learn` feature (off by default) adds `sngram::learn::BigramCounter`, the
+byte-pair counter that trains fresh weight tables. Use `process_batch` for a
+retryable batch, merge completed staging counters with `merge`, and serialize
+with `BigramCounter::to_table_bytes()` in the format `WeightTable::from_bytes`
+loads.
 
 `WeightTable` lives in `sngram_types`. Load a table you minted with
 `WeightTable::from_bytes`; `sngram-weights` embeds the official 0.5 tables.
@@ -96,8 +96,8 @@ LocalTally}` — the byte-pair counters that train fresh weight tables.
 - `scan` now takes a `BufRead` input and emits `ScanEvent::Gram` plus one
   `ScanEvent::Finish` per callback.
 - `query` now takes one regex pattern and returns `QueryPlan`.
-- `index`, `IndexGram`, and `IndexGrams` are gone — collect from `scan` if you
-  need a `Vec`, and use the emitted `hash` instead of hashing gram bytes.
+- Collect from `scan` if you need a `Vec`, and use the emitted `GramKey`
+  instead of hashing gram bytes.
 - `QueryPlan` grams are `Gram` (deref to `[u8]`) instead of `Vec<u8>`.
 - Index keys changed: the rolling hash replaces whatever you hashed gram bytes
   with before. **Reindex when upgrading** — old index keys will not match new

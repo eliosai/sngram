@@ -2,204 +2,374 @@
 
 use core::ops::Range;
 
-/// Which gram space an emitted gram belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GramSpace {
-    /// Raw document bytes.
-    Primary,
-    /// ASCII-case-folded bytes, hashed in the folded twin space.
-    Folded,
-}
+/// Final sparse-gram index key emitted by the scanner.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GramKey(pub u64);
 
-/// Virtual document boundary information for an emitted gram.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct Boundary(u8);
-
-impl Boundary {
-    const START: u8 = 1;
-    const END: u8 = 1 << 1;
-
-    /// Build boundary metadata from the two possible virtual edges.
+impl GramKey {
+    /// The raw 64-bit key value.
     #[must_use]
-    pub const fn new(touches_start: bool, touches_end: bool) -> Self {
-        Self((touches_start as u8 * Self::START) | (touches_end as u8 * Self::END))
-    }
-
-    /// True when the gram includes the virtual leading document sentinel.
-    #[must_use]
-    pub const fn touches_start(self) -> bool {
-        self.0 & Self::START != 0
-    }
-
-    /// True when the gram includes the virtual trailing document sentinel.
-    #[must_use]
-    pub const fn touches_end(self) -> bool {
-        self.0 & Self::END != 0
-    }
-
-    /// Compact bit representation for storage or foreign-language bindings.
-    #[must_use]
-    pub const fn bits(self) -> u8 {
+    pub const fn value(self) -> u64 {
         self.0
     }
 }
 
-/// Document facts observed while scanning.
+/// Byte span in the original scanned content.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct ScanFacts(u16);
+pub struct ByteRange {
+    /// Inclusive start byte offset.
+    pub start: usize,
+    /// Exclusive end byte offset.
+    pub end: usize,
+}
 
-impl ScanFacts {
-    const HAS_LF: u16 = 1;
-    const HAS_CRLF: u16 = 1 << 1;
-    const HAS_UPPER_ASCII: u16 = 1 << 2;
-    const HAS_LOWER_ASCII: u16 = 1 << 3;
-    const HAS_NON_ASCII: u16 = 1 << 4;
-    const ENDS_WITH_NEWLINE: u16 = 1 << 5;
+impl ByteRange {
+    /// Build a byte range.
+    #[must_use]
+    pub const fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
 
-    /// Mark that the document contains `\n`.
+    /// Convert to a standard range.
+    #[must_use]
+    pub const fn as_range(self) -> Range<usize> {
+        self.start..self.end
+    }
+}
+
+/// Exact set of byte values present in scanned text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct ByteSet256 {
+    /// Four 64-bit words, one bit per byte value.
+    pub words: [u64; 4],
+}
+
+impl ByteSet256 {
+    /// Add one byte to the set.
+    pub fn insert(&mut self, byte: u8) {
+        let idx = usize::from(byte);
+        self.words[idx / 64] |= 1u64 << (idx % 64);
+    }
+
+    /// True when every byte in `need` is present.
+    #[must_use]
+    pub const fn contains_all(self, need: Self) -> bool {
+        (self.words[0] & need.words[0]) == need.words[0]
+            && (self.words[1] & need.words[1]) == need.words[1]
+            && (self.words[2] & need.words[2]) == need.words[2]
+            && (self.words[3] & need.words[3]) == need.words[3]
+    }
+
+    /// True when at least one byte in `need` is present.
+    #[must_use]
+    pub const fn contains_any(self, need: Self) -> bool {
+        (self.words[0] & need.words[0]) != 0
+            || (self.words[1] & need.words[1]) != 0
+            || (self.words[2] & need.words[2]) != 0
+            || (self.words[3] & need.words[3]) != 0
+    }
+
+    /// True when the set is empty.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.words[0] == 0 && self.words[1] == 0 && self.words[2] == 0 && self.words[3] == 0
+    }
+}
+
+/// Saturating byte histogram for scanned text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SaturatingByteCounts256 {
+    /// One saturating count per byte value; `u8::MAX` means at least 255.
+    pub counts: [u8; 256],
+}
+
+impl Default for SaturatingByteCounts256 {
+    fn default() -> Self {
+        Self { counts: [0; 256] }
+    }
+}
+
+impl SaturatingByteCounts256 {
+    /// Count one byte, saturating at `u8::MAX`.
+    pub fn observe(&mut self, byte: u8) {
+        let slot = &mut self.counts[usize::from(byte)];
+        *slot = slot.saturating_add(1);
+    }
+
+    /// True when this histogram proves all required minimum byte counts.
+    ///
+    /// A saturated stored count is treated as satisfying any `u8` requirement;
+    /// callers must only encode requirements up to `u8::MAX`.
+    #[must_use]
+    pub fn contains_at_least(&self, need: &Self) -> bool {
+        self.counts
+            .iter()
+            .zip(need.counts)
+            .all(|(&have, req)| have >= req || have == u8::MAX)
+    }
+
+    /// True when all requirements are zero.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.counts.iter().all(|&count| count == 0)
+    }
+}
+
+/// Fixed-size content edge bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct EdgeBytes {
+    /// Number of valid bytes in `bytes`.
+    len: u8,
+    /// Edge bytes, padded with zeros.
+    bytes: [u8; 16],
+}
+
+impl EdgeBytes {
+    /// Maximum edge bytes stored.
+    pub const CAPACITY: usize = 16;
+
+    /// Store the leading bytes of `bytes`, truncated to [`Self::CAPACITY`].
+    #[must_use]
+    pub fn from_slice(bytes: &[u8]) -> Self {
+        let len = bytes.len().min(Self::CAPACITY);
+        let mut out = Self {
+            len: u8::try_from(len).unwrap_or(u8::MAX),
+            bytes: [0; 16],
+        };
+        out.bytes[..len].copy_from_slice(&bytes[..len]);
+        out
+    }
+
+    /// Append one byte when capacity remains.
+    pub const fn push(&mut self, byte: u8) {
+        let len = self.len();
+        if len < Self::CAPACITY {
+            self.bytes[len] = byte;
+            self.len = self.len.saturating_add(1);
+        }
+    }
+
+    /// Number of edge bytes stored.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        let len = self.len as usize;
+        if len > Self::CAPACITY {
+            Self::CAPACITY
+        } else {
+            len
+        }
+    }
+
+    /// True when the edge has no bytes.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// The valid edge bytes.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len()]
+    }
+}
+
+/// Scan-derived boolean facts about indexed text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct ScanFlags(pub u64);
+
+impl ScanFlags {
+    const HAS_LF: u64 = 1;
+    const HAS_CRLF: u64 = 1 << 1;
+    const ENDS_WITH_LF: u64 = 1 << 2;
+    const HAS_ASCII_UPPER: u64 = 1 << 3;
+    const HAS_ASCII_LOWER: u64 = 1 << 4;
+    const HAS_ASCII_DIGIT: u64 = 1 << 5;
+    const HAS_ASCII_SPACE: u64 = 1 << 6;
+    const HAS_ASCII_WORD: u64 = 1 << 7;
+    const HAS_NON_ASCII: u64 = 1 << 8;
+
+    /// Add raw flag bits.
+    #[must_use]
+    pub const fn with_bits(self, bits: u64) -> Self {
+        Self(self.0 | bits)
+    }
+
+    /// Compact bit representation.
+    #[must_use]
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// True when every bit in `need` is present.
+    #[must_use]
+    pub const fn contains(self, need: Self) -> bool {
+        self.0 & need.0 == need.0
+    }
+
+    /// Mark that the content contains `\n`.
     #[must_use]
     pub const fn with_lf(self) -> Self {
-        Self(self.0 | Self::HAS_LF)
+        self.with_bits(Self::HAS_LF)
     }
 
-    /// Mark that the document contains a CRLF line ending.
+    /// Mark that the content contains a CRLF line ending.
     #[must_use]
     pub const fn with_crlf(self) -> Self {
-        Self(self.0 | Self::HAS_CRLF)
+        self.with_bits(Self::HAS_CRLF)
     }
 
-    /// Mark that the document contains ASCII uppercase bytes.
+    /// Mark that the content ends with `\n`.
     #[must_use]
-    pub const fn with_upper_ascii(self) -> Self {
-        Self(self.0 | Self::HAS_UPPER_ASCII)
+    pub const fn with_ends_with_lf(self) -> Self {
+        self.with_bits(Self::ENDS_WITH_LF)
     }
 
-    /// Mark that the document contains ASCII lowercase bytes.
+    /// Mark that the content contains ASCII uppercase bytes.
     #[must_use]
-    pub const fn with_lower_ascii(self) -> Self {
-        Self(self.0 | Self::HAS_LOWER_ASCII)
+    pub const fn with_ascii_upper(self) -> Self {
+        self.with_bits(Self::HAS_ASCII_UPPER)
     }
 
-    /// Mark that the document contains bytes outside ASCII.
+    /// Mark that the content contains ASCII lowercase bytes.
+    #[must_use]
+    pub const fn with_ascii_lower(self) -> Self {
+        self.with_bits(Self::HAS_ASCII_LOWER)
+    }
+
+    /// Mark that the content contains ASCII digits.
+    #[must_use]
+    pub const fn with_ascii_digit(self) -> Self {
+        self.with_bits(Self::HAS_ASCII_DIGIT)
+    }
+
+    /// Mark that the content contains ASCII whitespace.
+    #[must_use]
+    pub const fn with_ascii_space(self) -> Self {
+        self.with_bits(Self::HAS_ASCII_SPACE)
+    }
+
+    /// Mark that the content contains ASCII word bytes.
+    #[must_use]
+    pub const fn with_ascii_word(self) -> Self {
+        self.with_bits(Self::HAS_ASCII_WORD)
+    }
+
+    /// Mark that the content contains bytes outside ASCII.
     #[must_use]
     pub const fn with_non_ascii(self) -> Self {
-        Self(self.0 | Self::HAS_NON_ASCII)
+        self.with_bits(Self::HAS_NON_ASCII)
     }
 
-    /// Mark that the document's final byte is `\n`.
-    #[must_use]
-    pub const fn with_ends_with_newline(self) -> Self {
-        Self(self.0 | Self::ENDS_WITH_NEWLINE)
-    }
-
-    /// True when the document contains `\n`.
+    /// True when the content contains `\n`.
     #[must_use]
     pub const fn has_lf(self) -> bool {
         self.0 & Self::HAS_LF != 0
     }
 
-    /// True when the document contains a CRLF line ending.
+    /// True when the content contains CRLF.
     #[must_use]
     pub const fn has_crlf(self) -> bool {
         self.0 & Self::HAS_CRLF != 0
     }
 
-    /// True when the document contains ASCII uppercase bytes.
+    /// True when the content ends with `\n`.
     #[must_use]
-    pub const fn has_upper_ascii(self) -> bool {
-        self.0 & Self::HAS_UPPER_ASCII != 0
+    pub const fn ends_with_lf(self) -> bool {
+        self.0 & Self::ENDS_WITH_LF != 0
     }
 
-    /// True when the document contains ASCII lowercase bytes.
+    /// True when the content contains ASCII uppercase bytes.
     #[must_use]
-    pub const fn has_lower_ascii(self) -> bool {
-        self.0 & Self::HAS_LOWER_ASCII != 0
+    pub const fn has_ascii_upper(self) -> bool {
+        self.0 & Self::HAS_ASCII_UPPER != 0
     }
 
-    /// True when the document contains bytes outside ASCII.
+    /// True when the content contains ASCII lowercase bytes.
+    #[must_use]
+    pub const fn has_ascii_lower(self) -> bool {
+        self.0 & Self::HAS_ASCII_LOWER != 0
+    }
+
+    /// True when the content contains ASCII digits.
+    #[must_use]
+    pub const fn has_ascii_digit(self) -> bool {
+        self.0 & Self::HAS_ASCII_DIGIT != 0
+    }
+
+    /// True when the content contains ASCII whitespace.
+    #[must_use]
+    pub const fn has_ascii_space(self) -> bool {
+        self.0 & Self::HAS_ASCII_SPACE != 0
+    }
+
+    /// True when the content contains ASCII word bytes.
+    #[must_use]
+    pub const fn has_ascii_word(self) -> bool {
+        self.0 & Self::HAS_ASCII_WORD != 0
+    }
+
+    /// True when the content contains non-ASCII bytes.
     #[must_use]
     pub const fn has_non_ascii(self) -> bool {
         self.0 & Self::HAS_NON_ASCII != 0
     }
-
-    /// True when the document's final byte is `\n`.
-    #[must_use]
-    pub const fn ends_with_newline(self) -> bool {
-        self.0 & Self::ENDS_WITH_NEWLINE != 0
-    }
-
-    /// Compact bit representation for storage or foreign-language bindings.
-    #[must_use]
-    pub const fn bits(self) -> u16 {
-        self.0
-    }
 }
 
-/// One sparse n-gram emitted by [`sngram::scan`](https://docs.rs/sngram/latest/sngram/fn.scan.html).
+/// One sparse n-gram key emitted by `sngram::scan`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScannedGram<'a> {
-    /// Gram bytes in the emitted gram space.
-    pub bytes: &'a [u8],
-    /// Hash value for this gram in its gram space.
-    pub hash: u64,
-    /// The gram space this key belongs to.
-    pub space: GramSpace,
-    /// Start offset in the scanned stream.
-    pub scanned_start: usize,
-    /// End offset in the scanned stream.
-    pub scanned_end: usize,
-    /// Start offset clamped into the original document content.
-    pub content_start: usize,
-    /// End offset clamped into the original document content.
-    pub content_end: usize,
-    /// Virtual boundary bytes included by this gram, if any.
-    pub boundary: Boundary,
+pub struct ScannedGram {
+    /// Final index key for this gram.
+    ///
+    /// Store this value directly. It may include scan-format details such as
+    /// virtual document sentinels or case-folded supplements, so re-hashing
+    /// `span` bytes from the original content is not equivalent.
+    pub key: GramKey,
+    /// Related span in the original content, with virtual sentinels removed.
+    pub span: ByteRange,
 }
 
-impl ScannedGram<'_> {
-    /// Span in the scanned stream.
-    #[must_use]
-    pub const fn scanned_span(&self) -> Range<usize> {
-        self.scanned_start..self.scanned_end
-    }
-
-    /// Span in the original content, with virtual sentinels removed.
+impl ScannedGram {
+    /// Span in the original content.
     #[must_use]
     pub const fn content_span(&self) -> Range<usize> {
-        self.content_start..self.content_end
+        self.span.as_range()
     }
 }
 
-/// Final metadata for one completed scan.
+/// Final scan-derived metadata for one indexed text entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScanSummary {
-    /// Original document bytes read from the input stream.
-    pub content_bytes: usize,
-    /// Bytes in the scanned stream, including virtual document sentinels.
-    pub scanned_bytes: usize,
-    /// Number of primary-space grams emitted.
-    pub primary_grams: usize,
-    /// Number of folded-space grams emitted.
-    pub folded_grams: usize,
-    /// Document facts observed during scanning.
-    pub facts: ScanFacts,
-}
-
-impl ScanSummary {
-    /// Total number of emitted grams.
-    #[must_use]
-    pub const fn grams(self) -> usize {
-        self.primary_grams + self.folded_grams
-    }
+    /// Original content length in bytes.
+    pub byte_len: u64,
+    /// Number of text lines observed.
+    pub line_count: u32,
+    /// Number of empty lines observed.
+    pub empty_line_count: u32,
+    /// Longest line length in bytes, excluding `\n`.
+    pub longest_line_len: u32,
+    /// Number of gram keys emitted.
+    pub gram_count: u32,
+    /// Boolean scan facts.
+    pub flags: ScanFlags,
+    /// Saturating byte histogram.
+    pub byte_counts: SaturatingByteCounts256,
+    /// First byte seen on each line.
+    pub line_start_bytes: ByteSet256,
+    /// Last byte seen before each line break or EOF.
+    pub line_end_bytes: ByteSet256,
+    /// First bytes of the content.
+    pub prefix: EdgeBytes,
+    /// Last bytes of the content.
+    pub suffix: EdgeBytes,
 }
 
 /// Event emitted by a scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanEvent<'a> {
-    /// One sparse gram.
-    Gram(ScannedGram<'a>),
-    /// Final per-document summary.
-    Finish(ScanSummary),
+    /// One sparse gram key.
+    Gram(ScannedGram),
+    /// Final per-entry scan summary.
+    Finish(&'a ScanSummary),
 }
 
 /// Errors from scanning a byte stream.
@@ -219,61 +389,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn boundary_bits_round_trip() {
-        let none = Boundary::new(false, false);
-        let both = Boundary::new(true, true);
+    fn byte_set_tracks_membership() {
+        let mut set = ByteSet256::default();
+        let mut need = ByteSet256::default();
+        set.insert(b'a');
+        set.insert(b'z');
+        need.insert(b'z');
 
-        assert_eq!(none.bits(), 0);
-        assert!(!none.touches_start());
-        assert!(!none.touches_end());
-        assert!(both.touches_start());
-        assert!(both.touches_end());
-        assert_eq!(both.bits(), 3);
+        assert!(set.contains_all(need));
+        assert!(set.contains_any(need));
     }
 
     #[test]
-    fn facts_bits_round_trip() {
-        let facts = ScanFacts::default()
+    fn saturating_counts_track_minimums() {
+        let mut have = SaturatingByteCounts256::default();
+        let mut need = SaturatingByteCounts256::default();
+        have.observe(b'a');
+        have.observe(b'a');
+        need.observe(b'a');
+
+        assert!(have.contains_at_least(&need));
+    }
+
+    #[test]
+    fn scan_flags_round_trip() {
+        let flags = ScanFlags::default()
             .with_lf()
-            .with_upper_ascii()
-            .with_lower_ascii()
-            .with_ends_with_newline();
+            .with_ascii_upper()
+            .with_ascii_lower()
+            .with_ends_with_lf();
 
-        assert!(facts.has_lf());
-        assert!(!facts.has_crlf());
-        assert!(facts.has_upper_ascii());
-        assert!(facts.has_lower_ascii());
-        assert!(!facts.has_non_ascii());
-        assert!(facts.ends_with_newline());
+        assert!(flags.has_lf());
+        assert!(!flags.has_crlf());
+        assert!(flags.has_ascii_upper());
+        assert!(flags.has_ascii_lower());
+        assert!(!flags.has_non_ascii());
+        assert!(flags.ends_with_lf());
     }
 
     #[test]
-    fn gram_spans_are_ranges() {
+    fn gram_span_is_range() {
         let gram = ScannedGram {
-            bytes: b"abc",
-            hash: 7,
-            space: GramSpace::Primary,
-            scanned_start: 1,
-            scanned_end: 4,
-            content_start: 0,
-            content_end: 3,
-            boundary: Boundary::new(false, false),
+            key: GramKey(7),
+            span: ByteRange::new(1, 4),
         };
 
-        assert_eq!(gram.scanned_span(), 1..4);
-        assert_eq!(gram.content_span(), 0..3);
-    }
-
-    #[test]
-    fn summary_counts_all_grams() {
-        let summary = ScanSummary {
-            content_bytes: 10,
-            scanned_bytes: 12,
-            primary_grams: 3,
-            folded_grams: 4,
-            facts: ScanFacts::default(),
-        };
-
-        assert_eq!(summary.grams(), 7);
+        assert_eq!(gram.content_span(), 1..4);
     }
 }

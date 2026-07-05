@@ -21,7 +21,6 @@ learn = ["dep:crc32fast"]
 [dependencies]
 sngram-types = { workspace = true }
 regex-syntax = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["io-util"] }
 crc32fast = { workspace = true, optional = true }
 

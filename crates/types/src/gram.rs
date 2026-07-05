@@ -81,12 +81,6 @@ impl Gram {
     pub fn hash(&self) -> u64 {
         HashKey::UNKEYED.hash_bytes(self.as_bytes())
     }
-
-    /// The gram's index key under a deployment [`HashKey`].
-    #[must_use]
-    pub fn hash_keyed(&self, key: HashKey) -> u64 {
-        key.hash_bytes(self.as_bytes())
-    }
 }
 
 impl Gram {

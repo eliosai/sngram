@@ -14,31 +14,31 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyTuple};
 
-use sngram::learn::LocalTally;
+use sngram::learn::BigramCounter;
 
-/// Count all string/binary columns of `data` into `tally`, per row.
+/// Count all string/binary columns of `data` into `counter`, per row.
 /// Returns the number of text bytes counted by this call.
 pub fn count_arrow(
     py: Python<'_>,
     data: &Bound<'_, PyAny>,
-    tally: &mut LocalTally,
+    counter: &BigramCounter,
 ) -> PyResult<u64> {
-    let before = tally.bytes();
+    let before = counter.bytes_processed();
     if data.hasattr("__arrow_c_stream__")? {
-        count_stream(py, data, tally)?;
+        count_stream(py, data, counter)?;
     } else if data.hasattr("__arrow_c_array__")? {
-        count_array(py, data, tally)?;
+        count_array(py, data, counter)?;
     } else {
         return Err(PyTypeError::new_err(
             "expected an Arrow object (pyarrow Table / RecordBatch / RecordBatchReader) \
              exporting __arrow_c_stream__ or __arrow_c_array__",
         ));
     }
-    Ok(tally.bytes() - before)
+    Ok(counter.bytes_processed() - before)
 }
 
 /// Drain a `__arrow_c_stream__` of record batches.
-fn count_stream(py: Python<'_>, data: &Bound<'_, PyAny>, tally: &mut LocalTally) -> PyResult<()> {
+fn count_stream(py: Python<'_>, data: &Bound<'_, PyAny>, counter: &BigramCounter) -> PyResult<()> {
     let capsule: Bound<'_, PyCapsule> = data
         .call_method0("__arrow_c_stream__")?
         .cast_into()
@@ -67,7 +67,7 @@ fn count_stream(py: Python<'_>, data: &Bound<'_, PyAny>, tally: &mut LocalTally)
         let Some(batch) = reader.next().transpose().map_err(arrow_err)? else {
             return Ok(());
         };
-        count_batch(py, &batch, tally);
+        count_batch(py, &batch, counter);
     }
 }
 
@@ -76,7 +76,7 @@ fn count_stream(py: Python<'_>, data: &Bound<'_, PyAny>, tally: &mut LocalTally)
     clippy::too_many_lines,
     reason = "Arrow C data capsules require schema and array extraction in one ownership block"
 )]
-fn count_array(py: Python<'_>, data: &Bound<'_, PyAny>, tally: &mut LocalTally) -> PyResult<()> {
+fn count_array(py: Python<'_>, data: &Bound<'_, PyAny>, counter: &BigramCounter) -> PyResult<()> {
     let pair: Bound<'_, PyTuple> = data
         .call_method0("__arrow_c_array__")?
         .cast_into()
@@ -106,15 +106,15 @@ fn count_array(py: Python<'_>, data: &Bound<'_, PyAny>, tally: &mut LocalTally) 
 
     let strukt = StructArray::from(array_data);
     let batch = RecordBatch::from(strukt);
-    count_batch(py, &batch, tally);
+    count_batch(py, &batch, counter);
     Ok(())
 }
 
 /// Count every string/binary column of one batch, GIL released.
-fn count_batch(py: Python<'_>, batch: &RecordBatch, tally: &mut LocalTally) {
+fn count_batch(py: Python<'_>, batch: &RecordBatch, counter: &BigramCounter) {
     py.detach(|| {
         for col in batch.columns() {
-            count_column(col.as_ref(), tally);
+            count_column(col.as_ref(), counter);
         }
     });
 }
@@ -123,39 +123,27 @@ fn count_batch(py: Python<'_>, batch: &RecordBatch, tally: &mut LocalTally) {
     clippy::too_many_lines,
     reason = "one arm per supported arrow text type"
 )]
-fn count_column(col: &dyn Array, tally: &mut LocalTally) {
+fn count_column(col: &dyn Array, counter: &BigramCounter) {
     use arrow_array::{
         BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, StringArray,
         StringViewArray,
     };
     let any = col.as_any();
     if let Some(a) = any.downcast_ref::<StringArray>() {
-        for v in a.iter().flatten() {
-            tally.count_buffer(v.as_bytes());
-        }
+        counter.process_batch(a.iter().flatten().map(str::as_bytes));
     } else if let Some(a) = any.downcast_ref::<LargeStringArray>() {
-        for v in a.iter().flatten() {
-            tally.count_buffer(v.as_bytes());
-        }
+        counter.process_batch(a.iter().flatten().map(str::as_bytes));
     } else if let Some(a) = any.downcast_ref::<StringViewArray>() {
-        for v in a.iter().flatten() {
-            tally.count_buffer(v.as_bytes());
-        }
+        counter.process_batch(a.iter().flatten().map(str::as_bytes));
     } else if let Some(a) = any.downcast_ref::<BinaryArray>() {
-        for v in a.iter().flatten() {
-            tally.count_buffer(v);
-        }
+        counter.process_batch(a.iter().flatten());
     } else if let Some(a) = any.downcast_ref::<LargeBinaryArray>() {
-        for v in a.iter().flatten() {
-            tally.count_buffer(v);
-        }
+        counter.process_batch(a.iter().flatten());
     } else if let Some(a) = any.downcast_ref::<BinaryViewArray>() {
-        for v in a.iter().flatten() {
-            tally.count_buffer(v);
-        }
+        counter.process_batch(a.iter().flatten());
     } else if let Some(s) = any.downcast_ref::<StructArray>() {
         for child in s.columns() {
-            count_column(child.as_ref(), tally);
+            count_column(child.as_ref(), counter);
         }
     }
     // non-text columns are ignored: the trainer projects to the text column,

@@ -12,9 +12,7 @@ use std::{
 use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
-use sngram::types::{DfStats, QueryPlan};
-use sngram_types::WeightTable;
-use sngram_types::{Gram, GramSpace, HashKey, ScanError, ScanEvent};
+use sngram_types::{DfStats, GramKey, QueryPlan, ScanError, ScanEvent, WeightTable};
 use tantivy::{
     DocId, Index, Score, Searcher, SegmentOrdinal, SegmentReader, TantivyDocument, Term,
     collector::{Collector, SegmentCollector},
@@ -119,7 +117,7 @@ pub(super) fn query_index(
         );
         return Ok(None);
     }
-    let query = forced_candidate_query(fields, plan_to_query(fields.gram, &plan, keyed.key)?);
+    let query = forced_candidate_query(fields, plan_to_query(fields.gram, &plan)?);
     let ords = searcher
         .search(&*query, &DocOrdCollector)
         .context("failed to query sparse n-gram index")?;
@@ -152,24 +150,14 @@ struct TantivyDf<'a> {
 }
 
 impl DfStats for TantivyDf<'_> {
-    fn doc_count(&self, space: GramSpace, gram: &Gram) -> u64 {
+    fn entry_count(&self, key: GramKey) -> u64 {
         self.searcher
-            .doc_freq(&Term::from_field_u64(
-                self.fields.gram,
-                gram.hash_keyed(hash_key_for(space)),
-            ))
+            .doc_freq(&Term::from_field_u64(self.fields.gram, key.value()))
             .unwrap_or(0)
     }
 
-    fn total_docs(&self) -> u64 {
+    fn total_entries(&self) -> u64 {
         self.searcher.num_docs()
-    }
-}
-
-const fn hash_key_for(space: GramSpace) -> HashKey {
-    match space {
-        GramSpace::Primary => HashKey::UNKEYED,
-        GramSpace::Folded => HashKey::UNKEYED.folded(),
     }
 }
 
@@ -455,30 +443,23 @@ fn scan_file(
     if forced_candidate {
         return Ok(Some(file_grams(file, true, Vec::new())));
     }
-    let mut primary = Vec::new();
-    let mut folded = Vec::new();
+    let mut hashes = Vec::new();
     let scan = sngram::scan(table, Cursor::new(bytes), |event| {
         if let ScanEvent::Gram(gram) = event {
-            match gram.space {
-                GramSpace::Primary => primary.push(gram.hash),
-                GramSpace::Folded => folded.push(gram.hash),
-            }
+            hashes.push(gram.key.value());
         }
     });
     if matches!(scan, Err(ScanError::Binary)) {
         return Ok(None);
     }
     scan?;
-    primary.sort_unstable();
-    primary.dedup();
-    let hashes = if super::classify::is_high_entropy(bytes.len(), primary.len()) {
+    hashes.sort_unstable();
+    hashes.dedup();
+    let hashes = if super::classify::is_high_entropy(bytes.len(), hashes.len()) {
         forced_candidate = true;
         Vec::new()
     } else {
-        folded.sort_unstable();
-        primary.extend(folded);
-        primary.dedup();
-        primary
+        hashes
     };
     Ok(Some(file_grams(file, forced_candidate, hashes)))
 }

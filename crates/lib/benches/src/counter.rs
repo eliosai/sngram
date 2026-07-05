@@ -6,15 +6,15 @@
     clippy::excessive_nesting
 )]
 
-//! Benchmarks the real training ingest path: `LocalTally::count_buffer` is the
-//! per-byte hot loop every training byte passes through, and `merge` is the
-//! once-per-batch fold into the shared counter.
+//! Benchmarks the public training ingest path: `process_batch` does the
+//! per-byte counting work and `merge` folds a completed staging counter into
+//! the shared counter.
 
 use std::hint::black_box;
 use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use sngram::learn::{BigramCounter, LocalTally};
+use sngram::learn::BigramCounter;
 
 fn source_code(size: usize) -> Vec<u8> {
     let src = b"fn main() { let x = foo_bar(42); println!(\"{x}\"); }\n";
@@ -40,17 +40,17 @@ fn mixed(size: usize) -> Vec<u8> {
 
 const SIZES: &[usize] = &[4096, 65536, 1_048_576, 16 * 1_048_576];
 
-fn bench_count_buffer(c: &mut Criterion) {
-    let mut group = c.benchmark_group("counter/count_buffer");
+fn bench_process_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("counter/process_batch");
 
     for &size in SIZES {
         for (name, data) in [("code", source_code(size)), ("mixed", mixed(size))] {
             group.throughput(Throughput::Bytes(size as u64));
             group.bench_with_input(BenchmarkId::new(name, size), &data, |b, d| {
-                let mut tally = LocalTally::new();
+                let counter = BigramCounter::new();
                 b.iter(|| {
-                    tally.count_buffer(black_box(d));
-                    black_box(tally.bytes())
+                    let bytes = counter.process_batch(core::iter::once(black_box(d.as_slice())));
+                    black_box(bytes)
                 });
             });
         }
@@ -59,11 +59,11 @@ fn bench_count_buffer(c: &mut Criterion) {
 }
 
 fn bench_merge(c: &mut Criterion) {
-    let mut tally = LocalTally::new();
-    tally.count_buffer(&source_code(1_048_576));
+    let staging = BigramCounter::new();
+    staging.process(&source_code(1_048_576));
     let counter = BigramCounter::new();
     c.bench_function("counter/merge", |b| {
-        b.iter(|| counter.merge(black_box(&tally)));
+        b.iter(|| counter.merge(black_box(&staging)));
     });
 }
 
@@ -82,9 +82,9 @@ fn bench_concurrent_merge(c: &mut Criterion) {
                     for _ in 0..threads {
                         let c = &counter;
                         s.spawn(move || {
-                            let mut tally = LocalTally::new();
-                            tally.count_buffer(d);
-                            c.merge(&tally);
+                            let staging = BigramCounter::new();
+                            staging.process(d);
+                            c.merge(&staging);
                         });
                     }
                 });
@@ -96,7 +96,7 @@ fn bench_concurrent_merge(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_count_buffer,
+    bench_process_batch,
     bench_merge,
     bench_concurrent_merge
 );

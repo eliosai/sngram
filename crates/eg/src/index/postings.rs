@@ -16,9 +16,9 @@ use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 
-use sngram::types::{DfStats, QueryExpr, QueryPlan};
-use sngram_types::WeightTable;
-use sngram_types::{Gram, GramSpace, HashKey, ScanError, ScanEvent};
+use sngram_types::{
+    DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanError, ScanEvent, WeightTable,
+};
 
 use crate::flags::HiArgs;
 
@@ -126,10 +126,7 @@ pub(super) fn query_index(
         return Ok(None);
     }
     let lookup_started_at = Instant::now();
-    let tuned = super::planner::KeyedPlan {
-        plan,
-        key: keyed.key,
-    };
+    let tuned = super::planner::KeyedPlan { plan };
     let mut candidates = eval_plan(index, &tuned)?;
     candidates = union_sorted(candidates, index.lookup(FORCED_CANDIDATE_HASH)?);
     log::debug!(
@@ -177,21 +174,12 @@ struct PostingsDf<'a> {
 }
 
 impl DfStats for PostingsDf<'_> {
-    fn doc_count(&self, space: GramSpace, gram: &Gram) -> u64 {
-        self.index
-            .posting_len(gram.hash_keyed(hash_key_for(space)))
-            .unwrap_or(0) as u64
+    fn entry_count(&self, key: GramKey) -> u64 {
+        self.index.posting_len(key.value()).unwrap_or(0) as u64
     }
 
-    fn total_docs(&self) -> u64 {
+    fn total_entries(&self) -> u64 {
         self.index.doc_count as u64
-    }
-}
-
-const fn hash_key_for(space: GramSpace) -> HashKey {
-    match space {
-        GramSpace::Primary => HashKey::UNKEYED,
-        GramSpace::Folded => HashKey::UNKEYED.folded(),
     }
 }
 
@@ -715,33 +703,27 @@ fn classify_and_collect(
         return Ok(());
     }
     let mut emitted = 0usize;
-    let mut primary = Vec::new();
-    let mut folded = Vec::new();
+    let mut hashes = Vec::new();
     let scan = sngram::scan(table, Cursor::new(bytes), |event| {
         if let ScanEvent::Gram(gram) = event {
             emitted += 1;
-            match gram.space {
-                GramSpace::Primary => primary.push(gram.hash),
-                GramSpace::Folded => folded.push(gram.hash),
-            }
+            hashes.push(gram.key.value());
         }
     });
     if matches!(scan, Err(ScanError::Binary)) {
         return Ok(());
     }
     scan?;
-    primary.sort_unstable();
-    primary.dedup();
-    if super::classify::is_high_entropy(bytes.len(), primary.len()) {
+    hashes.sort_unstable();
+    hashes.dedup();
+    if super::classify::is_high_entropy(bytes.len(), hashes.len()) {
         forced = true;
     }
     let mut hashes = if forced {
         push_forced(pairs, ord, stats);
         Vec::new()
     } else {
-        folded.sort_unstable();
-        primary.extend(folded);
-        primary
+        hashes
     };
     if !forced {
         hashes.dedup();
@@ -952,7 +934,7 @@ fn eval_plan(
     keyed: &super::planner::KeyedPlan,
 ) -> anyhow::Result<Vec<usize>> {
     let mut cache = PostingCache::new();
-    eval_plan_cached(index, &keyed.plan, keyed.key, &mut cache)
+    eval_plan_cached(index, &keyed.plan, &mut cache)
 }
 
 fn lookup_cached(
@@ -971,49 +953,65 @@ fn lookup_cached(
 fn eval_plan_cached(
     index: &PostingsIndex,
     plan: &QueryPlan,
-    key: HashKey,
     cache: &mut PostingCache,
 ) -> anyhow::Result<Vec<usize>> {
-    eval_expr_cached(index, plan.expr(), key, cache)
+    eval_expr_cached(index, plan.root(), cache)
 }
 
 fn eval_expr_cached(
     index: &PostingsIndex,
-    expr: &QueryExpr,
-    key: HashKey,
+    expr: &PlanExpr,
     cache: &mut PostingCache,
 ) -> anyhow::Result<Vec<usize>> {
     match expr {
-        QueryExpr::All => {
+        PlanExpr::All => {
             anyhow::bail!("indexed query has no sparse n-gram constraints; use --no-index")
         },
-        QueryExpr::None => Ok(Vec::new()),
-        QueryExpr::And { grams, sub } => {
-            let mut lists = Vec::with_capacity(grams.len() + sub.len());
-            for gram in grams {
-                lists.push(lookup_cached(index, cache, gram.hash_keyed(key))?);
+        PlanExpr::None => Ok(Vec::new()),
+        PlanExpr::AllOf {
+            grams, children, ..
+        } => {
+            let mut lists = Vec::with_capacity(grams.len() + children.len());
+            for needle in grams {
+                lists.push(Rc::new(eval_needle_cached(index, needle, cache)?));
             }
-            for expr in sub {
-                lists.push(Rc::new(eval_expr_cached(index, expr, key, cache)?));
+            for expr in children {
+                lists.push(Rc::new(eval_expr_cached(index, expr, cache)?));
             }
             intersect_all_sorted(index.doc_count, lists)
         },
-        QueryExpr::Or { grams, sub } => {
+        PlanExpr::AnyOf {
+            grams, children, ..
+        } => {
             // Concatenate every branch then sort+dedup once: folding the
             // union pairwise re-walks the accumulator per branch, quadratic
             // in branch count for the wide ORs case-folded plans build.
             let mut acc = Vec::new();
-            for gram in grams {
-                acc.extend_from_slice(&lookup_cached(index, cache, gram.hash_keyed(key))?);
+            for needle in grams {
+                acc.extend(eval_needle_cached(index, needle, cache)?);
             }
-            for expr in sub {
-                acc.extend(eval_expr_cached(index, expr, key, cache)?);
+            for expr in children {
+                acc.extend(eval_expr_cached(index, expr, cache)?);
             }
             acc.sort_unstable();
             acc.dedup();
             Ok(acc)
         },
     }
+}
+
+fn eval_needle_cached(
+    index: &PostingsIndex,
+    needle: &GramNeedle,
+    cache: &mut PostingCache,
+) -> anyhow::Result<Vec<usize>> {
+    let mut acc = Vec::new();
+    for key in needle.keys() {
+        acc.extend_from_slice(&lookup_cached(index, cache, key.value())?);
+    }
+    acc.sort_unstable();
+    acc.dedup();
+    Ok(acc)
 }
 
 fn intersect_all_sorted(

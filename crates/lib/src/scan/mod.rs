@@ -2,7 +2,7 @@
 
 use std::io::BufRead;
 
-mod cover;
+pub mod cover;
 mod engine;
 mod facts;
 mod settings;
@@ -10,11 +10,13 @@ mod validate;
 
 use sngram_types::{ScanError, ScanEvent, WeightTable};
 
+pub use settings::ScanSettings;
+
 /// Extract sparse n-grams and scan metadata from one byte stream.
 ///
-/// The scanner reads the input once, emits primary and ASCII-folded gram
-/// spaces, and brackets the document with virtual line sentinels so anchored
-/// patterns can be planned against real boundary grams.
+/// The scanner reads the input once, emits raw gram keys plus case-folded
+/// supplement keys when needed, and brackets the document with virtual line
+/// sentinels so anchored patterns can be planned against boundary grams.
 ///
 /// # Errors
 ///
@@ -23,7 +25,7 @@ use sngram_types::{ScanError, ScanEvent, WeightTable};
 pub fn scan<R>(
     table: &WeightTable,
     input: R,
-    mut emit: impl for<'a> FnMut(ScanEvent<'a>),
+    mut emit: impl for<'event> FnMut(ScanEvent<'event>),
 ) -> Result<(), ScanError>
 where
     R: BufRead,
@@ -43,26 +45,6 @@ where
     }
     scanner.finish_document(&mut emit);
     Ok(())
-}
-
-pub fn minimal_cover(table: &WeightTable, literal: &[u8]) -> Vec<sngram_types::Gram> {
-    cover::minimal_cover(table, literal)
-}
-
-pub fn guaranteed_cover(table: &WeightTable, literal: &[u8]) -> Vec<sngram_types::Gram> {
-    cover::guaranteed_cover(table, literal)
-}
-
-pub const fn min_len() -> usize {
-    settings::ScanSettings::MIN_LEN
-}
-
-pub const fn line_sentinels() -> bool {
-    settings::ScanSettings::LINE_SENTINELS
-}
-
-pub const fn folded_space() -> bool {
-    settings::ScanSettings::FOLDED_SPACE
 }
 
 #[cfg(test)]

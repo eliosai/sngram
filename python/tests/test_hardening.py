@@ -43,10 +43,10 @@ def test_checkpoint_is_consistent_cut_under_merge_storm(tmp_path: Path):
 
     def merger(tid: int) -> None:
         for i in range(shards_per_thread):
-            tally = sngram.LocalTally()
-            tally.count(doc)
+            staging = sngram.BigramCounter()
+            staging.process(doc)
             with lock:
-                counter.merge(tally)
+                counter.merge(staging)
                 counter.add_files(1)
                 state.mark_done(f"src-{tid}", shards_per_thread, i, "rev")
         # also exercise new-source insertion mid-save iteration
@@ -446,8 +446,8 @@ def test_concurrent_merge_and_snapshot_never_crashes():
 
     def merger():
         for _ in range(per_thread):
-            t = sngram.LocalTally()
-            t.count(doc)
+            t = sngram.BigramCounter()
+            t.process(doc)
             counter.merge(t)
 
     def snapshotter():

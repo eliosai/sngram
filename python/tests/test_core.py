@@ -37,8 +37,6 @@ def test_scan_and_scan_hashes_agree(table):
     for (start, end, h), k in zip(triples, keys):
         assert h == k
         assert 3 <= end - start <= 100
-        # the emitted hash equals direct hashing of the gram's bytes
-        assert sngram.gram_hash(doc[start:end]) == h
 
 
 def test_scan_deterministic(table):
@@ -54,14 +52,14 @@ def test_scan_short_inputs_empty(table):
 def test_query_literal_is_and(table):
     plan = sngram.query(table, "MAX_FILE_SIZE")
     assert plan.op == "and"
-    assert plan.gram_hashes and len(plan.gram_hashes) == len(plan.grams)
-    # query keys must match index keys: every plan gram appears in a scan of
-    # any document containing the literal
+    assert plan.grams
+    # Query keys must match index keys: every logical gram needle appears in a
+    # scan of any document containing the literal.
     doc = b"prefix MAX_FILE_SIZE suffix"
     index_keys = set(np.frombuffer(sngram.scan_hashes(table, doc), dtype=np.uint64))
-    for g, h in zip(plan.grams, plan.gram_hashes):
-        assert sngram.gram_hash(g) == h
-        assert h in index_keys, f"query gram {g!r} missing from index"
+    for alternatives in plan.grams:
+        assert alternatives
+        assert any(key in index_keys for key in alternatives)
 
 
 def test_query_broad_and_impossible(table):

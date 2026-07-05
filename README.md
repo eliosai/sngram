@@ -38,33 +38,33 @@ let doc = b"fn max_file_size() -> u64 { 0 }";
 // from rolling prefix hashes — store it straight into your inverted index.
 scan(&table, Cursor::new(doc), |event| {
     if let ScanEvent::Gram(gram) = event {
-        let _bytes = gram.bytes;
-        let _key = gram.hash;
+        let _span = gram.span;
+        let _key = gram.key; // store this in your inverted index
     }
 })?;
 
 // Fold a regex into a boolean gram query to prefilter candidates.
 let plan = query(&table, r"max_\w+_size")?;
-let _key = plan.hash_key(); // use with each plan gram's hash_keyed(...)
+let _root = plan.root();
 ```
 
 `scan` reads one `BufRead` stream, allocates nothing per gram, and emits
 `ScanEvent::Gram` plus one final `ScanEvent::Finish` summary. Each gram carries
-its space, spans, boundary flags, bytes, and 64-bit rolling hash, so building
-index keys costs no second pass over the bytes.
-`query` folds a regex into a `QueryPlan` (`All`, `None`, or nested `And`/`Or`
-expression over `Gram` bags; `Gram` stores up to 22 bytes inline) to intersect
-against the index. Hash each plan gram with `plan.hash_key()` so primary and
-folded-space queries look up the same keys `scan` emitted. The plan matches a
-superset of what the regex matches, so a prefilter built from it never misses a
-match the index could find; the real regex verifies the candidates. CLI
+its content span and finalized `GramKey`; the summary carries document metadata
+that was mined during the same pass.
+`query` folds a regex into a `QueryPlan` rooted at `PlanExpr::All`,
+`PlanExpr::None`, `PlanExpr::AllOf`, or `PlanExpr::AnyOf`. Its `GramNeedle`s are
+the finalized keys to look up in the index, including folded alternatives when a
+case-insensitive pattern needs them. The plan matches a superset of what the
+regex matches, so a prefilter built from it never misses a match the index could
+find; the real regex verifies the candidates. CLI
 concerns such as fixed-string escaping, multiple-pattern OR joining, smart
 case, and CRLF/byte regex mode should be encoded into the single regex pattern
 before calling `query`.
 
 Upgrading from 0.4: `scan` now takes a `BufRead` input and emits `ScanEvent`,
-`query` now takes one regex pattern and returns `QueryPlan`, `index`/`IndexGram(s)`
-are gone, and index keys changed — reindex.
+`query` now takes one regex pattern and returns `QueryPlan`, and index keys
+changed — reindex.
 
 ## Weights
 

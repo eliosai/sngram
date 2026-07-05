@@ -16,9 +16,7 @@ mod settings;
 mod strings;
 mod validate;
 
-use sngram_types::WeightTable;
-
-use crate::types::{QueryError, QueryPlan};
+use sngram_types::{QueryError, QueryPlan, WeightTable};
 
 /// Decompose one regex pattern into a sparse-gram query plan.
 ///

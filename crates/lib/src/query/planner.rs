@@ -1,17 +1,16 @@
 //! Query planning from regex HIR to public plans.
 
 use regex_syntax::hir::Hir;
-use sngram_types::{GramSpace, WeightTable};
-
-use crate::{
-    scan,
-    types::{QueryError, QueryExpr, QueryPlan},
+use sngram_types::{
+    Gram, GramKey, GramNeedle, HashKey, PlanExpr, QueryError, QueryPlan, WeightTable,
 };
 
 use super::{
     algebra::{Op, Query},
     analyze::{Analyzer, PlanContext},
     parser::QueryParser,
+    settings::QuerySettings,
+    strings::StringSet,
     validate::ValidatedPattern,
 };
 
@@ -34,44 +33,61 @@ impl<'a> QueryPlanner<'a> {
     /// Returns [`QueryError::InvalidRegex`] when regex parsing fails.
     pub fn plan(&self, pattern: ValidatedPattern<'_>) -> Result<QueryPlan, QueryError> {
         let parsed = QueryParser::parse(pattern)?;
-        let fold = scan::folded_space() && parsed.uses_folded_space();
+        let fold = QuerySettings::CASE_FOLDED_SUPPLEMENTS && parsed.uses_folded_space();
         let ctx = PlanContext {
             fold,
-            line_sentinels: scan::line_sentinels(),
+            line_sentinels: QuerySettings::LINE_SENTINELS,
         };
-        Ok(QueryPlan::new(
-            self.plan_hir(parsed.hir(), ctx),
-            gram_space_for(fold),
-        ))
+        Ok(QueryPlan::new(self.plan_hir(parsed.hir(), ctx)))
     }
 
-    fn plan_hir(&self, hir: &Hir, ctx: PlanContext) -> QueryExpr {
+    fn plan_hir(&self, hir: &Hir, ctx: PlanContext) -> PlanExpr {
         let analyzer = Analyzer::with_context(self.table, ctx);
-        into_public_expr(analyzer.plan(hir))
+        into_public_expr(analyzer.plan(hir), ctx.fold)
     }
 }
 
-const fn gram_space_for(fold: bool) -> GramSpace {
-    if fold {
-        GramSpace::Folded
-    } else {
-        GramSpace::Primary
-    }
-}
-
-fn into_public_expr(query: Query) -> QueryExpr {
+fn into_public_expr(query: Query, fold: bool) -> PlanExpr {
     match query.op {
-        Op::All => QueryExpr::All,
-        Op::None => QueryExpr::None,
-        Op::And => QueryExpr::And {
-            grams: query.grams.into_vec(),
-            sub: query.sub.into_iter().map(into_public_expr).collect(),
+        Op::All => PlanExpr::All,
+        Op::None => PlanExpr::None,
+        Op::And => PlanExpr::AllOf {
+            grams: public_grams(query.grams, fold),
+            needs: Vec::new(),
+            children: public_children(query.sub, fold),
         },
-        Op::Or => QueryExpr::Or {
-            grams: query.grams.into_vec(),
-            sub: query.sub.into_iter().map(into_public_expr).collect(),
+        Op::Or => PlanExpr::AnyOf {
+            grams: public_grams(query.grams, fold),
+            needs: Vec::new(),
+            children: public_children(query.sub, fold),
         },
     }
+}
+
+fn public_grams(grams: StringSet, fold: bool) -> Vec<GramNeedle> {
+    grams
+        .into_vec()
+        .into_iter()
+        .map(|gram| needle_for(&gram, fold))
+        .collect()
+}
+
+fn public_children(children: Vec<Query>, fold: bool) -> Vec<PlanExpr> {
+    children
+        .into_iter()
+        .map(|query| into_public_expr(query, fold))
+        .collect()
+}
+
+fn needle_for(gram: &Gram, fold: bool) -> GramNeedle {
+    let raw = GramKey(HashKey::UNKEYED.hash_bytes(gram.as_bytes()));
+    if !fold || !gram.as_bytes().iter().any(u8::is_ascii_alphabetic) {
+        return GramNeedle::Key(raw);
+    }
+    GramNeedle::AnyKey(vec![
+        raw,
+        GramKey(HashKey::UNKEYED.folded().hash_bytes(gram.as_bytes())),
+    ])
 }
 
 #[cfg(test)]
@@ -81,12 +97,11 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use sngram_types::{Gram, GramSpace, WeightTable};
-
-    use crate::{
-        query::query,
-        types::{DfStats, QueryError, QueryExpr, QueryPlan},
+    use sngram_types::{
+        DfStats, GramKey, GramNeedle, HashKey, PlanExpr, QueryError, QueryPlan, WeightTable,
     };
+
+    use crate::query::query;
 
     fn table() -> WeightTable {
         WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
@@ -96,35 +111,39 @@ mod tests {
         query(&table(), re).expect("pattern parses")
     }
 
-    fn expr_of(re: &str) -> QueryExpr {
-        plan_of(re).expr().clone()
+    fn expr_of(re: &str) -> PlanExpr {
+        plan_of(re).root().clone()
     }
 
-    fn shape(expr: &QueryExpr) -> String {
+    fn shape(expr: &PlanExpr) -> String {
         match expr {
-            QueryExpr::All => "+".to_string(),
-            QueryExpr::None => "-".to_string(),
-            QueryExpr::And { grams, sub } => shape_join(grams, sub, "G", " & "),
-            QueryExpr::Or { grams, sub } => shape_join(grams, sub, "O", " | "),
+            PlanExpr::All => "+".to_string(),
+            PlanExpr::None => "-".to_string(),
+            PlanExpr::AllOf {
+                grams, children, ..
+            } => shape_join(grams, children, "G", " & "),
+            PlanExpr::AnyOf {
+                grams, children, ..
+            } => shape_join(grams, children, "O", " | "),
         }
     }
 
-    fn shape_join(grams: &[Gram], sub: &[QueryExpr], bag: &str, sep: &str) -> String {
+    fn shape_join(grams: &[GramNeedle], children: &[PlanExpr], bag: &str, sep: &str) -> String {
         let mut parts = Vec::new();
         if !grams.is_empty() {
             parts.push(bag.to_string());
         }
-        parts.extend(sub.iter().map(shape));
+        parts.extend(children.iter().map(shape));
         if parts.len() == 1 {
             return parts.pop().expect("len 1");
         }
         format!("({})", parts.join(sep))
     }
 
-    fn has_or(expr: &QueryExpr) -> bool {
+    fn has_or(expr: &PlanExpr) -> bool {
         match expr {
-            QueryExpr::Or { .. } => true,
-            QueryExpr::And { sub, .. } => sub.iter().any(has_or),
+            PlanExpr::AnyOf { .. } => true,
+            PlanExpr::AllOf { children, .. } => children.iter().any(has_or),
             _ => false,
         }
     }
@@ -135,7 +154,7 @@ mod tests {
 
     #[test]
     fn literal_pattern_extracts_grams() {
-        assert!(matches!(expr_of("MAX_FILE_SIZE"), QueryExpr::And { .. }));
+        assert!(matches!(expr_of("MAX_FILE_SIZE"), PlanExpr::AllOf { .. }));
     }
 
     #[test]
@@ -161,13 +180,16 @@ mod tests {
         assert_ne!(expr_of("abc$"), expr_of("abc"));
         assert_eq!(expr_of(r"\babc"), expr_of("abc"));
         assert_eq!(expr_of(r"ab\b-cd"), expr_of("ab-cd"));
-        assert!(matches!(expr_of(r"ab\bc"), QueryExpr::None));
-        assert!(matches!(expr_of(r"foo$bar"), QueryExpr::None));
+        assert!(matches!(expr_of(r"ab\bc"), PlanExpr::None));
+        assert!(matches!(expr_of(r"foo$bar"), PlanExpr::None));
     }
 
     #[test]
     fn alternation_and_repetition_keep_selective_constraints() {
-        assert!(matches!(expr_of("(a+hello|b+world)"), QueryExpr::Or { .. }));
+        assert!(matches!(
+            expr_of("(a+hello|b+world)"),
+            PlanExpr::AnyOf { .. }
+        ));
         assert!(!expr_of("a{3,5}bcdef").is_all());
         assert!(!expr_of("foo[α-γ]bar").is_all());
         assert_eq!(expr_of("ab[cd]ef"), expr_of("abcef|abdef"));
@@ -176,43 +198,32 @@ mod tests {
     }
 
     #[test]
-    fn inline_case_insensitive_uses_folded_space() {
+    fn inline_case_insensitive_uses_key_alternatives() {
         let plan = plan_of("(?i)netif_receive_skb_list_internal");
-        assert_eq!(plan.space(), GramSpace::Folded);
         assert!(plan.gram_count() > 0);
+        assert!(has_any_key(plan.root()));
     }
 
     #[test]
-    fn sensitive_queries_use_primary_space() {
+    fn sensitive_queries_use_single_keys() {
         let plan = plan_of("SchedClock");
-        assert_eq!(plan.space(), GramSpace::Primary);
+        assert!(!has_any_key(plan.root()));
     }
 
-    #[test]
-    fn folded_plans_never_carry_uppercase_ascii() {
-        let plan = plan_of("(?i:READ[A-Z]lock_IRQ)");
-        assert_eq!(plan.space(), GramSpace::Folded);
-        for gram in grams_of(plan.expr()) {
-            assert!(
-                !gram.as_bytes().iter().any(u8::is_ascii_uppercase),
-                "uppercase byte in folded-space gram {gram:?}"
-            );
-        }
-    }
-
-    fn grams_of(expr: &QueryExpr) -> Vec<Gram> {
-        let mut out = Vec::new();
-        collect_grams(expr, &mut out);
-        out
-    }
-
-    fn collect_grams(expr: &QueryExpr, out: &mut Vec<Gram>) {
-        let (QueryExpr::And { grams, sub } | QueryExpr::Or { grams, sub }) = expr else {
-            return;
-        };
-        out.extend(grams.iter().cloned());
-        for child in sub {
-            collect_grams(child, out);
+    fn has_any_key(expr: &PlanExpr) -> bool {
+        match expr {
+            PlanExpr::All | PlanExpr::None => false,
+            PlanExpr::AllOf {
+                grams, children, ..
+            }
+            | PlanExpr::AnyOf {
+                grams, children, ..
+            } => {
+                grams
+                    .iter()
+                    .any(|needle| matches!(needle, GramNeedle::AnyKey(_)))
+                    || children.iter().any(has_any_key)
+            },
         }
     }
 
@@ -242,93 +253,102 @@ mod tests {
     }
 
     struct MapDf {
-        counts: HashMap<Vec<u8>, u64>,
+        counts: HashMap<GramKey, u64>,
         total: u64,
     }
 
     impl DfStats for MapDf {
-        fn doc_count(&self, _space: GramSpace, gram: &Gram) -> u64 {
-            self.counts.get(gram.as_bytes()).copied().unwrap_or(0)
+        fn entry_count(&self, key: GramKey) -> u64 {
+            self.counts.get(&key).copied().unwrap_or(0)
         }
 
-        fn total_docs(&self) -> u64 {
+        fn total_entries(&self) -> u64 {
             self.total
         }
     }
 
     fn df_of(pairs: &[(&[u8], u64)], total: u64) -> MapDf {
         MapDf {
-            counts: pairs.iter().map(|(gram, n)| (gram.to_vec(), *n)).collect(),
+            counts: pairs.iter().map(|(gram, n)| (key(gram), *n)).collect(),
             total,
         }
     }
 
-    fn primary(expr: QueryExpr) -> QueryPlan {
-        QueryPlan::new(expr, GramSpace::Primary)
+    fn key(bytes: &[u8]) -> GramKey {
+        GramKey(HashKey::UNKEYED.hash_bytes(bytes))
+    }
+
+    fn plan(expr: PlanExpr) -> QueryPlan {
+        QueryPlan::new(expr)
     }
 
     #[test]
     fn estimate_bounds_and_by_rarest_and_or_by_sum() {
-        let and = primary(QueryExpr::And {
-            grams: vec![Gram::from(&b"abc"[..]), Gram::from(&b"xyz"[..])],
-            sub: vec![],
+        let and = plan(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(key(b"abc")), GramNeedle::Key(key(b"xyz"))],
+            needs: vec![],
+            children: vec![],
         });
         let df = df_of(&[(b"abc", 900), (b"xyz", 3)], 1000);
         assert_eq!(and.estimate_candidates(&df), 3);
 
-        let or = primary(QueryExpr::Or {
-            grams: vec![Gram::from(&b"abc"[..]), Gram::from(&b"xyz"[..])],
-            sub: vec![],
+        let or = plan(PlanExpr::AnyOf {
+            grams: vec![GramNeedle::Key(key(b"abc")), GramNeedle::Key(key(b"xyz"))],
+            needs: vec![],
+            children: vec![],
         });
         assert_eq!(or.estimate_candidates(&df), 903);
-        assert_eq!(primary(QueryExpr::All).estimate_candidates(&df), 1000);
-        assert_eq!(primary(QueryExpr::None).estimate_candidates(&df), 0);
+        assert_eq!(plan(PlanExpr::All).estimate_candidates(&df), 1000);
+        assert_eq!(plan(PlanExpr::None).estimate_candidates(&df), 0);
     }
 
     #[test]
     fn tune_drops_stop_grams_but_keeps_a_discriminator() {
         let df = df_of(&[(b"the", 990), (b"ing", 900), (b"zqx", 2)], 1000);
-        let mut plan = primary(QueryExpr::And {
+        let mut plan = plan(PlanExpr::AllOf {
             grams: vec![
-                Gram::from(&b"the"[..]),
-                Gram::from(&b"zqx"[..]),
-                Gram::from(&b"ing"[..]),
+                GramNeedle::Key(key(b"the")),
+                GramNeedle::Key(key(b"zqx")),
+                GramNeedle::Key(key(b"ing")),
             ],
-            sub: vec![],
+            needs: vec![],
+            children: vec![],
         });
         plan.tune(&df, 500);
-        let QueryExpr::And { grams, .. } = plan.expr() else {
-            panic!("tuned plan must stay And");
+        let PlanExpr::AllOf { grams, .. } = plan.root() else {
+            panic!("tuned plan must stay AllOf");
         };
         assert_eq!(grams.len(), 1);
-        assert_eq!(grams[0].as_bytes(), b"zqx");
+        assert_eq!(grams[0], GramNeedle::Key(key(b"zqx")));
     }
 
     #[test]
     fn tune_keeps_the_rarest_stop_gram_when_all_are_stops() {
         let df = df_of(&[(b"the", 990), (b"ing", 900)], 1000);
-        let mut plan = primary(QueryExpr::And {
-            grams: vec![Gram::from(&b"the"[..]), Gram::from(&b"ing"[..])],
-            sub: vec![],
+        let mut plan = plan(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(key(b"the")), GramNeedle::Key(key(b"ing"))],
+            needs: vec![],
+            children: vec![],
         });
         plan.tune(&df, 500);
-        let QueryExpr::And { grams, .. } = plan.expr() else {
-            panic!("tuned plan must stay And");
+        let PlanExpr::AllOf { grams, .. } = plan.root() else {
+            panic!("tuned plan must stay AllOf");
         };
         assert_eq!(grams.len(), 1);
-        assert_eq!(grams[0].as_bytes(), b"ing");
+        assert_eq!(grams[0], GramNeedle::Key(key(b"ing")));
     }
 
     #[test]
     fn tune_never_thins_or_bags() {
         let df = df_of(&[(b"the", 990), (b"zqx", 2)], 1000);
-        let mut plan = primary(QueryExpr::Or {
-            grams: vec![Gram::from(&b"the"[..]), Gram::from(&b"zqx"[..])],
-            sub: vec![],
+        let mut plan = plan(PlanExpr::AnyOf {
+            grams: vec![GramNeedle::Key(key(b"the")), GramNeedle::Key(key(b"zqx"))],
+            needs: vec![],
+            children: vec![],
         });
         plan.tune(&df, 500);
-        let QueryExpr::Or { grams, .. } = plan.expr() else {
-            panic!("tuned plan must stay Or");
+        let PlanExpr::AnyOf { grams, .. } = plan.root() else {
+            panic!("tuned plan must stay AnyOf");
         };
         assert_eq!(grams.len(), 2);
     }

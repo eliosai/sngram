@@ -114,37 +114,19 @@ fn bench_scan_ascending(c: &mut Criterion) {
 }
 
 // The workload every real consumer runs: content in, 64-bit index keys out.
-// `rehash` is the pre-0.5 shape (hash each emitted gram's bytes from scratch);
-// `fused` consumes the rolling hash the scan already computed.
 fn bench_pipeline(c: &mut Criterion) {
-    use std::hash::{Hash, Hasher};
-
     let table = crc32_table();
     let mut group = c.benchmark_group("pipeline/code");
 
     for &size in &[65_536usize, 1_048_576] {
         let data = source_code(size);
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::new("rehash", size), &data, |b, c| {
+        group.bench_with_input(BenchmarkId::new("keys", size), &data, |b, c| {
             b.iter(|| {
                 let mut acc = 0u64;
                 sngram::scan(&table, Cursor::new(c), |event| {
                     if let ScanEvent::Gram(gram) = event {
-                        let mut hasher = rustc_hash::FxHasher::default();
-                        gram.bytes.hash(&mut hasher);
-                        acc ^= hasher.finish();
-                    }
-                })
-                .expect("scan succeeds");
-                black_box(acc)
-            });
-        });
-        group.bench_with_input(BenchmarkId::new("fused", size), &data, |b, c| {
-            b.iter(|| {
-                let mut acc = 0u64;
-                sngram::scan(&table, Cursor::new(c), |event| {
-                    if let ScanEvent::Gram(gram) = event {
-                        acc ^= gram.hash;
+                        acc ^= gram.key.value();
                     }
                 })
                 .expect("scan succeeds");
@@ -166,7 +148,7 @@ fn report_density(_c: &mut Criterion) {
         sngram::scan(&table, Cursor::new(&data), |event| {
             if let ScanEvent::Gram(gram) = event {
                 emissions += 1;
-                distinct.insert(gram.hash);
+                distinct.insert(gram.key.value());
             }
         })
         .expect("scan succeeds");

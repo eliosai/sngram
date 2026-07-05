@@ -3,7 +3,7 @@
 Shape: a *planner* thread walks the dataset families round-robin and feeds a
 bounded queue of shard tasks (so the mix stays blended); N *worker* threads
 pull tasks, stream one shard each as Arrow batches, and count through the
-GIL-free Rust tally; a completed shard's tally merges into the one shared
+GIL-free Rust staging; a completed shard's staging merges into the one shared
 counter (exactly-once: a failed shard contributes nothing). An asyncio
 *supervisor* owns everything slow-moving — dashboard, mint thresholds,
 checkpoints, the stall watchdog, the byte limit.
@@ -1172,23 +1172,23 @@ class Trainer:
         source/family, so a tiny Python pass is cheaper than either overshooting
         a hard cap or discarding a large shard wholesale.
         """
-        tally = sngram.LocalTally()
-        n = tally.count_arrow(batch)
+        staging = sngram.BigramCounter()
+        n = staging.count_arrow(batch)
         if remaining is None or n <= remaining:
-            return tally, n, False
+            return staging, n, False
         if remaining <= 0:
-            return sngram.LocalTally(), 0, True
+            return sngram.BigramCounter(), 0, True
 
         import pyarrow as pa
 
         values = _prefix_values_to_bytes(batch.column(0).to_pylist(), remaining)
         if not values:
-            return sngram.LocalTally(), 0, True
+            return sngram.BigramCounter(), 0, True
         name = batch.schema.names[0]
         prefix = pa.table({name: pa.array(values, type=batch.column(0).type)})
-        prefix_tally = sngram.LocalTally()
-        prefix_n = prefix_tally.count_arrow(prefix)
-        return prefix_tally, prefix_n, True
+        prefix_counter = sngram.BigramCounter()
+        prefix_n = prefix_counter.count_arrow(prefix)
+        return prefix_counter, prefix_n, True
 
     # ------------------------------------------------------------- workers
 
@@ -1221,8 +1221,8 @@ class Trainer:
         """Stream one shard (one parquet file) to completion a row group at a
         time, with rate-limit-aware retries.
 
-        Each row group is counted into a throwaway sub-tally and folded into the
-        file's tally only once it has streamed cleanly; the file commits to the
+        Each row group is counted into a throwaway sub-staging and folded into the
+        file's staging only once it has streamed cleanly; the file commits to the
         shared counter exactly once, after every row group has landed. So a
         transient failure (429s, timeouts, connection resets, 5xx) re-reads only
         the in-progress row group — not the whole multi-GB file — and retries
@@ -1231,13 +1231,13 @@ class Trainer:
         anything else gets MAX_HARD_ATTEMPTS.
 
         `next_rg` advances past every committed row group so a retry resumes
-        where it failed; `uncommitted` is the in-flight byte tally of the row
+        where it failed; `uncommitted` is the in-flight byte staging of the row
         group currently in progress, dropped on failure while the already-folded
         row groups stay in flight to merge when the retry finishes the file.
         """
         sid = f"{task.source.id}#{task.shard}"
         delay = RETRY_BASE_S
-        file_tally = sngram.LocalTally()
+        file_counter = sngram.BigramCounter()
         next_rg = 0
         uncommitted = 0
         ws.task = sid
@@ -1284,7 +1284,7 @@ class Trainer:
                         if self.stop.is_set():
                             self._drop_in_flight(ws)  # abandoned: nothing merged
                             return
-                        rg_tally = sngram.LocalTally()
+                        rg_counter = sngram.BigramCounter()
                         uncommitted = 0
                         for batch in pf.iter_batches(
                             batch_size=BATCH_ROWS, columns=[field], row_groups=[rg]
@@ -1293,7 +1293,7 @@ class Trainer:
                                 self._drop_in_flight(ws)
                                 return
                             remaining = self._remaining_cap_for_worker(task, ws)
-                            batch_tally, n, capped = self._count_arrow_with_cap(
+                            batch_counter, n, capped = self._count_arrow_with_cap(
                                 batch, remaining
                             )
                             uncommitted += n
@@ -1302,13 +1302,13 @@ class Trainer:
                             with self._lock:
                                 self.in_flight_bytes += n
                             if n:
-                                rg_tally.add_from(batch_tally)
+                                rg_counter.merge(batch_counter)
                             if capped:
                                 cap_stop = True
                                 break
                         # the row group streamed cleanly: fold it in and advance
                         # the cursor so a later failure never re-reads it
-                        file_tally.add_from(rg_tally)
+                        file_counter.merge(rg_counter)
                         uncommitted = 0
                         next_rg = rg + 1
                         if cap_stop:
@@ -1352,7 +1352,7 @@ class Trainer:
                 delay = min(delay * 2, RETRY_CAP_S)
                 continue
 
-            self._commit_tally(ws, task, sid, file_tally, ws.shard_bytes)
+            self._commit_counter(ws, task, sid, file_counter, ws.shard_bytes)
             return
 
     def _open_raw(self, url: str, ws: WorkerState | None = None):
@@ -1442,7 +1442,7 @@ class Trainer:
 
         delay = RETRY_BASE_S
         while not self.stop.is_set():
-            file_tally = sngram.LocalTally()
+            file_counter = sngram.BigramCounter()
             ws.shard_bytes = 0
             remote_acquired = False
             bucket = task.source.config or task.source.family
@@ -1483,9 +1483,9 @@ class Trainer:
                         return False
                     tbl = pa.table({"content": pa.array(texts, type=pa.large_string())})
                     remaining = self._remaining_cap_for_worker(task, ws)
-                    batch_tally, n, capped = self._count_arrow_with_cap(tbl, remaining)
+                    batch_counter, n, capped = self._count_arrow_with_cap(tbl, remaining)
                     if n:
-                        file_tally.add_from(batch_tally)
+                        file_counter.merge(batch_counter)
                     ws.shard_bytes += n
                     stats["accepted_bytes"] += n
                     self._note_worker_progress(ws, sid)
@@ -1663,7 +1663,7 @@ class Trainer:
                 rows=stats["scanned_rows"],
                 secs=round(secs, 1),
             )
-            self._commit_tally(ws, task, sid, file_tally, ws.shard_bytes)
+            self._commit_counter(ws, task, sid, file_counter, ws.shard_bytes)
             return
 
     def _run_json_shard(self, ws: WorkerState, task: ShardTask, sid: str) -> None:
@@ -1674,7 +1674,7 @@ class Trainer:
 
         delay = RETRY_BASE_S
         while not self.stop.is_set():
-            file_tally = sngram.LocalTally()
+            file_counter = sngram.BigramCounter()
             ws.shard_bytes = 0
             remote_acquired = False
             try:
@@ -1698,9 +1698,9 @@ class Trainer:
                             {task.source.text_field: pa.array(batch, type=pa.large_string())}
                         )
                         remaining = self._remaining_cap_for_worker(task, ws)
-                        batch_tally, n, capped = self._count_arrow_with_cap(tbl, remaining)
+                        batch_counter, n, capped = self._count_arrow_with_cap(tbl, remaining)
                         if n:
-                            file_tally.add_from(batch_tally)
+                            file_counter.merge(batch_counter)
                         ws.shard_bytes += n
                         self._note_worker_progress(ws, sid)
                         with self._lock:
@@ -1758,11 +1758,11 @@ class Trainer:
                 delay = min(delay * 2, RETRY_CAP_S)
                 continue
 
-            self._commit_tally(ws, task, sid, file_tally, ws.shard_bytes)
+            self._commit_counter(ws, task, sid, file_counter, ws.shard_bytes)
             return
 
-    def _commit_tally(
-        self, ws: WorkerState, task: ShardTask, sid: str, file_tally, shard_bytes: int
+    def _commit_counter(
+        self, ws: WorkerState, task: ShardTask, sid: str, file_counter, shard_bytes: int
     ) -> None:
         # exactly-once: merge only after a shard streamed cleanly, under the
         # merge lock so checkpoints/mints see a consistent cut.
@@ -1774,7 +1774,7 @@ class Trainer:
             if remaining is not None and shard_bytes > remaining:
                 skipped_for_cap = True
             else:
-                self.counter.merge(file_tally)
+                self.counter.merge(file_counter)
                 self.counter.add_files(1)
                 self.state.family_bytes[fam] = (
                     self.state.family_bytes.get(fam, 0) + shard_bytes

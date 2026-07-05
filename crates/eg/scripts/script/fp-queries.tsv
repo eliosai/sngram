@@ -275,7 +275,7 @@ wide_mixed_branch_mix	read[A-Za-z\p{Cyrillic}]lock
 uuid_hex	[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}
 mac_addr	[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}
 
-# --- folded-space class/seam stress ---
+# --- case-folded class/seam stress ---
 ci_ascii_class_irq	READ[A-Z]lock_IRQ	-i
 ci_scoped_alt	(?i:(read|write|cmpxchg)_once)
 

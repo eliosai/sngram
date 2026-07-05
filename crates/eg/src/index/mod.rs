@@ -23,7 +23,7 @@ use std::{
 };
 
 use anyhow::bail;
-use sngram::types::{QueryError, QueryExpr, QueryPlan};
+use sngram_types::{PlanExpr, QueryError, QueryPlan};
 
 use crate::{
     flags::{HiArgs, Mode, SearchMode},
@@ -81,10 +81,10 @@ pub(crate) fn run(args: &HiArgs) -> anyhow::Result<bool> {
         },
     };
     log::debug!("eg index: query plan: {}", debug_plan(&plan.plan));
-    match plan.plan.expr() {
-        QueryExpr::All => return unsupported(Unsupported::TooBroadPattern),
-        QueryExpr::None => return unsupported(Unsupported::ImpossiblePattern),
-        QueryExpr::And { .. } | QueryExpr::Or { .. } => {},
+    match plan.plan.root() {
+        PlanExpr::All => return unsupported(Unsupported::TooBroadPattern),
+        PlanExpr::None => return unsupported(Unsupported::ImpossiblePattern),
+        PlanExpr::AllOf { .. } | PlanExpr::AnyOf { .. } => {},
     }
     let location = location::resolve(args, &index_root(args)?)?;
     let index_dir = location.index_dir();
@@ -836,8 +836,7 @@ struct CollectedHaystacks {
 
 #[cfg(test)]
 mod tests {
-    use sngram::types::QueryPlan;
-    use sngram_types::WeightTable;
+    use sngram_types::{QueryPlan, WeightTable};
 
     use super::{DEBUG_PLAN_PREVIEW_BYTES, debug_plan};
 

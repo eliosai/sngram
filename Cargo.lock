@@ -1343,7 +1343,6 @@ dependencies = [
  "regex-lite",
  "regex-syntax",
  "sngram-types",
- "thiserror",
  "tokio",
 ]
 
@@ -1363,6 +1362,7 @@ name = "sngram-types"
 version = "0.5.0"
 dependencies = [
  "crc32fast",
+ "regex-syntax",
  "thiserror",
 ]
 

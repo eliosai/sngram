@@ -42,12 +42,12 @@ def test_count_arrow_matches_naive_strings(arrow_type):
     raw = [r.encode() for r in rows]
     tbl = pa.table({"content": pa.array(rows, type=arrow_type)})
 
-    tally = sngram.LocalTally()
-    counted = tally.count_arrow(tbl)
+    staging = sngram.BigramCounter()
+    counted = staging.count_arrow(tbl)
     assert counted == sum(len(r) for r in raw)
 
     counter = sngram.BigramCounter()
-    counter.merge(tally)
+    counter.merge(staging)
     assert_matches(counter, raw)
 
 
@@ -55,19 +55,19 @@ def test_count_arrow_matches_naive_strings(arrow_type):
 def test_count_arrow_matches_naive_binary(arrow_type):
     rows = random_rows(11, 300)
     tbl = pa.table({"content": pa.array(rows, type=arrow_type)})
-    tally = sngram.LocalTally()
-    tally.count_arrow(tbl)
+    staging = sngram.BigramCounter()
+    staging.count_arrow(tbl)
     counter = sngram.BigramCounter()
-    counter.merge(tally)
+    counter.merge(staging)
     assert_matches(counter, rows)
 
 
 def test_nulls_are_skipped():
     tbl = pa.table({"c": pa.array(["ab", None, "cd"], type=pa.large_string())})
-    tally = sngram.LocalTally()
-    assert tally.count_arrow(tbl) == 4
+    staging = sngram.BigramCounter()
+    assert staging.count_arrow(tbl) == 4
     counter = sngram.BigramCounter()
-    counter.merge(tally)
+    counter.merge(staging)
     assert counter.count(ord("a"), ord("b")) == 1
     assert counter.count(ord("b"), ord("c")) == 0, "no pair may straddle rows/nulls"
 
@@ -78,7 +78,7 @@ def test_chunked_input_equals_contiguous():
     chunked = pa.table(
         {"c": pa.chunked_array([pa.array(rows[:150]), pa.array(rows[150:])])}
     )
-    t1, t2 = sngram.LocalTally(), sngram.LocalTally()
+    t1, t2 = sngram.BigramCounter(), sngram.BigramCounter()
     assert t1.count_arrow(contiguous) == t2.count_arrow(chunked)
     c1, c2 = sngram.BigramCounter(), sngram.BigramCounter()
     c1.merge(t1)
@@ -90,25 +90,25 @@ def test_chunked_input_equals_contiguous():
 def test_record_batch_and_reader_inputs():
     rows = ["hello world", "foo bar"]
     batch = pa.record_batch({"c": pa.array(rows, type=pa.large_string())})
-    t1 = sngram.LocalTally()
+    t1 = sngram.BigramCounter()
     assert t1.count_arrow(batch) == sum(len(r) for r in rows)
 
     reader = pa.RecordBatchReader.from_batches(batch.schema, [batch, batch])
-    t2 = sngram.LocalTally()
+    t2 = sngram.BigramCounter()
     assert t2.count_arrow(reader) == 2 * sum(len(r) for r in rows)
 
 
 def test_non_arrow_input_raises():
-    tally = sngram.LocalTally()
+    staging = sngram.BigramCounter()
     with pytest.raises(TypeError):
-        tally.count_arrow([1, 2, 3])
+        staging.count_arrow([1, 2, 3])
 
 
 def test_merge_accumulates_and_count_bytes():
     counter = sngram.BigramCounter()
     for _ in range(3):
-        t = sngram.LocalTally()
-        t.count(b"ab")
+        t = sngram.BigramCounter()
+        t.process(b"ab")
         counter.merge(t)
     assert counter.count(ord("a"), ord("b")) == 3
     assert counter.files_processed == 0

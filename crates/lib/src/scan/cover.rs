@@ -4,13 +4,13 @@ use std::collections::VecDeque;
 
 use sngram_types::{Gram, WeightTable};
 
-use crate::scan::{engine, settings::ScanSettings};
+use super::{ScanSettings, engine};
 
 /// Minimal covering grams of a single literal.
 pub fn minimal_cover(table: &WeightTable, literal: &[u8]) -> Vec<Gram> {
     let mut grams = Vec::new();
     emit_cover_spans(table, literal, |start, end| {
-        if (ScanSettings::MIN_LEN..=ScanSettings::MAX_LEN).contains(&(end - start)) {
+        if ScanSettings::emits_len(end - start) {
             grams.push(Gram::from(&literal[start..end]));
         }
     });
@@ -21,7 +21,7 @@ pub fn minimal_cover(table: &WeightTable, literal: &[u8]) -> Vec<Gram> {
 pub fn guaranteed_cover(table: &WeightTable, literal: &[u8]) -> Vec<Gram> {
     let mut grams = minimal_cover(table, literal);
     engine::scan_literal(table, literal, |gram| {
-        grams.push(Gram::from(gram.bytes));
+        grams.push(Gram::from(&literal[gram.span.as_range()]));
     });
     grams
 }
@@ -31,7 +31,9 @@ fn emit_cover_spans(table: &WeightTable, literal: &[u8], mut emit: impl FnMut(us
 
     for start in 0..literal.len().saturating_sub(1) {
         let weight = table.weight(literal[start], literal[start + 1]);
-        if stack.len() > 1 && start + 3 - stack[0].1 >= ScanSettings::MAX_LEN {
+        if stack.len() > 1
+            && start + ScanSettings::MIN_GRAM_LEN - stack[0].1 >= ScanSettings::MAX_GRAM_LEN
+        {
             emit(stack[0].1, stack[1].1 + 2);
             stack.pop_front();
         }
@@ -84,7 +86,7 @@ mod tests {
     fn minimal_cover_produces_bounded_grams() {
         let table = table();
         for gram in minimal_cover(&table, b"MAX_FILE_SIZE") {
-            assert!((ScanSettings::MIN_LEN..=ScanSettings::MAX_LEN).contains(&gram.len()));
+            assert!(ScanSettings::emits_len(gram.len()));
         }
     }
 
@@ -97,7 +99,7 @@ mod tests {
             .map(|gram| gram.as_bytes().to_vec())
             .collect();
         engine::scan_literal(&table, literal, |gram| {
-            assert!(cover.contains(gram.bytes));
+            assert!(cover.contains(&literal[gram.span.as_range()]));
         });
     }
 

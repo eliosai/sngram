@@ -1,9 +1,7 @@
 //! Query planning from eg patterns to Tantivy sparse-gram queries.
 
 use anyhow::{Context, bail};
-use sngram::types::{QueryExpr, QueryPlan};
-use sngram_types::HashKey;
-use sngram_types::WeightTable;
+use sngram_types::{GramNeedle, PlanExpr, QueryPlan, WeightTable};
 use tantivy::{
     Term,
     query::{BooleanQuery, EmptyQuery, Query, TermQuery},
@@ -15,7 +13,6 @@ use crate::flags::HiArgs;
 /// A plan plus the hash key selecting the gram space its lookups use
 pub(super) struct KeyedPlan {
     pub(super) plan: QueryPlan,
-    pub(super) key: HashKey,
 }
 
 pub(super) fn query_plan(args: &HiArgs, table: &WeightTable) -> anyhow::Result<KeyedPlan> {
@@ -31,45 +28,52 @@ pub(super) fn query_plan(args: &HiArgs, table: &WeightTable) -> anyhow::Result<K
             args.patterns()
         )
     })?;
-    let key = plan.hash_key();
-    Ok(KeyedPlan { plan, key })
+    Ok(KeyedPlan { plan })
 }
 
-pub(super) fn plan_to_query(
-    field: Field,
-    plan: &QueryPlan,
-    key: HashKey,
-) -> anyhow::Result<Box<dyn Query>> {
-    expr_to_query(field, plan.expr(), key)
+pub(super) fn plan_to_query(field: Field, plan: &QueryPlan) -> anyhow::Result<Box<dyn Query>> {
+    expr_to_query(field, plan.root())
 }
 
-fn expr_to_query(field: Field, expr: &QueryExpr, key: HashKey) -> anyhow::Result<Box<dyn Query>> {
+fn expr_to_query(field: Field, expr: &PlanExpr) -> anyhow::Result<Box<dyn Query>> {
     match expr {
-        QueryExpr::All => {
+        PlanExpr::All => {
             bail!("indexed query has no sparse n-gram constraints; use --no-index")
         },
-        QueryExpr::None => Ok(Box::new(EmptyQuery)),
-        QueryExpr::And { grams, sub } => {
-            let mut clauses = Vec::with_capacity(grams.len() + sub.len());
-            for gram in grams {
-                clauses.push(term_query(field, gram.hash_keyed(key)));
+        PlanExpr::None => Ok(Box::new(EmptyQuery)),
+        PlanExpr::AllOf {
+            grams, children, ..
+        } => {
+            let mut clauses = Vec::with_capacity(grams.len() + children.len());
+            for needle in grams {
+                clauses.push(needle_query(field, needle));
             }
-            for expr in sub {
-                clauses.push(expr_to_query(field, expr, key)?);
+            for expr in children {
+                clauses.push(expr_to_query(field, expr)?);
             }
             Ok(intersection_query(clauses))
         },
-        QueryExpr::Or { grams, sub } => {
-            let mut clauses = Vec::with_capacity(grams.len() + sub.len());
-            for gram in grams {
-                clauses.push(term_query(field, gram.hash_keyed(key)));
+        PlanExpr::AnyOf {
+            grams, children, ..
+        } => {
+            let mut clauses = Vec::with_capacity(grams.len() + children.len());
+            for needle in grams {
+                clauses.push(needle_query(field, needle));
             }
-            for expr in sub {
-                clauses.push(expr_to_query(field, expr, key)?);
+            for expr in children {
+                clauses.push(expr_to_query(field, expr)?);
             }
             Ok(union_query(clauses))
         },
     }
+}
+
+fn needle_query(field: Field, needle: &GramNeedle) -> Box<dyn Query> {
+    let clauses = needle
+        .keys()
+        .map(|key| term_query(field, key.value()))
+        .collect();
+    union_query(clauses)
 }
 
 fn term_query(field: Field, hash: u64) -> Box<dyn Query> {
