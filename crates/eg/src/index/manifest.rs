@@ -172,6 +172,27 @@ pub(super) fn fast_snapshot(
     }))
 }
 
+pub(super) fn snapshot_from_manifest(index_root: &Path, manifest: &Manifest) -> CurrentSnapshot {
+    let dirs = manifest
+        .dirs
+        .iter()
+        .cloned()
+        .map(|manifest| CurrentDir { manifest })
+        .collect();
+    let files = manifest
+        .files
+        .iter()
+        .enumerate()
+        .map(|(ord, file)| current_file_from_clean_manifest(ord, index_root, file))
+        .collect();
+    CurrentSnapshot {
+        walk_fingerprint: manifest.walk_fingerprint,
+        git_freshness: manifest.git_freshness,
+        files,
+        dirs,
+    }
+}
+
 pub(super) fn manifest_for(
     backend: ManifestBackend,
     table_fingerprint: u64,
@@ -277,6 +298,16 @@ pub(super) fn is_compatible(
         && manifest.backend == backend.id()
         && manifest.engine_version == backend.engine_version()
         && manifest.table_fingerprint == table_fingerprint
+}
+
+pub(super) fn is_filter_compatible(
+    manifest: &Manifest,
+    args: &HiArgs,
+    backend: ManifestBackend,
+    table_fingerprint: u64,
+) -> bool {
+    is_compatible(manifest, backend, table_fingerprint)
+        && manifest.walk_fingerprint == args.index_walk_fingerprint()
 }
 
 /// Write the manifest, always as binary and, when enabled, also as JSON.

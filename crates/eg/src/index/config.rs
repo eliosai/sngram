@@ -82,6 +82,8 @@ pub struct IndexConfig {
     freshness: IndexFreshness,
     /// Explicit index-state directory overriding the default `.eg` location.
     dir: Option<PathBuf>,
+    /// Emit structured indexed-search benchmark data instead of match output.
+    bench: bool,
 }
 
 impl IndexConfig {
@@ -136,6 +138,12 @@ impl IndexConfig {
         self.mode = IndexMode::NoIndex;
     }
 
+    /// Enable structured benchmark output for indexed search.
+    pub(crate) fn enable_bench(&mut self) {
+        self.bench = true;
+        self.enable_if_disabled();
+    }
+
     /// Return true when the copied ripgrep path should run directly.
     pub(crate) fn is_no_index(&self) -> bool {
         self.mode.is_no_index()
@@ -149,6 +157,29 @@ impl IndexConfig {
     /// Return the explicit index-state directory, if configured.
     pub(crate) fn dir(&self) -> Option<&PathBuf> {
         self.dir.as_ref()
+    }
+
+    pub(crate) const fn bench(&self) -> bool {
+        self.bench
+    }
+
+    pub(crate) const fn mode_name(&self) -> &'static str {
+        match self.mode {
+            IndexMode::NoIndex => "no-index",
+            IndexMode::Auto => "auto",
+            IndexMode::Rebuild => "rebuild",
+            IndexMode::Require => "require",
+            IndexMode::Verify => "verify",
+            IndexMode::Repair => "repair",
+        }
+    }
+
+    pub(crate) const fn backend_name(&self) -> &'static str {
+        match self.backend {
+            IndexBackend::Postings => "postings",
+            IndexBackend::Tantivy => "tantivy",
+            IndexBackend::TantivyRam => "tantivy-ram",
+        }
     }
 
     pub(super) const fn mode(&self) -> IndexMode {

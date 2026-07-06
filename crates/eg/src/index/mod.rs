@@ -1,6 +1,7 @@
 //! Sparse n-gram index integration.
 
-mod backend;
+mod bench;
+mod catalog;
 mod classify;
 mod config;
 mod document;
@@ -9,6 +10,8 @@ mod location;
 mod manifest;
 mod planner;
 mod postings;
+mod roots;
+mod runtime;
 mod store;
 mod summary;
 
@@ -18,13 +21,15 @@ use std::{
     mem,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
         Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
     },
     time::Instant,
 };
 
 use anyhow::bail;
+use catalog::GenerationCatalog;
+use roots::{SearchRoots, absolute_path};
 use sngram_types::{PlanExpr, QueryError, QueryPlan};
 
 use crate::{
@@ -36,9 +41,45 @@ pub use config::IndexConfig;
 
 /// Run an indexed search.
 pub fn run(args: &HiArgs) -> anyhow::Result<bool> {
+    if args.index().bench() {
+        return run_bench(args);
+    }
+    run_inner(args, None)
+}
+
+fn run_bench(args: &HiArgs) -> anyhow::Result<bool> {
+    let total_started_at = Instant::now();
+    let mut report = bench::BenchReport::new(args);
+    let result = run_inner(args, Some(&mut report));
+    report.timing_mut().set_total(total_started_at);
+    match result {
+        Ok(matched) => {
+            report.finish_ok(matched);
+            report.print()?;
+            Ok(matched)
+        },
+        Err(err) => {
+            report.finish_error(&err);
+            report.print()?;
+            Err(err)
+        },
+    }
+}
+
+fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyhow::Result<bool> {
+    let parse_started_at = Instant::now();
     let Mode::Search(mode) = args.mode() else {
         bail!("indexed mode only supports search");
     };
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_parse_request(parse_started_at);
+    }
+    if args.index().is_no_index() {
+        return unsupported(Unsupported::Feature {
+            what: "`--bench` with `--no-index`",
+            why: "`--bench` measures the sparse n-gram indexed path, so disabling the index leaves no indexed work to measure",
+        });
+    }
     if args.index().is_maintenance() {
         return maintenance(args);
     }
@@ -66,6 +107,7 @@ pub fn run(args: &HiArgs) -> anyhow::Result<bool> {
     }
     let table = sngram_weights::weights();
     let table_fingerprint = table.fingerprint();
+    let plan_started_at = Instant::now();
     let plan = match planner::query_plan(args, &table) {
         Ok(plan) => plan,
         Err(err) => {
@@ -83,24 +125,76 @@ pub fn run(args: &HiArgs) -> anyhow::Result<bool> {
             return unsupported(Unsupported::PlannerError);
         },
     };
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_plan_query(plan_started_at);
+        report.set_query_grams(plan.plan.gram_count());
+    }
     log::debug!("eg index: query plan: {}", debug_plan(&plan.plan));
     match plan.plan.root() {
-        PlanExpr::All => return unsupported(Unsupported::TooBroadPattern),
+        PlanExpr::All => {
+            if let Some(report) = bench.as_deref_mut() {
+                report.reject_too_broad();
+            }
+            return unsupported(Unsupported::TooBroadPattern);
+        },
         PlanExpr::None => return unsupported(Unsupported::ImpossiblePattern),
         PlanExpr::AllOf { .. } | PlanExpr::AnyOf { .. } => {},
     }
     if !plan.has_gram_constraints() {
+        if let Some(report) = bench.as_deref_mut() {
+            report.reject_too_broad();
+        }
         return unsupported(Unsupported::TooBroadPattern);
     }
-    let location = location::resolve(args, &index_root(args)?)?;
+    let roots_started_at = Instant::now();
+    let roots = SearchRoots::from_args(args)?;
+    debug_assert!(roots.is_served_by(roots.build_root()));
+    let catalog_started_at = Instant::now();
+    let catalog = GenerationCatalog::open(args, table_fingerprint);
+    let generation = catalog.best_ready_generation(&roots)?;
+    let location = generation.location;
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_resolve_roots(roots_started_at);
+        report.timing_mut().set_catalog_open(catalog_started_at);
+        report.set_index_root(&location.corpus_root, generation.used_parent_index);
+    }
     let index_dir = location.index_dir();
-    let (snapshot, loaded_manifest) =
+    let cold_build = matches!(args.index().mode(), config::IndexMode::Rebuild)
+        || generation.source == "cold_build"
+        || !index_present(args, &index_dir);
+    if let Some(report) = bench.as_deref_mut() {
+        report.set_cold_build(cold_build);
+        report.set_generation(
+            index_dir.display().to_string(),
+            if cold_build {
+                "cold_build"
+            } else {
+                generation.source
+            },
+        );
+    }
+    let validate_started_at = Instant::now();
+    runtime::refresh_best_effort(&location.corpus_root, &location.state_root);
+    let (snapshot, loaded_manifest, freshness_proof) =
         load_snapshot(args, table_fingerprint, &location, &index_dir)?;
+    if let Some(report) = bench.as_deref_mut() {
+        report
+            .timing_mut()
+            .set_generation_validate(validate_started_at);
+        let binary_skipped = snapshot
+            .files
+            .iter()
+            .filter(|file| file.is_skipped_binary())
+            .count();
+        report.set_snapshot_counts(snapshot.files.len(), binary_skipped);
+        report.set_freshness_proof(freshness_proof);
+    }
     if args.has_implicit_path() && snapshot.files.is_empty() {
         crate::eprint_nothing_searched();
     }
     warn_large_implicit_build(args, &location.corpus_root, &index_dir, &snapshot);
-    let Some(candidates) = backend_candidates(
+    let query_started_at = Instant::now();
+    let Some(mut candidates) = backend_candidates(
         args,
         table_fingerprint,
         &table,
@@ -108,11 +202,23 @@ pub fn run(args: &HiArgs) -> anyhow::Result<bool> {
         &snapshot,
         loaded_manifest.as_ref(),
         &plan,
+        cold_build,
+        bench.as_deref_mut(),
     )?
     else {
+        if let Some(report) = bench.as_deref_mut() {
+            report.reject_selectivity();
+        }
         return unsupported(Unsupported::TooManyCandidates);
     };
-    let matched = verify_candidates(args, mode, started_at, &snapshot, &candidates)?;
+    let unrestricted_candidates = candidates.len();
+    restrict_candidates(args, &roots, &snapshot, &mut candidates);
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_index_query(query_started_at);
+        report.set_candidates(candidates.len());
+        report.set_parent_restricted_candidates(unrestricted_candidates - candidates.len());
+    }
+    let matched = verify_candidates(args, mode, started_at, &snapshot, &candidates, bench)?;
     Ok(matched)
 }
 
@@ -122,11 +228,24 @@ fn load_snapshot(
     table_fingerprint: u64,
     location: &location::IndexLocation,
     index_dir: &Path,
-) -> anyhow::Result<(manifest::CurrentSnapshot, Option<manifest::Manifest>)> {
+) -> anyhow::Result<(
+    manifest::CurrentSnapshot,
+    Option<manifest::Manifest>,
+    &'static str,
+)> {
+    if let Some(snapshot) = try_daemon_snapshot(
+        args,
+        table_fingerprint,
+        &location.corpus_root,
+        &location.state_root,
+        index_dir,
+    )? {
+        return Ok((snapshot.0, Some(snapshot.1), "daemon"));
+    }
     if let Some(snapshot) =
         try_fast_snapshot(args, table_fingerprint, &location.corpus_root, index_dir)?
     {
-        return Ok(snapshot);
+        return Ok((snapshot.0, snapshot.1, "walk"));
     }
     let collected = collect_haystacks(args, &location.state_root)?;
     log::debug!(
@@ -140,7 +259,7 @@ fn load_snapshot(
         &collected.haystacks,
         &collected.dirs,
     )?;
-    Ok((snapshot, None))
+    Ok((snapshot, None, "walk"))
 }
 
 /// Prepare the selected backend and return the candidate document ordinals.
@@ -152,11 +271,14 @@ fn backend_candidates(
     snapshot: &manifest::CurrentSnapshot,
     loaded_manifest: Option<&manifest::Manifest>,
     plan: &planner::IndexPlan,
+    cold_build: bool,
+    mut bench: Option<&mut bench::BenchReport>,
 ) -> anyhow::Result<Option<BTreeSet<usize>>> {
     let prepare_started_at = Instant::now();
     let candidates = match args.index().backend() {
         config::IndexBackend::Postings => {
             let index_home = index_dir.join("postings-v5");
+            let open_started_at = Instant::now();
             let index = postings::prepare_index(
                 args,
                 table_fingerprint,
@@ -165,6 +287,13 @@ fn backend_candidates(
                 snapshot,
                 loaded_manifest,
             )?;
+            if let Some(report) = bench.as_deref_mut() {
+                report.timing_mut().set_index_mmap(open_started_at);
+                if cold_build {
+                    report.timing_mut().set_initial_build(open_started_at);
+                }
+                report.set_index_bytes(&index_home);
+            }
             let Some(candidates) = postings::query_index(&index, plan)? else {
                 return Ok(None);
             };
@@ -173,6 +302,7 @@ fn backend_candidates(
         config::IndexBackend::Tantivy | config::IndexBackend::TantivyRam => {
             let index_home = index_dir.join("tantivy-v2");
             let (schema, fields) = store::schema();
+            let open_started_at = Instant::now();
             let index = store::prepare_index(
                 args,
                 table_fingerprint,
@@ -183,6 +313,12 @@ fn backend_candidates(
                 snapshot,
                 loaded_manifest,
             )?;
+            if let Some(report) = bench.as_deref_mut() {
+                report.timing_mut().set_index_mmap(open_started_at);
+                if cold_build {
+                    report.timing_mut().set_initial_build(open_started_at);
+                }
+            }
             let Some(candidates) = store::query_index(&index, fields, plan)? else {
                 return Ok(None);
             };
@@ -392,6 +528,45 @@ fn report_line(line: &str) {
     let _ = writeln!(std::io::stdout().lock(), "{line}");
 }
 
+fn try_daemon_snapshot(
+    args: &HiArgs,
+    table_fingerprint: u64,
+    index_root: &Path,
+    state_root: &Path,
+    index_dir: &Path,
+) -> anyhow::Result<Option<(manifest::CurrentSnapshot, manifest::Manifest)>> {
+    if !matches!(
+        args.index().mode(),
+        config::IndexMode::Auto | config::IndexMode::Require
+    ) || !runtime::daemon_freshness_proof(state_root)
+    {
+        return Ok(None);
+    }
+    let (backend, manifest_path) = match args.index().backend() {
+        config::IndexBackend::Postings => (
+            manifest::ManifestBackend::Postings,
+            index_dir.join("postings-v5/manifest.json"),
+        ),
+        config::IndexBackend::Tantivy => (
+            manifest::ManifestBackend::Tantivy,
+            index_dir.join("tantivy-v2/manifest.json"),
+        ),
+        config::IndexBackend::TantivyRam => return Ok(None),
+    };
+    let Some(manifest) = manifest::read_manifest(&manifest_path)? else {
+        return Ok(None);
+    };
+    if !manifest::is_filter_compatible(&manifest, args, backend, table_fingerprint) {
+        return Ok(None);
+    }
+    let snapshot = manifest::snapshot_from_manifest(index_root, &manifest);
+    log::debug!(
+        "eg index: loaded daemon-proofed manifest snapshot for {} files",
+        snapshot.files.len()
+    );
+    Ok(Some((snapshot, manifest)))
+}
+
 fn try_fast_snapshot(
     args: &HiArgs,
     table_fingerprint: u64,
@@ -546,6 +721,20 @@ fn ordered_candidates(
         .collect()
 }
 
+fn restrict_candidates(
+    args: &HiArgs,
+    roots: &SearchRoots,
+    snapshot: &manifest::CurrentSnapshot,
+    candidates: &mut BTreeSet<usize>,
+) {
+    candidates.retain(|ord| {
+        snapshot
+            .files
+            .get(*ord)
+            .is_some_and(|file| roots.contains(args.cwd(), &file.path))
+    });
+}
+
 /// Every document ordinal in the manifest's requested output order.
 fn all_ordered(snapshot: &manifest::CurrentSnapshot) -> Vec<usize> {
     (0..snapshot.files.len()).collect()
@@ -575,12 +764,74 @@ fn verify_candidates(
     started_at: Instant,
     snapshot: &manifest::CurrentSnapshot,
     candidates: &BTreeSet<usize>,
+    bench: Option<&mut bench::BenchReport>,
 ) -> anyhow::Result<bool> {
+    if let Some(report) = bench {
+        return verify_candidates_for_bench(args, mode, snapshot, candidates, report);
+    }
     if is_full_corpus_mode(args, mode) {
         return verify_full_corpus(args, mode, started_at, snapshot, candidates);
     }
     let ordered = ordered_candidates(snapshot, candidates);
     verify_buffered(args, mode, started_at, snapshot, &ordered)
+}
+
+fn verify_candidates_for_bench(
+    args: &HiArgs,
+    mode: SearchMode,
+    snapshot: &manifest::CurrentSnapshot,
+    candidates: &BTreeSet<usize>,
+    report: &mut bench::BenchReport,
+) -> anyhow::Result<bool> {
+    let started_at = Instant::now();
+    let ordered = if is_full_corpus_mode(args, mode) {
+        all_ordered(snapshot)
+    } else {
+        ordered_candidates(snapshot, candidates)
+    };
+    let mut matched_any = false;
+    let mut matched_files = 0usize;
+    let mut verified_files = 0usize;
+    let mut bytes_verified = 0u64;
+    let sink = termcolor::NoColor::new(Vec::new());
+    let mut searcher =
+        args.search_worker(args.matcher()?, args.searcher()?, args.printer(mode, sink))?;
+    for ord in ordered {
+        let Some(file) = snapshot.files.get(ord) else {
+            continue;
+        };
+        let in_candidates = candidates.contains(&ord);
+        if !in_candidates && !is_full_corpus_mode(args, mode) {
+            continue;
+        }
+        let search_result = if in_candidates {
+            verified_files += 1;
+            bytes_verified = bytes_verified.saturating_add(file_len(args.cwd(), &file.path));
+            let haystack = Haystack::from_index_path(file.path.clone(), file.is_explicit());
+            searcher.search(&haystack)
+        } else if file.is_skipped_binary() {
+            continue;
+        } else {
+            searcher.search_absent(&file.path)
+        };
+        let search_result = match search_result {
+            Ok(search_result) => search_result,
+            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => break,
+            Err(err) => {
+                err_message!("{}: {}", file.path.display(), err);
+                continue;
+            },
+        };
+        if search_result.has_match() {
+            matched_any = true;
+            if in_candidates {
+                matched_files += 1;
+            }
+        }
+    }
+    report.set_verification(verified_files, matched_files, bytes_verified);
+    report.timing_mut().set_verify_candidates(started_at);
+    Ok(matched_any)
 }
 
 /// Report on every corpus file for modes that print zero-match files too.
@@ -827,12 +1078,8 @@ fn index_root(args: &HiArgs) -> anyhow::Result<PathBuf> {
     }
 }
 
-fn absolute_path(cwd: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
+fn file_len(cwd: &Path, path: &Path) -> u64 {
+    std::fs::metadata(absolute_path(cwd, path)).map_or(0, |metadata| metadata.len())
 }
 
 struct CollectedHaystacks {
@@ -844,7 +1091,7 @@ struct CollectedHaystacks {
 mod tests {
     use sngram_types::{QueryPlan, WeightTable};
 
-    use super::{debug_plan, DEBUG_PLAN_PREVIEW_BYTES};
+    use super::{DEBUG_PLAN_PREVIEW_BYTES, debug_plan};
 
     fn table() -> WeightTable {
         WeightTable::from_weight_fn(|c1, c2| {

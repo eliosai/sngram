@@ -421,8 +421,13 @@ impl HiArgs {
         self.index_mmap
     }
 
-    /// Return a fingerprint for arguments that affect the indexed file set or
-    /// document ordinal order.
+    /// Return a fingerprint for search filters that affect whether an index can
+    /// safely answer a query.
+    ///
+    /// The searched paths are intentionally excluded. A parent `IndexRoot` can
+    /// answer a child `SearchRoots` query by applying a path restriction after
+    /// sparse lookup, so path roots are identity data on the generation, not on
+    /// the filter semantics.
     pub(crate) fn index_walk_fingerprint(&self) -> u64 {
         fn write_part(hash: &mut u64, part: impl std::fmt::Debug) {
             for byte in format!("{part:?}\n").bytes() {
@@ -431,8 +436,6 @@ impl HiArgs {
         }
 
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        write_part(&mut hash, &self.paths.paths);
-        write_part(&mut hash, self.paths.has_implicit_path);
         write_part(&mut hash, self.follow);
         write_part(&mut hash, &self.globs);
         write_part(&mut hash, self.hidden);

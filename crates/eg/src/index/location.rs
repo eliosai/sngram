@@ -55,7 +55,7 @@ pub(super) fn resolve(args: &HiArgs, corpus_root: &Path) -> anyhow::Result<Index
 
 /// Choose the local `.eg` directory when writable, else the XDG cache.
 fn default_state_root(corpus_root: &Path) -> PathBuf {
-    let local = corpus_root.join(STATE_DIR_NAME);
+    let local = local_state_root(corpus_root);
     if local_is_usable(&local) {
         return local;
     }
@@ -64,6 +64,11 @@ fn default_state_root(corpus_root: &Path) -> PathBuf {
         corpus_root.display()
     );
     cache_state_root(corpus_root)
+}
+
+/// Local state directory for an index root, without creating it.
+pub(super) fn local_state_root(corpus_root: &Path) -> PathBuf {
+    corpus_root.join(STATE_DIR_NAME)
 }
 
 /// Return true when the local state directory exists or can be created.

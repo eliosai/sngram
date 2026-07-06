@@ -46,6 +46,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &File,
     &AfterContext,
     &BeforeContext,
+    &Bench,
     &Binary,
     &BlockBuffered,
     &ByteOffset,
@@ -3350,6 +3351,39 @@ fn test_include_zero() {
     assert_eq!(false, args.include_zero);
 }
 
+/// --bench
+#[derive(Debug)]
+struct Bench;
+
+impl Flag for Bench {
+    fn is_switch(&self) -> bool {
+        true
+    }
+    fn name_long(&self) -> &'static str {
+        "bench"
+    }
+    fn doc_category(&self) -> Category {
+        Category::SparseNgram
+    }
+    fn doc_short(&self) -> &'static str {
+        r"Emit indexed-search benchmark JSON."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+Run the sparse n-gram indexed search path and emit one structured JSON object
+with timing, count, false-positive, byte, and status fields. Normal match output
+is suppressed. This flag is only valid when indexed search is enabled.
+"
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        if v.unwrap_switch() {
+            args.index.enable_bench();
+        }
+        Ok(())
+    }
+}
+
 /// --index
 #[derive(Debug)]
 struct Index;
@@ -3461,6 +3495,14 @@ fn test_index_dir() {
 fn test_index_mode_maintenance() {
     parse_low_raw(["--index", "verify"]).unwrap();
     parse_low_raw(["--index", "repair"]).unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn test_index_bench() {
+    let args = parse_low_raw(["--bench"]).unwrap();
+    assert!(args.index.bench());
+    assert!(!args.index.is_no_index());
 }
 
 /// --index-freshness

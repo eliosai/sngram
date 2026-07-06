@@ -126,6 +126,141 @@ fn default_search_builds_and_uses_index() {
     assert!(fixture.path(".eg/index/postings-v5/manifest.bin").exists());
 }
 
+#[test]
+fn index_bench_emits_structured_json_without_match_output() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "bench unique needle\n").unwrap();
+    fs::write(fixture.path("miss.txt"), "nothing here\n").unwrap();
+
+    let output = eg(&[
+        "--bench",
+        "bench unique needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_eq!(Some(true), report["ok"].as_bool());
+    assert_eq!(Some(true), report["matched"].as_bool());
+    assert_eq!(Some("postings"), report["backend"].as_str());
+    assert!(report["timings_ms"]["total"].as_f64().unwrap() >= 0.0);
+    assert!(report["counts"]["candidate_files"].as_u64().unwrap() >= 1);
+    assert!(report["false_positives"]["false_positive_files"].is_u64());
+    assert!(!stdout.contains("bench unique needle\n"));
+}
+
+#[test]
+fn index_bench_reports_structured_errors() {
+    let broad = eg(&["--bench", ".*"]);
+    let broad_stdout = String::from_utf8(broad.stdout).unwrap();
+    let broad_report: serde_json::Value = serde_json::from_str(&broad_stdout).unwrap();
+
+    assert_eq!(Some(2), broad.status.code());
+    assert_eq!(Some(false), broad_report["ok"].as_bool());
+    assert_eq!(Some(true), broad_report["query_too_broad"].as_bool());
+    assert!(
+        broad_report["unsupported_reason"]
+            .as_str()
+            .unwrap()
+            .contains("too broad")
+    );
+
+    let no_index = eg(&["--bench", "--no-index", "needle"]);
+    let no_index_stdout = String::from_utf8(no_index.stdout).unwrap();
+    let no_index_report: serde_json::Value = serde_json::from_str(&no_index_stdout).unwrap();
+
+    assert_eq!(Some(2), no_index.status.code());
+    assert_eq!(Some(false), no_index_report["ok"].as_bool());
+    assert!(
+        no_index_report["unsupported_reason"]
+            .as_str()
+            .unwrap()
+            .contains("--no-index")
+    );
+}
+
+#[test]
+fn parent_index_serves_child_search_root() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("src")).unwrap();
+    fs::create_dir_all(fixture.path("other")).unwrap();
+    fs::write(fixture.path("src/hit.txt"), "shared parent child needle\n").unwrap();
+    fs::write(
+        fixture.path("other/hit.txt"),
+        "shared parent sibling needle\n",
+    )
+    .unwrap();
+
+    let build = eg(&[
+        "--index=rebuild",
+        "shared parent",
+        fixture.root.to_str().unwrap(),
+    ]);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+
+    let output = eg(&[
+        "--bench",
+        "shared parent",
+        fixture.path("src").to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_eq!(Some(true), report["used_parent_index"].as_bool());
+    assert_eq!(
+        Some(1),
+        report["counts"]["parent_restricted_candidates"].as_u64()
+    );
+    assert_eq!(Some(1), report["counts"]["verified_files"].as_u64());
+}
+
+#[test]
+fn daemon_ready_marker_enables_manifest_only_hot_snapshot() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "daemon proof needle\n").unwrap();
+
+    let build = eg(&["daemon proof needle", fixture.root.to_str().unwrap()]);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+    let runtime = fixture.path(".eg/runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(runtime.join("watcher-ready"), "ready").unwrap();
+    fs::write(runtime.join("journal-clean"), "clean").unwrap();
+
+    let output = eg(&[
+        "--bench",
+        "daemon proof needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_eq!(Some("daemon"), report["freshness_proof"].as_str());
+    assert_eq!(Some(true), report["matched"].as_bool());
+}
+
 #[cfg(unix)]
 #[test]
 fn read_only_local_index_dir_falls_back_to_xdg_cache() {
