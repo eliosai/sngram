@@ -65,12 +65,6 @@ impl QueryPlan {
         self.root.gram_count()
     }
 
-    /// Estimated candidate entries, from df priors.
-    #[must_use]
-    pub fn estimate_candidates(&self, df: &dyn DfStats) -> u64 {
-        self.root.estimate_candidates(df)
-    }
-
     /// Reorder and thin the plan by df.
     pub fn tune(&mut self, df: &dyn DfStats, stop_df: u64) {
         self.root.tune(df, stop_df);
@@ -250,28 +244,6 @@ pub trait DfStats {
 }
 
 impl PlanExpr {
-    fn estimate_candidates(&self, df: &dyn DfStats) -> u64 {
-        let total = df.total_entries();
-        match self {
-            Self::All => total,
-            Self::None => 0,
-            Self::AllOf {
-                grams, children, ..
-            } => {
-                let g = grams.iter().map(|g| g.estimate_candidates(df)).min();
-                let c = children.iter().map(|p| p.estimate_candidates(df)).min();
-                g.into_iter().chain(c).min().unwrap_or(total)
-            },
-            Self::AnyOf {
-                grams, children, ..
-            } => {
-                let g: u64 = grams.iter().map(|g| g.estimate_candidates(df)).sum();
-                let c: u64 = children.iter().map(|p| p.estimate_candidates(df)).sum();
-                g.saturating_add(c).min(total)
-            },
-        }
-    }
-
     fn tune(&mut self, df: &dyn DfStats, stop_df: u64) {
         match self {
             Self::All | Self::None => {},
@@ -331,7 +303,7 @@ impl PlanExpr {
         }
         for need in needs {
             Self::delimit(f, &mut first, " ")?;
-            write!(f, "{need:?}")?;
+            write!(f, "{need}")?;
         }
         for child in children {
             Self::delimit(f, &mut first, " ")?;
@@ -353,7 +325,7 @@ impl PlanExpr {
         }
         for need in needs {
             Self::delimit(f, &mut first, "|")?;
-            write!(f, "{need:?}")?;
+            write!(f, "{need}")?;
         }
         for child in children {
             Self::delimit(f, &mut first, "|")?;
@@ -378,6 +350,40 @@ impl fmt::Display for QueryPlan {
     }
 }
 
+impl fmt::Display for ScanNeed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MinByteLen(n) => write!(f, "MinByteLen({n})"),
+            Self::MinLineCount(n) => write!(f, "MinLineCount({n})"),
+            Self::MinEmptyLineCount(n) => write!(f, "MinEmptyLineCount({n})"),
+            Self::MinLongestLineLen(n) => write!(f, "MinLongestLineLen({n})"),
+            Self::HasFlags(flags) => write!(f, "HasFlags({flags:?})"),
+            Self::ContainsAllBytes(bytes) => write!(f, "ContainsAllBytes({bytes:?})"),
+            Self::ContainsAnyByte(bytes) => write!(f, "ContainsAnyByte({bytes:?})"),
+            Self::MinByteCounts(counts) => write_byte_counts(f, counts),
+            Self::LineStartsWithAnyByte(bytes) => write!(f, "LineStartsWithAnyByte({bytes:?})"),
+            Self::LineEndsWithAnyByte(bytes) => write!(f, "LineEndsWithAnyByte({bytes:?})"),
+            Self::StartsWith(edge) => write!(f, "StartsWith({edge:?})"),
+            Self::EndsWith(edge) => write!(f, "EndsWith({edge:?})"),
+        }
+    }
+}
+
+fn write_byte_counts(f: &mut fmt::Formatter<'_>, counts: &SaturatingByteCounts256) -> fmt::Result {
+    f.write_str("MinByteCounts(")?;
+    let mut first = true;
+    for (byte, count) in counts
+        .counts
+        .iter()
+        .enumerate()
+        .filter(|&(_, &count)| count > 0)
+    {
+        PlanExpr::delimit(f, &mut first, ",")?;
+        write!(f, "{byte:#04x}:{count}")?;
+    }
+    f.write_str(")")
+}
+
 impl fmt::Display for PlanExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -399,6 +405,8 @@ impl fmt::Display for PlanExpr {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
@@ -433,5 +441,98 @@ mod tests {
 
     fn edge(bytes: &[u8]) -> EdgeBytes {
         EdgeBytes::from_slice(bytes)
+    }
+
+    struct MapDf {
+        counts: HashMap<GramKey, u64>,
+        total: u64,
+    }
+
+    impl DfStats for MapDf {
+        fn entry_count(&self, key: GramKey) -> u64 {
+            self.counts.get(&key).copied().unwrap_or(0)
+        }
+
+        fn total_entries(&self) -> u64 {
+            self.total
+        }
+    }
+
+    fn df_of(pairs: &[(GramKey, u64)], total: u64) -> MapDf {
+        MapDf {
+            counts: pairs.iter().copied().collect(),
+            total,
+        }
+    }
+
+    fn key(value: u64) -> GramKey {
+        GramKey(value)
+    }
+
+    #[test]
+    fn gram_estimates_bound_and_by_rarest_or_by_sum() {
+        let df = df_of(&[(key(1), 900), (key(2), 3)], 1000);
+        let and = PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(key(1)), GramNeedle::Key(key(2))],
+            needs: vec![],
+            children: vec![],
+        };
+        let or = PlanExpr::AnyOf {
+            grams: vec![GramNeedle::Key(key(1)), GramNeedle::Key(key(2))],
+            needs: vec![],
+            children: vec![],
+        };
+
+        assert_eq!(estimate_candidates(&and, &df), 3);
+        assert_eq!(estimate_candidates(&or, &df), 903);
+        assert_eq!(estimate_candidates(&PlanExpr::All, &df), 1000);
+        assert_eq!(estimate_candidates(&PlanExpr::None, &df), 0);
+    }
+
+    fn estimate_candidates(expr: &PlanExpr, df: &dyn DfStats) -> u64 {
+        let total = df.total_entries();
+        match expr {
+            PlanExpr::All => total,
+            PlanExpr::None => 0,
+            PlanExpr::AllOf {
+                grams, children, ..
+            } => estimate_all_candidates(grams, children, df),
+            PlanExpr::AnyOf {
+                grams, children, ..
+            } => estimate_any_candidates(grams, children, df),
+        }
+    }
+
+    fn estimate_all_candidates(
+        grams: &[GramNeedle],
+        children: &[PlanExpr],
+        df: &dyn DfStats,
+    ) -> u64 {
+        let grams = grams.iter().map(|gram| gram.estimate_candidates(df)).min();
+        let children = children
+            .iter()
+            .map(|child| estimate_candidates(child, df))
+            .min();
+        grams
+            .into_iter()
+            .chain(children)
+            .min()
+            .unwrap_or_else(|| df.total_entries())
+    }
+
+    fn estimate_any_candidates(
+        grams: &[GramNeedle],
+        children: &[PlanExpr],
+        df: &dyn DfStats,
+    ) -> u64 {
+        let grams = grams
+            .iter()
+            .map(|gram| gram.estimate_candidates(df))
+            .fold(0u64, u64::saturating_add);
+        let children = children
+            .iter()
+            .map(|child| estimate_candidates(child, df))
+            .fold(0u64, u64::saturating_add);
+        grams.saturating_add(children).min(df.total_entries())
     }
 }

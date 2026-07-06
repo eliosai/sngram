@@ -123,7 +123,7 @@ fn default_search_builds_and_uses_index() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("default indexed needle"));
-    assert!(fixture.path(".eg/index/postings-v4/manifest.bin").exists());
+    assert!(fixture.path(".eg/index/postings-v5/manifest.bin").exists());
 }
 
 #[cfg(unix)]
@@ -224,7 +224,7 @@ fn auto_index_refreshes_changed_files_without_full_rebuild() {
         String::from_utf8(first.stderr).unwrap()
     );
 
-    let marker = fixture.root.join(".eg/index/postings-v4/auto-marker");
+    let marker = fixture.root.join(".eg/index/postings-v5/auto-marker");
     fs::write(&marker, "keep").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
     fs::write(fixture.path("sample.txt"), "beta changed needle\n").unwrap();
@@ -256,6 +256,81 @@ fn auto_index_refreshes_changed_files_without_full_rebuild() {
     ]);
     assert_eq!(Some(1), stale.status.code());
     assert_eq!("", String::from_utf8(stale.stdout).unwrap());
+}
+
+#[test]
+fn auto_index_ignores_stale_base_postings_for_changed_files() {
+    let fixture = Fixture::new();
+    for i in 0..40 {
+        let bootstrap = if i == 0 { " bootstrap_unique" } else { "" };
+        fs::write(
+            fixture.path(format!("sample-{i}.txt")),
+            format!("zzzz_obsolete_token_zzzz file {i}{bootstrap}\n"),
+        )
+        .unwrap();
+    }
+
+    let first = eg(&[
+        "--index=rebuild",
+        "bootstrap_unique",
+        fixture.root.to_str().unwrap(),
+    ]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8(first.stderr).unwrap()
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    for i in 0..40 {
+        fs::write(
+            fixture.path(format!("sample-{i}.txt")),
+            format!("yyyy_fresh_token_yyyy file {i}\n"),
+        )
+        .unwrap();
+    }
+
+    let stale = eg(&[
+        "--debug",
+        "--index=auto",
+        "zzzz_obsolete_token_zzzz",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8(stale.stderr).unwrap();
+
+    assert_eq!(Some(1), stale.status.code(), "{stderr}");
+    assert_eq!("", String::from_utf8(stale.stdout).unwrap());
+    assert!(
+        stderr.contains("backend prepare+lookup produced 0 candidates"),
+        "stale postings should not inflate the candidate set: {stderr}"
+    );
+}
+
+#[test]
+fn indexed_byte_count_needs_prune_short_repetition_candidates() {
+    let fixture = Fixture::new();
+    for i in 0..40 {
+        fs::write(fixture.path(format!("short_{i:02}.txt")), "ababa\n").unwrap();
+    }
+    fs::write(fixture.path("hit.txt"), "ababababab\n").unwrap();
+
+    let output = eg(&[
+        "--debug",
+        "--index=rebuild",
+        "--files-with-matches",
+        "(ab){5}",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(output.status.success(), "{stderr}");
+    assert!(stdout.contains("hit.txt"), "{stdout}");
+    assert!(!stdout.contains("short_"), "{stdout}");
+    assert!(
+        stderr.contains("backend prepare+lookup produced 1 candidates"),
+        "summary byte-count needs should reject short near-misses before verification: {stderr}"
+    );
 }
 
 #[test]
@@ -606,13 +681,30 @@ fn indexed_broad_regex_errors_without_scan_fallback() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "alpha\n").unwrap();
 
-    let output = eg(&[".", fixture.root.to_str().unwrap()]);
+    let output = eg(&[".*", fixture.root.to_str().unwrap()]);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert_eq!(Some(2), output.status.code());
     assert!(stderr.contains("indexed search cannot use this pattern"));
     assert!(stderr.contains("too broad"));
     assert!(stderr.contains("--no-index"));
+}
+
+#[test]
+fn indexed_metadata_only_patterns_error_without_scan_fallback() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), "alpha beta ab\n").unwrap();
+
+    for pattern in [".", "[a-z]+", "ab"] {
+        let output = eg(&["--index=rebuild", pattern, fixture.root.to_str().unwrap()]);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+
+        assert_eq!(Some(2), output.status.code(), "{stderr}");
+        assert!(stderr.contains("indexed search cannot use this pattern"));
+        assert!(stderr.contains("too broad"));
+        assert!(stderr.contains("--no-index"));
+        assert_eq!("", String::from_utf8(output.stdout).unwrap());
+    }
 }
 
 #[test]
@@ -627,6 +719,108 @@ fn indexed_impossible_regex_errors_with_help() {
     assert!(stderr.contains("indexed search cannot use this pattern"));
     assert!(stderr.contains("cannot match"));
     assert!(stderr.contains("anchors"));
+}
+
+#[test]
+fn indexed_common_literal_over_ceiling_errors_without_verify() {
+    assert_common_literal_over_ceiling(&[]);
+}
+
+#[test]
+fn tantivy_common_literal_over_ceiling_errors_without_verify() {
+    assert_common_literal_over_ceiling(&["--index-backend=tantivy-ram"]);
+}
+
+fn assert_common_literal_over_ceiling(backend_args: &[&str]) {
+    let fixture = Fixture::new();
+    for i in 0..80 {
+        fs::write(
+            fixture.path(format!("sample_{i:02}.txt")),
+            format!("static int sample_{i:02};\n"),
+        )
+        .unwrap();
+    }
+
+    let mut args = vec!["--debug", "--index=rebuild", "--files-with-matches"];
+    args.extend_from_slice(backend_args);
+    args.extend_from_slice(&["static int", fixture.root.to_str().unwrap()]);
+    let output = eg(&args);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(2), output.status.code(), "{stderr}");
+    assert_eq!("", String::from_utf8(output.stdout).unwrap());
+    assert!(
+        stderr.contains("selects too much of the corpus"),
+        "common gram-backed plans should reject before verification: {stderr}"
+    );
+}
+
+#[test]
+fn postings_selectivity_ceiling_uses_text_entries_not_skipped_files() {
+    let fixture = Fixture::new();
+    for i in 0..40 {
+        fs::write(
+            fixture.path(format!("hit_{i:02}.txt")),
+            format!("static int selected_{i:02};\n"),
+        )
+        .unwrap();
+        fs::write(
+            fixture.path(format!("miss_{i:02}.txt")),
+            format!("plain text selected_{i:02};\n"),
+        )
+        .unwrap();
+    }
+    for i in 0..200 {
+        fs::write(
+            fixture.path(format!("binary_{i:03}.bin")),
+            [0, 159, 146, 150],
+        )
+        .unwrap();
+    }
+
+    let output = eg(&[
+        "--debug",
+        "--index=rebuild",
+        "--files-with-matches",
+        "static int",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(2), output.status.code(), "{stderr}");
+    assert_eq!("", String::from_utf8(output.stdout).unwrap());
+    assert!(
+        stderr.contains("actual candidates 40 of 80 docs exceeds 30%"),
+        "selectivity should be based on text entries, not skipped binary files: {stderr}"
+    );
+}
+
+#[test]
+fn indexed_broad_numeric_class_over_ceiling_errors_without_verify() {
+    let fixture = Fixture::new();
+    for i in 0..80 {
+        fs::write(
+            fixture.path(format!("sample_{i:02}.txt")),
+            format!("mask value 0x12345678 sample {i:02}\n"),
+        )
+        .unwrap();
+    }
+
+    let output = eg(&[
+        "--debug",
+        "--index=rebuild",
+        "--files-with-matches",
+        r"0x[0-9a-fA-F]{8}",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(Some(2), output.status.code(), "{stderr}");
+    assert_eq!("", String::from_utf8(output.stdout).unwrap());
+    assert!(
+        stderr.contains("selects too much of the corpus"),
+        "class-expanded numeric plans should stay estimate-rejected: {stderr}"
+    );
 }
 
 #[test]

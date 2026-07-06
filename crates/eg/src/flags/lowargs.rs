@@ -12,7 +12,7 @@ use {
     grep::printer::{HyperlinkFormat, UserColorSpec},
 };
 
-use crate::index::config::IndexConfig;
+use crate::index::IndexConfig;
 
 /// A collection of "low level" arguments.
 ///

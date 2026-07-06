@@ -42,7 +42,7 @@ impl IndexLocation {
 /// walk; only the XDG cache name canonicalizes it so placement is cwd-stable.
 pub(super) fn resolve(args: &HiArgs, corpus_root: &Path) -> anyhow::Result<IndexLocation> {
     let corpus_root = corpus_root.to_path_buf();
-    let state_root = args.index().dir.as_ref().map_or_else(
+    let state_root = args.index().dir().map_or_else(
         || default_state_root(&corpus_root),
         |dir| super::absolute_path(args.cwd(), dir),
     );

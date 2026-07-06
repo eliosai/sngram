@@ -2,7 +2,8 @@
 
 use regex_syntax::hir::Hir;
 use sngram_types::{
-    Gram, GramKey, GramNeedle, HashKey, PlanExpr, QueryError, QueryPlan, WeightTable,
+    Gram, GramKey, GramNeedle, HashKey, PlanExpr, QueryError, QueryPlan, SaturatingByteCounts256,
+    ScanNeed, WeightTable,
 };
 
 use super::{
@@ -43,7 +44,163 @@ impl<'a> QueryPlanner<'a> {
 
     fn plan_hir(&self, hir: &Hir, ctx: PlanContext) -> PlanExpr {
         let analyzer = Analyzer::with_context(self.table, ctx);
-        into_public_expr(analyzer.plan(hir), ctx.fold)
+        with_root_needs(
+            into_public_expr(analyzer.plan(hir), ctx.fold),
+            RootNeeds::from_hir(hir),
+        )
+    }
+}
+
+struct RootNeeds {
+    min_len: u64,
+    byte_counts: ByteCountNeed,
+}
+
+impl RootNeeds {
+    fn from_hir(hir: &Hir) -> Self {
+        Self {
+            min_len: min_match_len(hir),
+            byte_counts: ByteCountNeed::from_hir(hir),
+        }
+    }
+
+    fn into_vec(self) -> Vec<ScanNeed> {
+        let mut needs = Vec::with_capacity(2);
+        if self.min_len > 0 {
+            needs.push(ScanNeed::MinByteLen(self.min_len));
+        }
+        if let Some(need) = self.byte_counts.into_scan_need() {
+            needs.push(need);
+        }
+        needs
+    }
+}
+
+fn with_root_needs(expr: PlanExpr, needs: RootNeeds) -> PlanExpr {
+    let needs = needs.into_vec();
+    if needs.is_empty() || expr.is_none() {
+        return expr;
+    }
+    append_root_needs(expr, needs)
+}
+
+fn append_root_needs(expr: PlanExpr, new_needs: Vec<ScanNeed>) -> PlanExpr {
+    match expr {
+        PlanExpr::All => PlanExpr::AllOf {
+            grams: vec![],
+            needs: new_needs,
+            children: vec![],
+        },
+        PlanExpr::AllOf {
+            grams,
+            mut needs,
+            children,
+        } => {
+            needs.extend(new_needs);
+            PlanExpr::AllOf {
+                grams,
+                needs,
+                children,
+            }
+        },
+        other => PlanExpr::AllOf {
+            grams: vec![],
+            needs: new_needs,
+            children: vec![other],
+        },
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ByteCountNeed {
+    counts: SaturatingByteCounts256,
+}
+
+impl ByteCountNeed {
+    fn from_hir(hir: &Hir) -> Self {
+        use regex_syntax::hir::HirKind;
+
+        match hir.kind() {
+            HirKind::Empty | HirKind::Look(_) | HirKind::Class(_) => Self::default(),
+            HirKind::Literal(lit) => Self::from_literal(&lit.0),
+            HirKind::Repetition(rep) => Self::from_hir(&rep.sub).repeated(rep.min),
+            HirKind::Capture(capture) => Self::from_hir(&capture.sub),
+            HirKind::Concat(subs) => Self::from_concat(subs),
+            HirKind::Alternation(subs) => Self::from_alternation(subs),
+        }
+    }
+
+    fn from_literal(bytes: &[u8]) -> Self {
+        let mut need = Self::default();
+        for &byte in bytes {
+            need.counts.observe(byte);
+        }
+        need
+    }
+
+    fn from_concat(subs: &[Hir]) -> Self {
+        subs.iter()
+            .map(Self::from_hir)
+            .fold(Self::default(), |mut acc, need| {
+                acc.add(need);
+                acc
+            })
+    }
+
+    fn from_alternation(subs: &[Hir]) -> Self {
+        let Some((first, rest)) = subs.split_first() else {
+            return Self::default();
+        };
+        let mut acc = Self::from_hir(first);
+        for sub in rest {
+            acc.keep_branch_min(Self::from_hir(sub));
+        }
+        acc
+    }
+
+    fn repeated(mut self, min: u32) -> Self {
+        for count in &mut self.counts.counts {
+            *count = repeat_count(*count, min);
+        }
+        self
+    }
+
+    fn add(&mut self, other: Self) {
+        for (left, right) in self.counts.counts.iter_mut().zip(other.counts.counts) {
+            *left = left.saturating_add(right);
+        }
+    }
+
+    fn keep_branch_min(&mut self, other: Self) {
+        for (left, right) in self.counts.counts.iter_mut().zip(other.counts.counts) {
+            *left = (*left).min(right);
+        }
+    }
+
+    fn into_scan_need(self) -> Option<ScanNeed> {
+        (!self.counts.is_empty()).then_some(ScanNeed::MinByteCounts(Box::new(self.counts)))
+    }
+}
+
+fn repeat_count(count: u8, times: u32) -> u8 {
+    let product = u32::from(count).saturating_mul(times);
+    u8::try_from(product).unwrap_or(u8::MAX)
+}
+
+fn min_match_len(hir: &Hir) -> u64 {
+    use regex_syntax::hir::HirKind;
+
+    match hir.kind() {
+        HirKind::Empty | HirKind::Look(_) => 0,
+        HirKind::Literal(lit) => u64::try_from(lit.0.len()).unwrap_or(u64::MAX),
+        HirKind::Class(_) => 1,
+        HirKind::Repetition(rep) => u64::from(rep.min).saturating_mul(min_match_len(&rep.sub)),
+        HirKind::Capture(capture) => min_match_len(&capture.sub),
+        HirKind::Concat(subs) => subs
+            .iter()
+            .map(min_match_len)
+            .fold(0u64, u64::saturating_add),
+        HirKind::Alternation(subs) => subs.iter().map(min_match_len).min().unwrap_or(0),
     }
 }
 
@@ -98,7 +255,8 @@ mod tests {
     use std::collections::HashMap;
 
     use sngram_types::{
-        DfStats, GramKey, GramNeedle, HashKey, PlanExpr, QueryError, QueryPlan, WeightTable,
+        DfStats, GramKey, GramNeedle, HashKey, PlanExpr, QueryError, QueryPlan, ScanNeed,
+        WeightTable,
     };
 
     use crate::query::query;
@@ -134,6 +292,9 @@ mod tests {
             parts.push(bag.to_string());
         }
         parts.extend(children.iter().map(shape));
+        if parts.is_empty() {
+            return "+".to_string();
+        }
         if parts.len() == 1 {
             return parts.pop().expect("len 1");
         }
@@ -160,8 +321,32 @@ mod tests {
     #[test]
     fn broad_patterns_are_all() {
         assert!(plan_of(".*").is_all());
-        assert!(plan_of(r"[a-z]+").is_all());
-        assert!(plan_of("ab").is_all());
+        assert!(has_min_byte_len(plan_of(r"[a-z]+").root(), 1));
+        assert!(has_min_byte_len(plan_of("ab").root(), 2));
+    }
+
+    #[test]
+    fn planner_emits_minimum_byte_length_need() {
+        assert!(has_min_byte_len(plan_of(".").root(), 1));
+        assert!(has_min_byte_len(plan_of("abc").root(), 3));
+        assert!(has_min_byte_len(plan_of("abc|de").root(), 2));
+    }
+
+    #[test]
+    fn planner_emits_required_byte_counts() {
+        let repeated = plan_of("(ab){5}");
+        assert!(has_min_byte_count(repeated.root(), b'a', 5));
+        assert!(has_min_byte_count(repeated.root(), b'b', 5));
+
+        let version = plan_of(r"v[0-9]+\.[0-9]+\.[0-9]+");
+        assert!(has_min_byte_count(version.root(), b'.', 2));
+
+        let branch = plan_of("abcef|abdef");
+        for byte in b"abef" {
+            assert!(has_min_byte_count(branch.root(), *byte, 1));
+        }
+        assert!(!has_min_byte_count(branch.root(), b'c', 1));
+        assert!(!has_min_byte_count(branch.root(), b'd', 1));
     }
 
     #[test]
@@ -186,10 +371,7 @@ mod tests {
 
     #[test]
     fn alternation_and_repetition_keep_selective_constraints() {
-        assert!(matches!(
-            expr_of("(a+hello|b+world)"),
-            PlanExpr::AnyOf { .. }
-        ));
+        assert!(has_or(&expr_of("(a+hello|b+world)")));
         assert!(!expr_of("a{3,5}bcdef").is_all());
         assert!(!expr_of("foo[α-γ]bar").is_all());
         assert_eq!(expr_of("ab[cd]ef"), expr_of("abcef|abdef"));
@@ -227,6 +409,43 @@ mod tests {
         }
     }
 
+    fn has_min_byte_len(expr: &PlanExpr, len: u64) -> bool {
+        match expr {
+            PlanExpr::All | PlanExpr::None => false,
+            PlanExpr::AllOf {
+                needs, children, ..
+            }
+            | PlanExpr::AnyOf {
+                needs, children, ..
+            } => {
+                needs.contains(&ScanNeed::MinByteLen(len))
+                    || children.iter().any(|child| has_min_byte_len(child, len))
+            },
+        }
+    }
+
+    fn has_min_byte_count(expr: &PlanExpr, byte: u8, count: u8) -> bool {
+        match expr {
+            PlanExpr::All | PlanExpr::None => false,
+            PlanExpr::AllOf {
+                needs, children, ..
+            }
+            | PlanExpr::AnyOf {
+                needs, children, ..
+            } => {
+                needs.iter().any(|need| {
+                    matches!(
+                        need,
+                        ScanNeed::MinByteCounts(counts)
+                            if counts.counts[usize::from(byte)] >= count
+                    )
+                }) || children
+                    .iter()
+                    .any(|child| has_min_byte_count(child, byte, count))
+            },
+        }
+    }
+
     #[test]
     fn exact_base_repetition_above_cap_expands_to_literal() {
         assert_eq!(expr_of("ab{5}cd"), expr_of("abbbbbcd"));
@@ -247,7 +466,7 @@ mod tests {
 
     #[test]
     fn display_matches_codesearch_string_forms() {
-        assert_eq!(plan_of(".").to_string(), "+");
+        assert_eq!(plan_of(".").to_string(), "MinByteLen(1)");
         assert_eq!(plan_of(r"[^\s\S]").to_string(), "-");
         assert!(plan_of("(a+hello|b+world)").to_string().contains('|'));
     }
@@ -280,26 +499,6 @@ mod tests {
 
     fn plan(expr: PlanExpr) -> QueryPlan {
         QueryPlan::new(expr)
-    }
-
-    #[test]
-    fn estimate_bounds_and_by_rarest_and_or_by_sum() {
-        let and = plan(PlanExpr::AllOf {
-            grams: vec![GramNeedle::Key(key(b"abc")), GramNeedle::Key(key(b"xyz"))],
-            needs: vec![],
-            children: vec![],
-        });
-        let df = df_of(&[(b"abc", 900), (b"xyz", 3)], 1000);
-        assert_eq!(and.estimate_candidates(&df), 3);
-
-        let or = plan(PlanExpr::AnyOf {
-            grams: vec![GramNeedle::Key(key(b"abc")), GramNeedle::Key(key(b"xyz"))],
-            needs: vec![],
-            children: vec![],
-        });
-        assert_eq!(or.estimate_candidates(&df), 903);
-        assert_eq!(plan(PlanExpr::All).estimate_candidates(&df), 1000);
-        assert_eq!(plan(PlanExpr::None).estimate_candidates(&df), 0);
     }
 
     #[test]

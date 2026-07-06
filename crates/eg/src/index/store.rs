@@ -1,37 +1,28 @@
 //! Tantivy storage for sparse n-gram postings.
 
-use std::{
-    collections::BTreeSet,
-    fs::{self, File},
-    io::Cursor,
-    path::Path,
-    sync::mpsc,
-    thread,
-};
+use std::{collections::BTreeSet, fs, path::Path, sync::mpsc, thread};
 
 use anyhow::Context;
-use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
-use sngram_types::{DfStats, GramKey, QueryPlan, ScanError, ScanEvent, WeightTable};
+use sngram_types::{DfStats, GramKey, QueryPlan, WeightTable};
 use tantivy::{
     DocId, Index, Score, Searcher, SegmentOrdinal, SegmentReader, TantivyDocument, Term,
     collector::{Collector, SegmentCollector},
     fastfield::Column,
-    query::{BooleanQuery, Query, TermQuery},
+    query::TermQuery,
     schema::{FAST, Field, INDEXED, IndexRecordOption, STORED, Schema},
 };
 
-use crate::{
-    flags::HiArgs,
-    index::config::{IndexBackend, IndexMode},
-};
+use crate::flags::HiArgs;
 
 use super::{
+    document::IndexedDocument,
+    executor::{self, PlanBackend},
     manifest::{
         CurrentFile, CurrentSnapshot, Manifest, ManifestBackend, changed_ordinals, manifest_for,
         manifest_present, read_manifest, write_manifest,
     },
-    planner::plan_to_query,
+    summary::{self, DeltaSummaryMode, SummaryIndex},
 };
 
 const INDEX_DATA_DIR_NAME: &str = "tantivy";
@@ -43,6 +34,11 @@ const FIELD_FORCED_CANDIDATE: &str = "forced_candidate";
 const MIN_TANTIVY_THREAD_BUDGET: usize = 15_000_000;
 const TANTIVY_THREAD_BUDGET: usize = 64 * 1024 * 1024;
 
+pub(super) struct TantivyIndex {
+    index: Index,
+    summaries: SummaryIndex,
+}
+
 pub(super) fn prepare_index(
     args: &HiArgs,
     table_fingerprint: u64,
@@ -52,16 +48,21 @@ pub(super) fn prepare_index(
     index_home: &Path,
     snapshot: &CurrentSnapshot,
     loaded_manifest: Option<&Manifest>,
-) -> anyhow::Result<Index> {
-    if matches!(args.index().backend, IndexBackend::TantivyRam) {
+) -> anyhow::Result<TantivyIndex> {
+    if matches!(
+        args.index().backend(),
+        super::config::IndexBackend::TantivyRam
+    ) {
         return build_memory_index(args, table, schema, fields, &snapshot.files);
     }
-    match args.index().mode {
-        IndexMode::NoIndex => anyhow::bail!("internal error: indexed path used with --no-index"),
-        IndexMode::Verify | IndexMode::Repair => {
+    match args.index().mode() {
+        super::config::IndexMode::NoIndex => {
+            anyhow::bail!("internal error: indexed path used with --no-index")
+        },
+        super::config::IndexMode::Verify | super::config::IndexMode::Repair => {
             anyhow::bail!("internal error: maintenance mode reached prepare_index")
         },
-        IndexMode::Rebuild => rebuild_disk_index(
+        super::config::IndexMode::Rebuild => rebuild_disk_index(
             args,
             table_fingerprint,
             table,
@@ -70,7 +71,7 @@ pub(super) fn prepare_index(
             index_home,
             snapshot,
         ),
-        IndexMode::Auto | IndexMode::Require => auto_disk_index(
+        super::config::IndexMode::Auto | super::config::IndexMode::Require => auto_disk_index(
             args,
             table_fingerprint,
             table,
@@ -84,21 +85,24 @@ pub(super) fn prepare_index(
 }
 
 pub(super) fn query_index(
-    index: &Index,
+    index: &TantivyIndex,
     fields: IndexFields,
-    keyed: &super::planner::KeyedPlan,
+    index_plan: &super::planner::IndexPlan,
 ) -> anyhow::Result<Option<BTreeSet<usize>>> {
     let reader = index
+        .index
         .reader()
         .context("failed to open tantivy index reader")?;
     let searcher = reader.searcher();
-    let doc_count = searcher.num_docs();
-    let ceiling = super::postings::selectivity_ceiling(doc_count);
+    let text_count = index.summaries.text_count() as u64;
+    let ceiling = super::postings::selectivity_ceiling(text_count);
+    let can_refine_estimate = index_plan.has_root_gram_constraints();
     let df = TantivyDf {
         searcher: &searcher,
         fields,
+        text_count,
     };
-    let mut plan = keyed.plan.clone();
+    let mut plan = index_plan.plan.clone();
     let raw_grams = count_plan_grams(&plan);
     plan.tune(&df, ceiling);
     log::debug!(
@@ -109,44 +113,56 @@ pub(super) fn query_index(
     if plan.is_none() {
         return Ok(Some(BTreeSet::new()));
     }
-    let estimate = estimate_with_forced(&searcher, fields, &plan, &df);
+    let backend = TantivyPlanBackend {
+        searcher: &searcher,
+        fields,
+        summaries: &index.summaries,
+    };
+    let estimate = estimate_with_forced(&backend, &plan, &df)?;
     if estimate > ceiling {
+        if !can_refine_estimate
+            || estimate > super::postings::selectivity_refinement_ceiling(ceiling, text_count)
+        {
+            log::debug!(
+                "eg index query: estimate {estimate} of {text_count} text docs exceeds {}%; rejecting indexed query without scan fallback",
+                super::postings::SCAN_FALLBACK_PCT
+            );
+            return Ok(None);
+        }
         log::debug!(
-            "eg index query: estimate {estimate} of {doc_count} docs exceeds {}%; rejecting indexed query without scan fallback",
+            "eg index query: refining estimate {estimate} of {text_count} text docs with bounded sparse lookup"
+        );
+    }
+    let ords = executor::execute(&backend, &plan)?;
+    if ords.len() as u64 > ceiling {
+        log::debug!(
+            "eg index query: actual candidates {} of {text_count} text docs exceed {}%; rejecting indexed query without scan fallback",
+            ords.len(),
             super::postings::SCAN_FALLBACK_PCT
         );
         return Ok(None);
     }
-    let query = forced_candidate_query(fields, plan_to_query(fields.gram, &plan)?);
-    let ords = searcher
-        .search(&*query, &DocOrdCollector)
-        .context("failed to query sparse n-gram index")?;
-    ords.into_iter()
-        .map(u64_to_usize)
-        .collect::<anyhow::Result<BTreeSet<usize>>>()
-        .map(Some)
+    Ok(Some(ords.into_iter().collect()))
 }
 
 fn estimate_with_forced(
-    searcher: &Searcher,
-    fields: IndexFields,
+    backend: &TantivyPlanBackend<'_>,
     plan: &QueryPlan,
     df: &TantivyDf<'_>,
-) -> u64 {
+) -> anyhow::Result<u64> {
     if plan.is_none() {
-        return 0;
+        return Ok(0);
     }
-    let forced = searcher
-        .doc_freq(&Term::from_field_u64(fields.forced_candidate, 1))
-        .unwrap_or(0);
-    plan.estimate_candidates(df)
+    let forced = executor::estimate_forced_candidates(backend, plan)?;
+    Ok(executor::estimate_candidates(backend, plan, df)
         .saturating_add(forced)
-        .min(searcher.num_docs())
+        .min(backend.summaries.text_count() as u64))
 }
 
 struct TantivyDf<'a> {
     searcher: &'a Searcher,
     fields: IndexFields,
+    text_count: u64,
 }
 
 impl DfStats for TantivyDf<'_> {
@@ -157,7 +173,43 @@ impl DfStats for TantivyDf<'_> {
     }
 
     fn total_entries(&self) -> u64 {
-        self.searcher.num_docs()
+        self.text_count
+    }
+}
+
+struct TantivyPlanBackend<'a> {
+    searcher: &'a Searcher,
+    fields: IndexFields,
+    summaries: &'a SummaryIndex,
+}
+
+impl PlanBackend for TantivyPlanBackend<'_> {
+    fn summaries(&self) -> &SummaryIndex {
+        self.summaries
+    }
+
+    fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<usize>> {
+        self.lookup_term(Term::from_field_u64(self.fields.gram, key.value()))
+    }
+
+    fn forced_candidates(&self) -> anyhow::Result<Vec<usize>> {
+        self.lookup_term(Term::from_field_u64(self.fields.forced_candidate, 1))
+    }
+}
+
+impl TantivyPlanBackend<'_> {
+    fn lookup_term(&self, term: Term) -> anyhow::Result<Vec<usize>> {
+        let query = TermQuery::new(term, IndexRecordOption::Basic);
+        let mut ords = self
+            .searcher
+            .search(&query, &DocOrdCollector)
+            .context("failed to query sparse n-gram index")?
+            .into_iter()
+            .map(u64_to_usize)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        ords.sort_unstable();
+        ords.dedup();
+        Ok(ords)
     }
 }
 
@@ -191,7 +243,7 @@ fn auto_disk_index(
     index_home: &Path,
     snapshot: &CurrentSnapshot,
     loaded_manifest: Option<&Manifest>,
-) -> anyhow::Result<Index> {
+) -> anyhow::Result<TantivyIndex> {
     let data_dir = index_home.join(INDEX_DATA_DIR_NAME);
     let manifest_path = index_home.join(MANIFEST_FILE_NAME);
     if !data_dir.exists() || !manifest_present(&manifest_path) {
@@ -244,18 +296,24 @@ fn auto_disk_index(
         )
     })?;
     if changed_ordinals.is_empty() {
-        return Ok(index);
+        if let Some(summaries) = SummaryIndex::open(
+            &index_home.join(summary::SUMMARY_FILE_NAME),
+            &index_home.join(summary::DELTA_SUMMARY_FILE_NAME),
+            snapshot.files.len(),
+            DeltaSummaryMode::Absent,
+        )? {
+            return Ok(TantivyIndex { index, summaries });
+        }
     }
-    refresh_changed_files(
+    rebuild_disk_index(
         args,
+        table_fingerprint,
         table,
-        &index,
+        schema,
         fields,
-        &snapshot.files,
-        &changed_ordinals,
-    )?;
-    write_manifest(&manifest_path, &expected)?;
-    Ok(index)
+        index_home,
+        snapshot,
+    )
 }
 
 fn rebuild_disk_index(
@@ -266,7 +324,7 @@ fn rebuild_disk_index(
     fields: IndexFields,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
-) -> anyhow::Result<Index> {
+) -> anyhow::Result<TantivyIndex> {
     if index_home.exists() {
         fs::remove_dir_all(index_home)
             .with_context(|| format!("failed to remove old index at {}", index_home.display()))?;
@@ -276,12 +334,17 @@ fn rebuild_disk_index(
         .with_context(|| format!("failed to create index directory {}", data_dir.display()))?;
     let index = Index::create_in_dir(&data_dir, schema)
         .with_context(|| format!("failed to create tantivy index at {}", data_dir.display()))?;
-    add_all_documents(args, table, &index, fields, &snapshot.files)?;
+    let summaries = add_all_documents(args, table, &index, fields, &snapshot.files)?;
+    let mut records = summaries.clone();
+    summary::write_records(&index_home.join(summary::SUMMARY_FILE_NAME), &mut records)?;
     write_manifest(
         &index_home.join(MANIFEST_FILE_NAME),
         &manifest_for(ManifestBackend::Tantivy, table_fingerprint, snapshot),
     )?;
-    Ok(index)
+    Ok(TantivyIndex {
+        index,
+        summaries: SummaryIndex::from_records(summaries, snapshot.files.len())?,
+    })
 }
 
 fn build_memory_index(
@@ -290,10 +353,13 @@ fn build_memory_index(
     schema: Schema,
     fields: IndexFields,
     files: &[CurrentFile],
-) -> anyhow::Result<Index> {
+) -> anyhow::Result<TantivyIndex> {
     let index = Index::create_in_ram(schema);
-    add_all_documents(args, table, &index, fields, files)?;
-    Ok(index)
+    let summaries = add_all_documents(args, table, &index, fields, files)?;
+    Ok(TantivyIndex {
+        index,
+        summaries: SummaryIndex::from_records(summaries, files.len())?,
+    })
 }
 
 fn add_all_documents(
@@ -302,37 +368,11 @@ fn add_all_documents(
     index: &Index,
     fields: IndexFields,
     files: &[CurrentFile],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<summary::SummaryRecord>> {
     let writer = index_writer(args, index)?;
-    let writer = add_documents(args, table, writer, fields, files)?;
-    commit_writer(writer)
-}
-
-fn refresh_changed_files(
-    args: &HiArgs,
-    table: &WeightTable,
-    index: &Index,
-    fields: IndexFields,
-    files: &[CurrentFile],
-    changed_ordinals: &[usize],
-) -> anyhow::Result<()> {
-    let changed_files = changed_ordinals
-        .iter()
-        .map(|&ord| {
-            files
-                .get(ord)
-                .with_context(|| format!("manifest changed file ordinal {ord} is out of range"))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let writer = index_writer(args, index)?;
-    for &ord in changed_ordinals {
-        let Some(file) = files.get(ord) else {
-            anyhow::bail!("manifest changed file ordinal {ord} is out of range");
-        };
-        writer.delete_term(Term::from_field_u64(fields.path_hash, file.path_hash()));
-    }
-    let writer = add_document_refs(args, table, writer, fields, &changed_files)?;
-    commit_writer(writer)
+    let (writer, summaries) = add_documents(args, table, writer, fields, files)?;
+    commit_writer(writer)?;
+    Ok(summaries)
 }
 
 fn index_writer(
@@ -360,16 +400,25 @@ fn add_documents(
     writer: tantivy::IndexWriter<TantivyDocument>,
     fields: IndexFields,
     files: &[CurrentFile],
-) -> anyhow::Result<tantivy::IndexWriter<TantivyDocument>> {
+) -> anyhow::Result<(
+    tantivy::IndexWriter<TantivyDocument>,
+    Vec<summary::SummaryRecord>,
+)> {
     let use_mmap = args.index_mmap();
     let (sender, receiver) = mpsc::sync_channel(args.threads().clamp(1, 128) * 2);
     let writer_thread = thread::spawn(move || add_received_documents(writer, receiver));
+    let summaries = std::sync::Mutex::new(Vec::with_capacity(files.len()));
     let scan_result = files
         .par_iter()
         .try_for_each_with(sender.clone(), |sender, file| {
-            if let Some(file_grams) = scan_file(table, file, use_mmap)? {
+            let document = super::document::scan(table, file, use_mmap)?;
+            summaries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(document.summary);
+            if !document.is_skipped() {
                 sender
-                    .send(file_document(fields, &file_grams))
+                    .send(file_document(fields, &document))
                     .context("tantivy index writer stopped while receiving scanned documents")?;
             }
             anyhow::Ok(())
@@ -379,35 +428,10 @@ fn add_documents(
         .join()
         .map_err(|_| anyhow::anyhow!("tantivy index writer thread panicked"))??;
     scan_result?;
-    Ok(writer)
-}
-
-fn add_document_refs(
-    args: &HiArgs,
-    table: &WeightTable,
-    writer: tantivy::IndexWriter<TantivyDocument>,
-    fields: IndexFields,
-    files: &[&CurrentFile],
-) -> anyhow::Result<tantivy::IndexWriter<TantivyDocument>> {
-    let use_mmap = args.index_mmap();
-    let (sender, receiver) = mpsc::sync_channel(args.threads().clamp(1, 128) * 2);
-    let writer_thread = thread::spawn(move || add_received_documents(writer, receiver));
-    let scan_result = files
-        .par_iter()
-        .try_for_each_with(sender.clone(), |sender, file| {
-            if let Some(file_grams) = scan_file(table, file, use_mmap)? {
-                sender
-                    .send(file_document(fields, &file_grams))
-                    .context("tantivy index writer stopped while receiving scanned documents")?;
-            }
-            anyhow::Ok(())
-        });
-    drop(sender);
-    let writer = writer_thread
-        .join()
-        .map_err(|_| anyhow::anyhow!("tantivy index writer thread panicked"))??;
-    scan_result?;
-    Ok(writer)
+    let summaries = summaries
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok((writer, summaries))
 }
 
 fn add_received_documents(
@@ -420,111 +444,9 @@ fn add_received_documents(
     Ok(writer)
 }
 
-fn scan_file(
-    table: &WeightTable,
-    file: &CurrentFile,
-    use_mmap: bool,
-) -> anyhow::Result<Option<FileGrams>> {
-    let len = fs::metadata(&file.path)
-        .with_context(|| format!("failed to stat {} for indexing", file.path.display()))?
-        .len();
-    if len == 0 {
-        return Ok(Some(file_grams(file, false, Vec::new())));
-    }
-    if super::classify::is_oversized(len) {
-        return Ok(Some(file_grams(file, true, Vec::new())));
-    }
-    let bytes = read_file(&file.path, use_mmap)?;
-    let bytes = bytes.as_ref();
-    if super::classify::is_binary(bytes) {
-        return Ok(None);
-    }
-    let mut forced_candidate = super::classify::has_decoding_bom(bytes);
-    if forced_candidate {
-        return Ok(Some(file_grams(file, true, Vec::new())));
-    }
-    let mut hashes = Vec::new();
-    let scan = sngram::scan(table, Cursor::new(bytes), |event| {
-        if let ScanEvent::Gram(gram) = event {
-            hashes.push(gram.key.value());
-        }
-    });
-    if matches!(scan, Err(ScanError::Binary)) {
-        return Ok(None);
-    }
-    scan?;
-    hashes.sort_unstable();
-    hashes.dedup();
-    let hashes = if super::classify::is_high_entropy(bytes.len(), hashes.len()) {
-        forced_candidate = true;
-        Vec::new()
-    } else {
-        hashes
-    };
-    Ok(Some(file_grams(file, forced_candidate, hashes)))
-}
-
-fn file_grams(file: &CurrentFile, forced_candidate: bool, hashes: Vec<u64>) -> FileGrams {
-    FileGrams {
-        ord: file.ord,
-        path_hash: file.path_hash(),
-        forced_candidate,
-        hashes,
-    }
-}
-
-fn read_file(path: &Path, use_mmap: bool) -> anyhow::Result<FileBytes> {
-    if use_mmap {
-        mmap_file(path).map(FileBytes::Mmap)
-    } else {
-        fs::read(path)
-            .map(FileBytes::Owned)
-            .with_context(|| format!("failed to read {} for indexing", path.display()))
-    }
-}
-
-#[allow(unsafe_code)]
-fn mmap_file(path: &Path) -> anyhow::Result<Mmap> {
-    let file = File::open(path)
-        .with_context(|| format!("failed to open {} for mmap indexing", path.display()))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("failed to stat {} for mmap indexing", path.display()))?;
-    if metadata.len() == 0 {
-        anyhow::bail!("indexed search cannot mmap empty file {}", path.display());
-    }
-    // SAFETY: The map is read-only and scoped to this indexing worker. eg never
-    // mutates the mapped file; concurrent external truncation has the same OS
-    // caveat as ripgrep mmap search and is treated as an indexing-time failure.
-    unsafe { MmapOptions::new().map(&file) }
-        .with_context(|| format!("failed to mmap {} for indexing", path.display()))
-}
-
-enum FileBytes {
-    Mmap(Mmap),
-    Owned(Vec<u8>),
-}
-
-impl AsRef<[u8]> for FileBytes {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::Mmap(bytes) => bytes,
-            Self::Owned(bytes) => bytes,
-        }
-    }
-}
-
-fn forced_candidate_query(fields: IndexFields, query: Box<dyn Query>) -> Box<dyn Query> {
-    let forced: Box<dyn Query> = Box::new(TermQuery::new(
-        Term::from_field_u64(fields.forced_candidate, 1),
-        IndexRecordOption::Basic,
-    ));
-    Box::new(BooleanQuery::union(vec![query, forced]))
-}
-
-fn file_document(fields: IndexFields, file: &FileGrams) -> TantivyDocument {
+fn file_document(fields: IndexFields, file: &IndexedDocument) -> TantivyDocument {
     let mut document = TantivyDocument::default();
-    document.add_u64(fields.doc_ord, file.ord as u64);
+    document.add_u64(fields.doc_ord, u64::from(file.ord));
     document.add_u64(fields.path_hash, file.path_hash);
     if file.forced_candidate {
         document.add_u64(fields.forced_candidate, 1);
@@ -545,13 +467,6 @@ pub(super) struct IndexFields {
     doc_ord: Field,
     path_hash: Field,
     forced_candidate: Field,
-}
-
-struct FileGrams {
-    ord: usize,
-    path_hash: u64,
-    forced_candidate: bool,
-    hashes: Vec<u64>,
 }
 
 struct DocOrdCollector;

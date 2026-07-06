@@ -1,14 +1,16 @@
 //! Sparse n-gram index integration.
 
-pub(crate) mod backend;
-pub(crate) mod config;
-
+mod backend;
 mod classify;
+mod config;
+mod document;
+mod executor;
 mod location;
 mod manifest;
 mod planner;
 mod postings;
 mod store;
+mod summary;
 
 use std::{
     collections::BTreeSet,
@@ -16,8 +18,8 @@ use std::{
     mem,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+        Mutex,
     },
     time::Instant,
 };
@@ -28,15 +30,16 @@ use sngram_types::{PlanExpr, QueryError, QueryPlan};
 use crate::{
     flags::{HiArgs, Mode, SearchMode},
     haystack::Haystack,
-    index::config::IndexBackend,
 };
 
+pub use config::IndexConfig;
+
 /// Run an indexed search.
-pub(crate) fn run(args: &HiArgs) -> anyhow::Result<bool> {
+pub fn run(args: &HiArgs) -> anyhow::Result<bool> {
     let Mode::Search(mode) = args.mode() else {
         bail!("indexed mode only supports search");
     };
-    if args.index().mode.is_maintenance() {
+    if args.index().is_maintenance() {
         return maintenance(args);
     }
     if let Some(reason) = unsupported_reason(args, mode) {
@@ -51,14 +54,14 @@ pub(crate) fn run(args: &HiArgs) -> anyhow::Result<bool> {
     let started_at = Instant::now();
     log::debug!(
         "eg index: mode={:?} backend={:?} threads={}",
-        args.index().mode,
-        args.index().backend,
+        args.index().mode(),
+        args.index().backend(),
         args.threads()
     );
-    if !matches!(args.index().backend, IndexBackend::Postings) {
+    if !matches!(args.index().backend(), config::IndexBackend::Postings) {
         log::debug!(
             "eg index: the {:?} backend is experimental and unsupported; prefer --index-backend postings",
-            args.index().backend
+            args.index().backend()
         );
     }
     let table = sngram_weights::weights();
@@ -85,6 +88,9 @@ pub(crate) fn run(args: &HiArgs) -> anyhow::Result<bool> {
         PlanExpr::All => return unsupported(Unsupported::TooBroadPattern),
         PlanExpr::None => return unsupported(Unsupported::ImpossiblePattern),
         PlanExpr::AllOf { .. } | PlanExpr::AnyOf { .. } => {},
+    }
+    if !plan.has_gram_constraints() {
+        return unsupported(Unsupported::TooBroadPattern);
     }
     let location = location::resolve(args, &index_root(args)?)?;
     let index_dir = location.index_dir();
@@ -145,12 +151,12 @@ fn backend_candidates(
     index_dir: &Path,
     snapshot: &manifest::CurrentSnapshot,
     loaded_manifest: Option<&manifest::Manifest>,
-    plan: &planner::KeyedPlan,
+    plan: &planner::IndexPlan,
 ) -> anyhow::Result<Option<BTreeSet<usize>>> {
     let prepare_started_at = Instant::now();
-    let candidates = match args.index().backend {
-        IndexBackend::Postings => {
-            let index_home = index_dir.join("postings-v4");
+    let candidates = match args.index().backend() {
+        config::IndexBackend::Postings => {
+            let index_home = index_dir.join("postings-v5");
             let index = postings::prepare_index(
                 args,
                 table_fingerprint,
@@ -164,8 +170,8 @@ fn backend_candidates(
             };
             candidates
         },
-        IndexBackend::Tantivy | IndexBackend::TantivyRam => {
-            let index_home = index_dir.join("tantivy-v1");
+        config::IndexBackend::Tantivy | config::IndexBackend::TantivyRam => {
+            let index_home = index_dir.join("tantivy-v2");
             let (schema, fields) = store::schema();
             let index = store::prepare_index(
                 args,
@@ -305,10 +311,10 @@ fn warn_large_implicit_build(
 
 /// Return true when a compatible-form index manifest already exists.
 fn index_present(args: &HiArgs, index_dir: &Path) -> bool {
-    let manifest = match args.index().backend {
-        IndexBackend::Postings => index_dir.join("postings-v4/manifest.json"),
-        IndexBackend::Tantivy => index_dir.join("tantivy-v1/manifest.json"),
-        IndexBackend::TantivyRam => return false,
+    let manifest = match args.index().backend() {
+        config::IndexBackend::Postings => index_dir.join("postings-v5/manifest.json"),
+        config::IndexBackend::Tantivy => index_dir.join("tantivy-v2/manifest.json"),
+        config::IndexBackend::TantivyRam => return false,
     };
     manifest::manifest_present(&manifest)
 }
@@ -336,13 +342,13 @@ fn maintenance(args: &HiArgs) -> anyhow::Result<bool> {
     let table_fingerprint = table.fingerprint();
     let location = location::resolve(args, &index_root(args)?)?;
     let index_dir = location.index_dir();
-    if !matches!(args.index().backend, IndexBackend::Postings) {
+    if !matches!(args.index().backend(), config::IndexBackend::Postings) {
         report_line(
             "eg index verify: only the postings backend is verifiable (tantivy is experimental)",
         );
-        return Ok(true);
+        return Ok(false);
     }
-    let index_home = index_dir.join("postings-v4");
+    let index_home = index_dir.join("postings-v5");
     let report = postings::verify_index(&index_home, table_fingerprint)?;
     for line in report.lines() {
         report_line(&line);
@@ -351,7 +357,7 @@ fn maintenance(args: &HiArgs) -> anyhow::Result<bool> {
         report_line("eg index verify: index is healthy");
         return Ok(true);
     }
-    if matches!(args.index().mode, config::IndexMode::Repair) {
+    if matches!(args.index().mode(), config::IndexMode::Repair) {
         report_line("eg index repair: fault found, rebuilding");
         rebuild_for_repair(args, table_fingerprint, &table, &location, &index_home)?;
         report_line("eg index repair: rebuild complete");
@@ -393,22 +399,22 @@ fn try_fast_snapshot(
     index_dir: &Path,
 ) -> anyhow::Result<Option<(manifest::CurrentSnapshot, Option<manifest::Manifest>)>> {
     if !matches!(
-        args.index().mode,
+        args.index().mode(),
         config::IndexMode::Auto | config::IndexMode::Require
-    ) || matches!(args.index().backend, IndexBackend::TantivyRam)
+    ) || matches!(args.index().backend(), config::IndexBackend::TantivyRam)
     {
         return Ok(None);
     }
-    let (backend, manifest_path) = match args.index().backend {
-        IndexBackend::Postings => (
+    let (backend, manifest_path) = match args.index().backend() {
+        config::IndexBackend::Postings => (
             manifest::ManifestBackend::Postings,
-            index_dir.join("postings-v4/manifest.json"),
+            index_dir.join("postings-v5/manifest.json"),
         ),
-        IndexBackend::Tantivy => (
+        config::IndexBackend::Tantivy => (
             manifest::ManifestBackend::Tantivy,
-            index_dir.join("tantivy-v1/manifest.json"),
+            index_dir.join("tantivy-v2/manifest.json"),
         ),
-        IndexBackend::TantivyRam => return Ok(None),
+        config::IndexBackend::TantivyRam => return Ok(None),
     };
     let manifest_read_started_at = Instant::now();
     let Some(old) = manifest::read_manifest(&manifest_path)? else {
@@ -838,7 +844,7 @@ struct CollectedHaystacks {
 mod tests {
     use sngram_types::{QueryPlan, WeightTable};
 
-    use super::{DEBUG_PLAN_PREVIEW_BYTES, debug_plan};
+    use super::{debug_plan, DEBUG_PLAN_PREVIEW_BYTES};
 
     fn table() -> WeightTable {
         WeightTable::from_weight_fn(|c1, c2| {

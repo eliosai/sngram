@@ -13,11 +13,11 @@ use anyhow::{Context, bail};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::{flags::HiArgs, haystack::Haystack, index::config::IndexFreshness};
+use crate::{flags::HiArgs, haystack::Haystack};
 
 const MANIFEST_VERSION: u32 = 6;
-const TANTIVY_SCHEMA_VERSION: u32 = 3;
-const POSTINGS_SCHEMA_VERSION: u32 = 6;
+const TANTIVY_SCHEMA_VERSION: u32 = 4;
+const POSTINGS_SCHEMA_VERSION: u32 = 7;
 const TANTIVY_BACKEND: &str = "tantivy";
 const POSTINGS_BACKEND: &str = "postings";
 const TANTIVY_COMPAT_VERSION: &str = "0.26.1";
@@ -70,7 +70,7 @@ pub(super) fn current_snapshot(
     let mut hashes = HashSet::with_capacity(haystacks.len());
     let mut files = Vec::with_capacity(haystacks.len());
     let mut dirs = BTreeMap::new();
-    let freshness = args.index_freshness();
+    let freshness = args.index().freshness();
     let git_untracked = git_untracked_paths(args, index_root)?;
     for dir in dir_paths {
         insert_dir(
@@ -646,7 +646,7 @@ fn current_file_from_manifest(
     if !metadata.is_file() {
         return Ok(None);
     }
-    let content_hash = content_freshness_hash(args.index_freshness(), &absolute, metadata.len());
+    let content_hash = content_freshness_hash(args.index().freshness(), &absolute, metadata.len());
     let skipped_binary = super::classify::is_binary_path(&absolute).with_context(|| {
         format!(
             "failed to classify {} for index freshness",
@@ -923,7 +923,11 @@ fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
 }
 
 /// Content hash for hash freshness, or `None` for stat freshness.
-fn content_freshness_hash(freshness: IndexFreshness, path: &Path, len: u64) -> Option<u64> {
+fn content_freshness_hash(
+    freshness: super::config::IndexFreshness,
+    path: &Path,
+    len: u64,
+) -> Option<u64> {
     if freshness.is_hash() {
         content_hash(path, len)
     } else {

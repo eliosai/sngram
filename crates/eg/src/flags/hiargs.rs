@@ -20,7 +20,7 @@ use crate::{
         Mode, PatternSource, SearchMode, SortMode, SortModeKind, TypeChange,
     },
     haystack::{Haystack, HaystackBuilder},
-    index::config::IndexConfig,
+    index::IndexConfig,
     search::{PatternMatcher, Printer, SearchWorker, SearchWorkerBuilder},
 };
 
@@ -376,10 +376,6 @@ impl HiArgs {
     }
 
     /// Return the selected freshness policy for the index.
-    pub(crate) fn index_freshness(&self) -> crate::index::config::IndexFreshness {
-        self.index.freshness
-    }
-
     /// Return one regex pattern with eg's CLI semantics encoded as inline
     /// regex flags and alternation. `None` means indexed prefiltering is not
     /// sound for this search mode.
@@ -1299,7 +1295,7 @@ impl Patterns {
         if !matches!(low.mode, Mode::Search(_)) {
             return Ok(Patterns { patterns: vec![] });
         }
-        if low.index.mode.is_maintenance() && low.patterns.is_empty() {
+        if low.index.is_maintenance() && low.patterns.is_empty() {
             return Ok(Patterns { patterns: vec![] });
         }
         // If we got nothing from -e/--regexp and -f/--file, then the first

@@ -2,13 +2,15 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, BinaryHeap, HashMap},
+    collections::{BTreeSet, BinaryHeap},
     fs::{self, File, TryLockError},
-    io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
+    io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     mem,
     path::{Path, PathBuf},
-    rc::Rc,
-    sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    },
     time::{Duration, Instant},
 };
 
@@ -16,15 +18,17 @@ use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 
-use sngram_types::{
-    DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanError, ScanEvent, WeightTable,
-};
+use sngram_types::{DfStats, GramKey, QueryPlan, WeightTable};
 
 use crate::flags::HiArgs;
 
 use super::manifest::{
     CurrentFile, CurrentSnapshot, Manifest, ManifestBackend, changed_ordinals, is_compatible,
     manifest_for, manifest_present, read_manifest, remove_manifest, write_manifest,
+};
+use super::{
+    executor::{self, PlanBackend},
+    summary::{self, DeltaSummaryMode, SummaryIndex, SummaryRecord},
 };
 
 const MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -43,9 +47,7 @@ const TABLE_MAGIC: [u8; 8] = *b"EGTABL1\0";
 const POSTINGS_MAGIC: [u8; 8] = *b"EGPOST1\0";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-/// Table record layout: hash (8 bytes) then posting-list length (4 bytes).
-/// The posting-list byte offset is not stored; it is the prefix sum of the
-/// preceding lengths, reconstructed once when a segment opens.
+/// Table record layout: hash, posting-list byte offset, then posting-list length.
 const TABLE_RECORD_SIZE: usize = 20;
 const POSTING_SIZE: usize = 4;
 const RUN_PAIR_SIZE: usize = 12;
@@ -57,6 +59,8 @@ const MAX_DELTA_FILES: usize = 4096;
 const FORCED_CANDIDATE_HASH: u64 = u64::MAX;
 /// Files scanned between index-build progress lines under `--debug`.
 const BUILD_PROGRESS_EVERY: usize = 20_000;
+/// Allow one exact sparse lookup pass for mildly pessimistic estimates.
+const SELECTIVITY_REFINE_MULTIPLIER: u64 = 2;
 
 pub(super) fn prepare_index(
     args: &HiArgs,
@@ -66,7 +70,7 @@ pub(super) fn prepare_index(
     snapshot: &CurrentSnapshot,
     loaded_manifest: Option<&Manifest>,
 ) -> anyhow::Result<PostingsIndex> {
-    match args.index().mode {
+    match args.index().mode() {
         super::config::IndexMode::NoIndex => {
             anyhow::bail!("internal error: indexed path used with --no-index")
         },
@@ -96,12 +100,14 @@ const MIN_SELECTIVITY_CEILING: u64 = 32;
 /// `None` means the plan is too unselective for the index — scan instead.
 pub(super) fn query_index(
     index: &PostingsIndex,
-    keyed: &super::planner::KeyedPlan,
+    index_plan: &super::planner::IndexPlan,
 ) -> anyhow::Result<Option<BTreeSet<usize>>> {
     let started_at = Instant::now();
     let df = PostingsDf { index };
-    let ceiling = selectivity_ceiling(index.doc_count as u64);
-    let mut plan = keyed.plan.clone();
+    let text_count = index.summaries.text_count() as u64;
+    let ceiling = selectivity_ceiling(text_count);
+    let can_refine_estimate = index_plan.has_root_gram_constraints();
+    let mut plan = index_plan.plan.clone();
     let raw_grams = count_plan_grams(&plan);
     plan.tune(&df, ceiling);
     log::debug!(
@@ -119,16 +125,28 @@ pub(super) fn query_index(
     }
     let estimate = estimate_with_forced(index, &plan, &df)?;
     if estimate > ceiling {
+        if !can_refine_estimate || estimate > selectivity_refinement_ceiling(ceiling, text_count) {
+            log::debug!(
+                "eg index query: estimate {estimate} of {} docs exceeds {SCAN_FALLBACK_PCT}%; rejecting indexed query without scan fallback",
+                text_count
+            );
+            return Ok(None);
+        }
         log::debug!(
-            "eg index query: estimate {estimate} of {} docs exceeds {SCAN_FALLBACK_PCT}%; rejecting indexed query without scan fallback",
-            index.doc_count
+            "eg index query: refining estimate {estimate} of {} docs with bounded sparse lookup",
+            text_count
+        );
+    }
+    let lookup_started_at = Instant::now();
+    let candidates = executor::execute(index, &plan)?;
+    if candidates.len() as u64 > ceiling {
+        log::debug!(
+            "eg index query: actual candidates {} of {} docs exceeds {SCAN_FALLBACK_PCT}%; rejecting indexed query without scan fallback",
+            candidates.len(),
+            text_count
         );
         return Ok(None);
     }
-    let lookup_started_at = Instant::now();
-    let tuned = super::planner::KeyedPlan { plan };
-    let mut candidates = eval_plan(index, &tuned)?;
-    candidates = union_sorted(candidates, index.lookup(FORCED_CANDIDATE_HASH)?);
     log::debug!(
         "eg index query: postings candidates={} lookup_time={:?} total_query_time={:?}",
         candidates.len(),
@@ -151,6 +169,12 @@ pub(super) fn selectivity_ceiling(doc_count: u64) -> u64 {
         .min(doc_count)
 }
 
+pub(super) fn selectivity_refinement_ceiling(ceiling: u64, doc_count: u64) -> u64 {
+    ceiling
+        .saturating_mul(SELECTIVITY_REFINE_MULTIPLIER)
+        .min(doc_count)
+}
+
 /// Estimated verification set, including files deliberately forced through
 /// exact matching because they have no gram postings.
 fn estimate_with_forced(
@@ -161,11 +185,10 @@ fn estimate_with_forced(
     if plan.is_none() {
         return Ok(0);
     }
-    let forced = index.posting_len(FORCED_CANDIDATE_HASH)? as u64;
-    Ok(plan
-        .estimate_candidates(df)
+    let forced = executor::estimate_forced_candidates(index, plan)?;
+    Ok(executor::estimate_candidates(index, plan, df)
         .saturating_add(forced)
-        .min(index.doc_count as u64))
+        .min(index.summaries.text_count() as u64))
 }
 
 /// Posting-list lengths as document-frequency priors.
@@ -179,7 +202,7 @@ impl DfStats for PostingsDf<'_> {
     }
 
     fn total_entries(&self) -> u64 {
-        self.index.doc_count as u64
+        self.index.summaries.text_count() as u64
     }
 }
 
@@ -215,7 +238,7 @@ fn auto_index(
     };
     if changed.is_empty() {
         remove_delta(index_home)?;
-        return open_or_rebuild(args, table_fingerprint, table, index_home, snapshot, false);
+        return open_or_rebuild(args, table_fingerprint, table, index_home, snapshot, None);
     }
     if changed.len() > MAX_DELTA_FILES {
         log::debug!(
@@ -233,7 +256,14 @@ fn auto_index(
         return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
     }
     build_delta_if_stale(args, table, index_home, snapshot, &changed, &expected)?;
-    open_or_rebuild(args, table_fingerprint, table, index_home, snapshot, true)
+    open_or_rebuild(
+        args,
+        table_fingerprint,
+        table,
+        index_home,
+        snapshot,
+        Some(&changed),
+    )
 }
 
 /// Fraction of the base file count a delta may reach before it is folded into
@@ -264,6 +294,8 @@ fn build_delta_if_stale(
     let delta_manifest_path = index_home.join(DELTA_MANIFEST_FILE_NAME);
     let delta_ready = index_home.join(DELTA_TABLE_FILE_NAME).exists()
         && index_home.join(DELTA_POSTINGS_FILE_NAME).exists()
+        && index_home.join(summary::DELTA_SUMMARY_FILE_NAME).exists()
+        && summary::verify_ordinals(&index_home.join(summary::DELTA_SUMMARY_FILE_NAME), changed)?
         && read_manifest(&delta_manifest_path)?
             .as_ref()
             .is_some_and(|manifest| changed_ordinals(manifest, expected) == Some(Vec::new()));
@@ -287,6 +319,7 @@ fn build_delta_if_stale(
         &changed_files,
         DELTA_TABLE_FILE_NAME,
         DELTA_POSTINGS_FILE_NAME,
+        summary::DELTA_SUMMARY_FILE_NAME,
     )?;
     write_manifest(&delta_manifest_path, expected)?;
     fsync_dir(index_home)?;
@@ -300,9 +333,10 @@ fn open_or_rebuild(
     table: &WeightTable,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
-    delta: bool,
+    changed_ordinals: Option<&[usize]>,
 ) -> anyhow::Result<PostingsIndex> {
-    let Some(index) = PostingsIndex::open(index_home, snapshot.files.len(), delta)? else {
+    let Some(index) = PostingsIndex::open(index_home, snapshot.files.len(), changed_ordinals)?
+    else {
         log::debug!(
             "eg index: corrupt index at {}, rebuilding",
             index_home.display()
@@ -333,6 +367,7 @@ fn rebuild_index(
         &file_refs,
         TABLE_FILE_NAME,
         POSTINGS_FILE_NAME,
+        summary::SUMMARY_FILE_NAME,
     )?;
     write_manifest(
         &staging.join(MANIFEST_FILE_NAME),
@@ -340,7 +375,7 @@ fn rebuild_index(
     )?;
     fsync_dir(&staging)?;
     swap_in(&staging, index_home)?;
-    PostingsIndex::open(index_home, snapshot.files.len(), false)?
+    PostingsIndex::open(index_home, snapshot.files.len(), None)?
         .with_context(|| format!("index at {} corrupt after rebuild", index_home.display()))
 }
 
@@ -383,8 +418,11 @@ pub(super) fn verify_index(
     table_fingerprint: u64,
 ) -> anyhow::Result<VerifyReport> {
     let mut checks = Vec::new();
-    match read_manifest(&index_home.join(MANIFEST_FILE_NAME))? {
+    let mut manifest_file_count = None;
+    let base_manifest = read_manifest(&index_home.join(MANIFEST_FILE_NAME))?;
+    match &base_manifest {
         Some(manifest) => {
+            manifest_file_count = Some(manifest.file_count());
             checks.push(("manifest present and parses".to_owned(), true));
             checks.push((
                 "manifest matches the selected weight table".to_owned(),
@@ -402,7 +440,14 @@ pub(super) fn verify_index(
         "base sections verify (magic, version, checksum, layout)".to_owned(),
         base_ok,
     ));
-    verify_delta(index_home, &mut checks)?;
+    checks.push((
+        "base summaries verify".to_owned(),
+        summary::verify(
+            &index_home.join(summary::SUMMARY_FILE_NAME),
+            manifest_file_count,
+        )?,
+    ));
+    verify_delta(index_home, base_manifest.as_ref(), &mut checks)?;
     checks.push((
         "no orphaned run directory".to_owned(),
         !index_home.join(RUNS_DIR_NAME).exists(),
@@ -414,25 +459,47 @@ pub(super) fn verify_index(
     Ok(VerifyReport { checks })
 }
 
-/// Add delta-segment checks: complete when all three files are present and the
+/// Add delta-segment checks: complete when all four files are present and the
 /// sections verify, absent when none are, torn otherwise.
-fn verify_delta(index_home: &Path, checks: &mut Vec<(String, bool)>) -> anyhow::Result<()> {
+fn verify_delta(
+    index_home: &Path,
+    base_manifest: Option<&Manifest>,
+    checks: &mut Vec<(String, bool)>,
+) -> anyhow::Result<()> {
     let manifest = manifest_present(&index_home.join(DELTA_MANIFEST_FILE_NAME));
     let table = index_home.join(DELTA_TABLE_FILE_NAME).exists();
     let postings = index_home.join(DELTA_POSTINGS_FILE_NAME).exists();
-    if !manifest && !table && !postings {
+    let summaries = index_home.join(summary::DELTA_SUMMARY_FILE_NAME).exists();
+    if !manifest && !table && !postings && !summaries {
         return Ok(());
     }
-    if !(manifest && table && postings) {
+    if !(manifest && table && postings && summaries) {
         checks.push(("delta segment is complete".to_owned(), false));
         return Ok(());
     }
+    let delta_manifest = read_manifest(&index_home.join(DELTA_MANIFEST_FILE_NAME))?;
+    checks.push((
+        "delta manifest present and parses".to_owned(),
+        delta_manifest.is_some(),
+    ));
+    let changed = base_manifest
+        .zip(delta_manifest.as_ref())
+        .and_then(|(base, delta)| changed_ordinals(base, delta));
+    checks.push((
+        "delta manifest is compatible with base manifest".to_owned(),
+        changed.is_some(),
+    ));
     let delta_ok = Segment::open(
         &index_home.join(DELTA_TABLE_FILE_NAME),
         &index_home.join(DELTA_POSTINGS_FILE_NAME),
     )?
     .is_some();
     checks.push(("delta sections verify".to_owned(), delta_ok));
+    let changed = changed.unwrap_or_default();
+    checks.push((
+        "delta summaries cover changed ordinals".to_owned(),
+        summary::verify_ordinals(&index_home.join(summary::DELTA_SUMMARY_FILE_NAME), &changed)?,
+    ));
     Ok(())
 }
 
@@ -516,8 +583,9 @@ fn sweep_orphans(index_home: &Path) -> anyhow::Result<()> {
     remove_dir_all_if_exists(&index_home.join(RUNS_DIR_NAME))?;
     let present = u8::from(manifest_present(&index_home.join(DELTA_MANIFEST_FILE_NAME)))
         + u8::from(index_home.join(DELTA_TABLE_FILE_NAME).exists())
-        + u8::from(index_home.join(DELTA_POSTINGS_FILE_NAME).exists());
-    if present != 0 && present != 3 {
+        + u8::from(index_home.join(DELTA_POSTINGS_FILE_NAME).exists())
+        + u8::from(index_home.join(summary::DELTA_SUMMARY_FILE_NAME).exists());
+    if present != 0 && present != 4 {
         log::debug!("eg index: sweeping torn delta in {}", index_home.display());
         remove_delta(index_home)?;
     }
@@ -561,6 +629,7 @@ fn build_files(
     files: &[&CurrentFile],
     table_name: &str,
     postings_name: &str,
+    summary_name: &str,
 ) -> anyhow::Result<()> {
     let started_at = Instant::now();
     let pair_budget = pairs_per_run(args.threads());
@@ -599,6 +668,8 @@ fn build_files(
         })?;
     let scan_elapsed = scan_started_at.elapsed();
     let run_count = next_run.load(AtomicOrdering::Relaxed);
+    let mut summaries = stats.take_summaries();
+    summary::write_records(&index_home.join(summary_name), &mut summaries)?;
     log::debug!("eg index build: scan phase done in {scan_elapsed:?}; merging {run_count} runs",);
     let merge_started_at = Instant::now();
     merge_runs(
@@ -669,69 +740,25 @@ fn scan_file_pairs(
     stats
         .bytes
         .fetch_add(usize_len(len), AtomicOrdering::Relaxed);
-    if len == 0 {
+    let document = super::document::scan(table, file, use_mmap)?;
+    stats.push_summary(document.summary);
+    if document.is_skipped() {
         return Ok(());
     }
-    let ord = u32::try_from(file.ord).context("indexed document ordinal does not fit in u32")?;
-    if super::classify::is_oversized(len) {
-        log::debug!(
-            "eg index: forcing oversized file {} ({len} bytes) as candidate",
-            file.path.display()
-        );
-        push_forced(pairs, ord, stats);
+    if document.forced_candidate {
+        push_forced(pairs, document.ord, stats);
         return Ok(());
     }
-    let bytes = read_file(&file.path, use_mmap)?;
-    classify_and_collect(table, bytes.as_ref(), ord, pairs, stats)?;
-    Ok(())
-}
-
-/// Emit grams for a readable text file, forcing encoded/high-entropy files.
-fn classify_and_collect(
-    table: &WeightTable,
-    bytes: &[u8],
-    ord: u32,
-    pairs: &mut Vec<Pair>,
-    stats: &BuildStats,
-) -> anyhow::Result<()> {
-    if super::classify::is_binary(bytes) {
-        return Ok(());
-    }
-    let mut forced = super::classify::has_decoding_bom(bytes);
-    if forced {
-        push_forced(pairs, ord, stats);
-        return Ok(());
-    }
-    let mut emitted = 0usize;
-    let mut hashes = Vec::new();
-    let scan = sngram::scan(table, Cursor::new(bytes), |event| {
-        if let ScanEvent::Gram(gram) = event {
-            emitted += 1;
-            hashes.push(gram.key.value());
-        }
-    });
-    if matches!(scan, Err(ScanError::Binary)) {
-        return Ok(());
-    }
-    scan?;
-    hashes.sort_unstable();
-    hashes.dedup();
-    if super::classify::is_high_entropy(bytes.len(), hashes.len()) {
-        forced = true;
-    }
-    let mut hashes = if forced {
-        push_forced(pairs, ord, stats);
-        Vec::new()
-    } else {
-        hashes
-    };
-    if !forced {
-        hashes.dedup();
-    }
-    let selected = hashes.len();
-    pairs.extend(hashes.into_iter().map(|hash| Pair { hash, ord }));
-    stats.emitted.fetch_add(emitted, AtomicOrdering::Relaxed);
-    stats.selected.fetch_add(selected, AtomicOrdering::Relaxed);
+    stats
+        .emitted
+        .fetch_add(document.emitted_grams(), AtomicOrdering::Relaxed);
+    stats
+        .selected
+        .fetch_add(document.hashes.len(), AtomicOrdering::Relaxed);
+    pairs.extend(document.hashes.into_iter().map(|hash| Pair {
+        hash,
+        ord: document.ord,
+    }));
     Ok(())
 }
 
@@ -874,7 +901,11 @@ fn file_len(path: &Path) -> anyhow::Result<u64> {
 
 fn remove_delta(index_home: &Path) -> anyhow::Result<()> {
     remove_manifest(&index_home.join(DELTA_MANIFEST_FILE_NAME))?;
-    for name in [DELTA_TABLE_FILE_NAME, DELTA_POSTINGS_FILE_NAME] {
+    for name in [
+        DELTA_TABLE_FILE_NAME,
+        DELTA_POSTINGS_FILE_NAME,
+        summary::DELTA_SUMMARY_FILE_NAME,
+    ] {
         let path = index_home.join(name);
         match fs::remove_file(&path) {
             Ok(()) => {},
@@ -888,208 +919,24 @@ fn remove_delta(index_home: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_file(path: &Path, use_mmap: bool) -> anyhow::Result<FileBytes> {
-    if use_mmap {
-        mmap_file(path).map(FileBytes::Mmap)
-    } else {
-        fs::read(path)
-            .map(FileBytes::Owned)
-            .with_context(|| format!("failed to read {} for indexing", path.display()))
-    }
-}
-
-#[allow(unsafe_code)]
-fn mmap_file(path: &Path) -> anyhow::Result<Mmap> {
-    let file = File::open(path)
-        .with_context(|| format!("failed to open {} for mmap indexing", path.display()))?;
-    unsafe { MmapOptions::new().map(&file) }
-        .with_context(|| format!("failed to mmap {} for indexing", path.display()))
-}
-
-enum FileBytes {
-    Mmap(Mmap),
-    Owned(Vec<u8>),
-}
-
-impl AsRef<[u8]> for FileBytes {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::Mmap(bytes) => bytes,
-            Self::Owned(bytes) => bytes,
-        }
-    }
-}
-
 fn count_plan_grams(plan: &QueryPlan) -> usize {
     plan.gram_count()
-}
-
-/// Posting lists shared between plan nodes: case-folded plans repeat the
-/// same gram across many OR branches, so each unique gram is fetched and
-/// decoded once per query.
-type PostingCache = HashMap<u64, Rc<Vec<usize>>>;
-
-fn eval_plan(
-    index: &PostingsIndex,
-    keyed: &super::planner::KeyedPlan,
-) -> anyhow::Result<Vec<usize>> {
-    let mut cache = PostingCache::new();
-    eval_plan_cached(index, &keyed.plan, &mut cache)
-}
-
-fn lookup_cached(
-    index: &PostingsIndex,
-    cache: &mut PostingCache,
-    hash: u64,
-) -> anyhow::Result<Rc<Vec<usize>>> {
-    if let Some(list) = cache.get(&hash) {
-        return Ok(Rc::clone(list));
-    }
-    let list = Rc::new(index.lookup(hash)?);
-    cache.insert(hash, Rc::clone(&list));
-    Ok(list)
-}
-
-fn eval_plan_cached(
-    index: &PostingsIndex,
-    plan: &QueryPlan,
-    cache: &mut PostingCache,
-) -> anyhow::Result<Vec<usize>> {
-    eval_expr_cached(index, plan.root(), cache)
-}
-
-fn eval_expr_cached(
-    index: &PostingsIndex,
-    expr: &PlanExpr,
-    cache: &mut PostingCache,
-) -> anyhow::Result<Vec<usize>> {
-    match expr {
-        PlanExpr::All => {
-            anyhow::bail!("indexed query has no sparse n-gram constraints; use --no-index")
-        },
-        PlanExpr::None => Ok(Vec::new()),
-        PlanExpr::AllOf {
-            grams, children, ..
-        } => {
-            let mut lists = Vec::with_capacity(grams.len() + children.len());
-            for needle in grams {
-                lists.push(Rc::new(eval_needle_cached(index, needle, cache)?));
-            }
-            for expr in children {
-                lists.push(Rc::new(eval_expr_cached(index, expr, cache)?));
-            }
-            intersect_all_sorted(index.doc_count, lists)
-        },
-        PlanExpr::AnyOf {
-            grams, children, ..
-        } => {
-            // Concatenate every branch then sort+dedup once: folding the
-            // union pairwise re-walks the accumulator per branch, quadratic
-            // in branch count for the wide ORs case-folded plans build.
-            let mut acc = Vec::new();
-            for needle in grams {
-                acc.extend(eval_needle_cached(index, needle, cache)?);
-            }
-            for expr in children {
-                acc.extend(eval_expr_cached(index, expr, cache)?);
-            }
-            acc.sort_unstable();
-            acc.dedup();
-            Ok(acc)
-        },
-    }
-}
-
-fn eval_needle_cached(
-    index: &PostingsIndex,
-    needle: &GramNeedle,
-    cache: &mut PostingCache,
-) -> anyhow::Result<Vec<usize>> {
-    let mut acc = Vec::new();
-    for key in needle.keys() {
-        acc.extend_from_slice(&lookup_cached(index, cache, key.value())?);
-    }
-    acc.sort_unstable();
-    acc.dedup();
-    Ok(acc)
-}
-
-fn intersect_all_sorted(
-    doc_count: usize,
-    mut lists: Vec<Rc<Vec<usize>>>,
-) -> anyhow::Result<Vec<usize>> {
-    lists.sort_by_key(|list| list.len());
-    let mut iter = lists.into_iter();
-    let Some(first) = iter.next() else {
-        return Ok((0..doc_count).collect());
-    };
-    let mut acc = first.as_ref().clone();
-    for list in iter {
-        acc = intersect_sorted(&acc, &list);
-        if acc.is_empty() {
-            break;
-        }
-    }
-    Ok(acc)
-}
-
-fn intersect_sorted(left: &[usize], right: &[usize]) -> Vec<usize> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    let mut j = 0;
-    while i < left.len() && j < right.len() {
-        match left[i].cmp(&right[j]) {
-            Ordering::Less => i += 1,
-            Ordering::Greater => j += 1,
-            Ordering::Equal => {
-                out.push(left[i]);
-                i += 1;
-                j += 1;
-            },
-        }
-    }
-    out
-}
-
-fn union_sorted(left: Vec<usize>, right: Vec<usize>) -> Vec<usize> {
-    union_sorted_ref(&left, &right)
-}
-
-fn union_sorted_ref(left: &[usize], right: &[usize]) -> Vec<usize> {
-    let mut out = Vec::with_capacity(left.len() + right.len());
-    let mut i = 0;
-    let mut j = 0;
-    while i < left.len() && j < right.len() {
-        match left[i].cmp(&right[j]) {
-            Ordering::Less => {
-                out.push(left[i]);
-                i += 1;
-            },
-            Ordering::Greater => {
-                out.push(right[j]);
-                j += 1;
-            },
-            Ordering::Equal => {
-                out.push(left[i]);
-                i += 1;
-                j += 1;
-            },
-        }
-    }
-    out.extend_from_slice(&left[i..]);
-    out.extend_from_slice(&right[j..]);
-    out
 }
 
 pub(super) struct PostingsIndex {
     base: Segment,
     delta: Option<Segment>,
-    doc_count: usize,
+    summaries: SummaryIndex,
+    changed_ordinals: Vec<usize>,
 }
 
 impl PostingsIndex {
     /// Open the index, returning `None` when a segment is missing or corrupt.
-    fn open(index_home: &Path, doc_count: usize, delta: bool) -> anyhow::Result<Option<Self>> {
+    fn open(
+        index_home: &Path,
+        doc_count: usize,
+        changed_ordinals: Option<&[usize]>,
+    ) -> anyhow::Result<Option<Self>> {
         let Some(base) = Segment::open(
             &index_home.join(TABLE_FILE_NAME),
             &index_home.join(POSTINGS_FILE_NAME),
@@ -1097,7 +944,7 @@ impl PostingsIndex {
         else {
             return Ok(None);
         };
-        let delta = if delta {
+        let delta = if changed_ordinals.is_some() {
             match Segment::open(
                 &index_home.join(DELTA_TABLE_FILE_NAME),
                 &index_home.join(DELTA_POSTINGS_FILE_NAME),
@@ -1108,28 +955,64 @@ impl PostingsIndex {
         } else {
             None
         };
+        let delta_mode = changed_ordinals.map_or(DeltaSummaryMode::Absent, |ordinals| {
+            DeltaSummaryMode::ChangedOrdinals(ordinals)
+        });
+        let Some(summaries) = SummaryIndex::open(
+            &index_home.join(summary::SUMMARY_FILE_NAME),
+            &index_home.join(summary::DELTA_SUMMARY_FILE_NAME),
+            doc_count,
+            delta_mode,
+        )?
+        else {
+            return Ok(None);
+        };
         Ok(Some(Self {
             base,
             delta,
-            doc_count,
+            summaries,
+            changed_ordinals: changed_ordinals.unwrap_or_default().to_vec(),
         }))
     }
 
     fn lookup(&self, hash: u64) -> anyhow::Result<Vec<usize>> {
-        let mut out = self.base.lookup(hash)?;
+        let mut out = self.live_base_lookup(hash)?;
         if let Some(delta) = &self.delta {
-            out = union_sorted(out, delta.lookup(hash)?);
+            out = executor::union_sorted(out, delta.lookup(hash)?);
         }
         Ok(out)
     }
 
     /// Posting-list length without decoding: the df prior for the cost model.
     fn posting_len(&self, hash: u64) -> anyhow::Result<usize> {
-        let mut len = self.base.posting_len(hash)?;
-        if let Some(delta) = &self.delta {
-            len += delta.posting_len(hash)?;
-        }
-        Ok(len)
+        Ok(self.lookup(hash)?.len())
+    }
+
+    fn live_base_lookup(&self, hash: u64) -> anyhow::Result<Vec<usize>> {
+        let mut out = self.base.lookup(hash)?;
+        remove_changed_ordinals(&mut out, &self.changed_ordinals);
+        Ok(out)
+    }
+}
+
+fn remove_changed_ordinals(ordinals: &mut Vec<usize>, changed_ordinals: &[usize]) {
+    if changed_ordinals.is_empty() {
+        return;
+    }
+    ordinals.retain(|ord| changed_ordinals.binary_search(ord).is_err());
+}
+
+impl PlanBackend for PostingsIndex {
+    fn summaries(&self) -> &SummaryIndex {
+        &self.summaries
+    }
+
+    fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<usize>> {
+        self.lookup(key.value())
+    }
+
+    fn forced_candidates(&self) -> anyhow::Result<Vec<usize>> {
+        self.lookup(FORCED_CANDIDATE_HASH)
     }
 }
 
@@ -1156,15 +1039,6 @@ impl Segment {
 
     fn postings_body(&self) -> &[u8] {
         self.postings.get(SECTION_HEADER_SIZE..).unwrap_or_default()
-    }
-
-    /// List length from the table record alone, no posting decode.
-    fn posting_len(&self, hash: u64) -> anyhow::Result<usize> {
-        let table = self.table_body();
-        match find_record(table, hash)? {
-            Some((_, len)) => usize::try_from(len).context("posting length does not fit in usize"),
-            None => Ok(0),
-        }
     }
 
     fn lookup(&self, hash: u64) -> anyhow::Result<Vec<usize>> {
@@ -1488,6 +1362,25 @@ struct BuildStats {
     forced: AtomicUsize,
     runs: AtomicUsize,
     run_bytes: AtomicUsize,
+    summaries: Mutex<Vec<SummaryRecord>>,
+}
+
+impl BuildStats {
+    fn push_summary(&self, record: SummaryRecord) {
+        self.summaries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(record);
+    }
+
+    fn take_summaries(&self) -> Vec<SummaryRecord> {
+        std::mem::take(
+            &mut *self
+                .summaries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1533,8 +1426,8 @@ impl PartialOrd for HeapItem {
 mod tests {
     use super::{
         FNV_OFFSET, POSTING_SIZE, POSTINGS_MAGIC, SECTION_HEADER_SIZE, TABLE_MAGIC,
-        TABLE_RECORD_SIZE, delta_should_fold, find_record, fnv1a_state, intersect_sorted,
-        sampled_checksum, section_header, suffixed_path, union_sorted_ref, verify_section,
+        TABLE_RECORD_SIZE, delta_should_fold, find_record, fnv1a_state, remove_changed_ordinals,
+        sampled_checksum, section_header, suffixed_path, verify_section,
     };
     use std::path::Path;
 
@@ -1573,15 +1466,11 @@ mod tests {
     }
 
     #[test]
-    fn sorted_list_ops_handle_empty_inputs_and_tail_boundaries() {
-        assert_eq!(intersect_sorted(&[], &[1, 2]), Vec::<usize>::new());
-        assert_eq!(intersect_sorted(&[1, 2, 4, 8], &[0, 2, 8, 9]), vec![2, 8]);
-        assert_eq!(union_sorted_ref(&[], &[1, 3]), vec![1, 3]);
-        assert_eq!(union_sorted_ref(&[1, 4], &[]), vec![1, 4]);
-        assert_eq!(
-            union_sorted_ref(&[1, 2, 8], &[0, 2, 9]),
-            vec![0, 1, 2, 8, 9]
-        );
+    fn changed_ordinals_are_removed_from_base_postings() {
+        let mut ords = vec![0, 1, 2, 3, 4, 5];
+        remove_changed_ordinals(&mut ords, &[1, 4]);
+
+        assert_eq!(ords, vec![0, 2, 3, 5]);
     }
 
     fn framed(magic: [u8; 8], record_size: usize, records: usize) -> Vec<u8> {

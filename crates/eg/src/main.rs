@@ -104,7 +104,7 @@ fn run(result: crate::flags::ParseResult<HiArgs>) -> anyhow::Result<ExitCode> {
         ParseResult::Ok(args) => args,
     };
     let matched = match args.mode() {
-        Mode::Search(_) if !args.index().mode.is_no_index() => index::run(&args)?,
+        Mode::Search(_) if !args.index().is_no_index() => index::run(&args)?,
         Mode::Search(_) if !args.matches_possible() => false,
         Mode::Search(mode) if args.threads() == 1 => search(&args, mode)?,
         Mode::Search(mode) => search_parallel(&args, mode)?,

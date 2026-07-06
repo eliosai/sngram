@@ -21,6 +21,8 @@ use std::{path::PathBuf, sync::LazyLock};
 
 use {anyhow::Context as AnyhowContext, bstr::ByteVec};
 
+#[cfg(test)]
+use crate::flags::parse::parse_low_raw;
 use crate::flags::{
     Category, Flag, FlagValue,
     lowargs::{
@@ -29,10 +31,6 @@ use crate::flags::{
         SearchMode, SortMode, SortModeKind, SpecialMode, TypeChange,
     },
 };
-use crate::index::config::{IndexBackend, IndexFreshness, IndexMode};
-
-#[cfg(test)]
-use crate::flags::parse::parse_low_raw;
 
 use super::CompletionType;
 
@@ -3377,16 +3375,16 @@ impl Flag for Index {
 Use eg's sparse n-gram index before ripgrep verifies matches. The supported
 modes are \fBauto\fP, which uses an existing compatible index, \fBrebuild\fP,
 which rebuilds the index before searching, and \fBrequire\fP, which behaves
-like \fBauto\fP but errors on a query the index cannot serve instead of
-falling back to an unindexed scan.
+like \fBauto\fP for index preparation while preserving indexed-search errors.
 .sp
 Two maintenance modes do not search: \fBverify\fP checks the on-disk index for
 structural faults (section headers, sampled checksums, manifest cross-check,
 and orphaned files) and reports, and \fBrepair\fP runs the same checks and
 rebuilds the index when a fault is found. Both ignore any pattern argument.
 .sp
-By default an unindexable query (for example a very short pattern, an inverted
-match, or a stdin pipe) transparently falls back to the unindexed scan path.
+An unindexable query (for example a very short pattern, an inverted match, or
+a stdin pipe) errors with an explanation. Pass \fB--no-index\fP when you want
+the copied ripgrep scan path instead.
 "
     }
     fn doc_choices(&self) -> &'static [&'static str] {
@@ -3394,17 +3392,7 @@ match, or a stdin pipe) transparently falls back to the unindexed scan path.
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.index.mode = match convert::str(&v.unwrap_value())? {
-            "auto" => IndexMode::Auto,
-            "rebuild" => IndexMode::Rebuild,
-            "require" => IndexMode::Require,
-            "verify" => IndexMode::Verify,
-            "repair" => IndexMode::Repair,
-            other => anyhow::bail!(
-                "unrecognized index mode '{other}', expected auto, rebuild, require, verify or repair"
-            ),
-        };
-        Ok(())
+        args.index.set_mode(convert::str(&v.unwrap_value())?)
     }
 }
 
@@ -3442,10 +3430,7 @@ eg automatically falls back to a per-corpus directory under the XDG cache home
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.index.dir = Some(PathBuf::from(v.unwrap_value()));
-        if args.index.mode.is_no_index() {
-            args.index.mode = IndexMode::Auto;
-        }
+        args.index.set_dir(PathBuf::from(v.unwrap_value()));
         Ok(())
     }
 }
@@ -3453,12 +3438,8 @@ eg automatically falls back to a per-corpus directory under the XDG cache home
 #[cfg(test)]
 #[test]
 fn test_index_mode_require() {
-    let args = parse_low_raw(["--index", "require"]).unwrap();
-    assert_eq!(IndexMode::Require, args.index.mode);
-
-    let args = parse_low_raw(["--index", "rebuild"]).unwrap();
-    assert_eq!(IndexMode::Rebuild, args.index.mode);
-
+    parse_low_raw(["--index", "require"]).unwrap();
+    parse_low_raw(["--index", "rebuild"]).unwrap();
     assert!(parse_low_raw(["--index", "nonsense"]).is_err());
 }
 
@@ -3466,23 +3447,20 @@ fn test_index_mode_require() {
 #[test]
 fn test_index_dir() {
     let args = parse_low_raw(None::<&str>).unwrap();
-    assert_eq!(None, args.index.dir);
+    assert_eq!(None, args.index.dir());
 
     let args = parse_low_raw(["--index-dir", "/tmp/eg-index"]).unwrap();
-    assert_eq!(Some(PathBuf::from("/tmp/eg-index")), args.index.dir);
+    assert_eq!(Some(&PathBuf::from("/tmp/eg-index")), args.index.dir());
 
     let args = parse_low_raw(["--no-index", "--index-dir", "/tmp/eg-index"]).unwrap();
-    assert_eq!(IndexMode::Auto, args.index.mode);
+    assert!(!args.index.is_no_index());
 }
 
 #[cfg(test)]
 #[test]
 fn test_index_mode_maintenance() {
-    let args = parse_low_raw(["--index", "verify"]).unwrap();
-    assert_eq!(IndexMode::Verify, args.index.mode);
-
-    let args = parse_low_raw(["--index", "repair"]).unwrap();
-    assert_eq!(IndexMode::Repair, args.index.mode);
+    parse_low_raw(["--index", "verify"]).unwrap();
+    parse_low_raw(["--index", "repair"]).unwrap();
 }
 
 /// --index-freshness
@@ -3520,29 +3498,14 @@ each candidate file during the freshness check, so it is slower than stat.
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.index.freshness = match convert::str(&v.unwrap_value())? {
-            "stat" => IndexFreshness::Stat,
-            "hash" => IndexFreshness::Hash,
-            other => {
-                anyhow::bail!("unrecognized index freshness '{other}', expected stat or hash")
-            },
-        };
-        if args.index.mode.is_no_index() {
-            args.index.mode = IndexMode::Auto;
-        }
-        Ok(())
+        args.index.set_freshness(convert::str(&v.unwrap_value())?)
     }
 }
 
 #[cfg(test)]
 #[test]
 fn test_index_freshness() {
-    let args = parse_low_raw(None::<&str>).unwrap();
-    assert_eq!(IndexFreshness::Stat, args.index.freshness);
-
-    let args = parse_low_raw(["--index-freshness", "hash"]).unwrap();
-    assert_eq!(IndexFreshness::Hash, args.index.freshness);
-
+    parse_low_raw(["--index-freshness", "hash"]).unwrap();
     assert!(parse_low_raw(["--index-freshness", "nonsense"]).is_err());
 }
 
@@ -3584,18 +3547,7 @@ semantics, and are excluded from eg's default and maintenance paths. Prefer
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.index.backend = match convert::str(&v.unwrap_value())? {
-            "postings" => IndexBackend::Postings,
-            "tantivy" => IndexBackend::Tantivy,
-            "tantivy-ram" => IndexBackend::TantivyRam,
-            other => anyhow::bail!(
-                "unrecognized index backend '{other}', expected postings, tantivy or tantivy-ram"
-            ),
-        };
-        if args.index.mode.is_no_index() {
-            args.index.mode = IndexMode::Auto;
-        }
-        Ok(())
+        args.index.set_backend(convert::str(&v.unwrap_value())?)
     }
 }
 
@@ -4823,7 +4775,7 @@ directly.
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         if v.unwrap_switch() {
-            args.index.mode = IndexMode::NoIndex;
+            args.index.disable();
         }
         Ok(())
     }
