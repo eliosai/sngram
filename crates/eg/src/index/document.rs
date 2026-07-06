@@ -15,20 +15,20 @@ use super::{
     summary::{SummaryRecord, SummaryStatus},
 };
 
-pub(super) struct IndexedDocument {
-    pub(super) ord: u32,
-    pub(super) path_hash: u64,
-    pub(super) forced_candidate: bool,
-    pub(super) hashes: Vec<u64>,
-    pub(super) summary: SummaryRecord,
+pub struct IndexedDocument {
+    pub ord: u32,
+    pub path_hash: u64,
+    pub forced_candidate: bool,
+    pub hashes: Vec<u64>,
+    pub summary: SummaryRecord,
 }
 
 impl IndexedDocument {
-    pub(super) const fn is_skipped(&self) -> bool {
+    pub const fn is_skipped(&self) -> bool {
         matches!(self.summary.status(), SummaryStatus::Skipped)
     }
 
-    pub(super) const fn emitted_grams(&self) -> usize {
+    pub const fn emitted_grams(&self) -> usize {
         match self.summary.status() {
             SummaryStatus::Known(summary) => summary.gram_count as usize,
             SummaryStatus::Skipped | SummaryStatus::UnknownText => 0,
@@ -36,7 +36,7 @@ impl IndexedDocument {
     }
 }
 
-pub(super) fn scan(
+pub fn scan(
     table: &WeightTable,
     file: &CurrentFile,
     use_mmap: bool,

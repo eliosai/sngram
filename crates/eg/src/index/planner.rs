@@ -8,16 +8,16 @@ use crate::flags::HiArgs;
 use super::request::Unsupported;
 
 /// A query plan plus eg-specific execution predicates.
-pub(super) struct IndexPlan {
-    pub(super) plan: QueryPlan,
+pub struct IndexPlan {
+    pub plan: QueryPlan,
 }
 
 impl IndexPlan {
-    pub(super) fn has_gram_constraints(&self) -> bool {
+    pub fn has_gram_constraints(&self) -> bool {
         self.plan.gram_count() > 0
     }
 
-    pub(super) fn has_root_gram_constraints(&self) -> bool {
+    pub fn has_root_gram_constraints(&self) -> bool {
         match self.plan.root() {
             sngram_types::PlanExpr::All | sngram_types::PlanExpr::None => false,
             sngram_types::PlanExpr::AllOf { grams, .. }
@@ -69,7 +69,7 @@ impl From<anyhow::Error> for PlanError {
     }
 }
 
-pub(super) fn query_plan(args: &HiArgs, table: &WeightTable) -> anyhow::Result<IndexPlan> {
+pub fn query_plan(args: &HiArgs, table: &WeightTable) -> anyhow::Result<IndexPlan> {
     if args.patterns().is_empty() {
         bail!("indexed search requires at least one pattern");
     }

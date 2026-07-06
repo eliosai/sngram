@@ -7,7 +7,10 @@ use std::{
 
 use crate::flags::HiArgs;
 
-use super::{bench, catalog::ReadyGeneration, config, location::IndexLocation, manifest, planner};
+use super::{
+    backend::CandidateQuery, bench, catalog::ReadyGeneration, config, location::IndexLocation,
+    manifest, planner,
+};
 
 pub struct Generation {
     location: IndexLocation,
@@ -47,11 +50,13 @@ impl Generation {
     pub fn is_cold_build(&self, args: &HiArgs, index_dir: &Path) -> bool {
         matches!(args.index().mode(), config::IndexMode::Rebuild)
             || self.source == "cold_build"
-            || !super::index_present(args, index_dir)
+            || !index_present(args, index_dir)
     }
 
-    pub fn bench_source(&self, cold_build: bool) -> &'static str {
-        if cold_build {
+    pub fn bench_source(&self, args: &HiArgs, cold_build: bool) -> &'static str {
+        if matches!(args.index().mode(), config::IndexMode::Rebuild) {
+            "rebuild"
+        } else if cold_build {
             "cold_build"
         } else {
             self.source
@@ -66,10 +71,10 @@ impl Generation {
         snapshot: &manifest::CurrentSnapshot,
         loaded_manifest: Option<&manifest::Manifest>,
         plan: &planner::IndexPlan,
-        cold_build: bool,
+        prebuilt_disk_index: bool,
         bench: Option<&mut bench::BenchReport>,
     ) -> anyhow::Result<Option<BTreeSet<usize>>> {
-        super::backend_candidates(
+        CandidateQuery::new(
             args,
             table_fingerprint,
             table,
@@ -77,8 +82,18 @@ impl Generation {
             snapshot,
             loaded_manifest,
             plan,
-            cold_build,
+            prebuilt_disk_index,
             bench,
         )
+        .run()
     }
+}
+
+pub fn index_present(args: &HiArgs, index_dir: &Path) -> bool {
+    let manifest = match args.index().backend() {
+        config::IndexBackend::Postings => index_dir.join("postings-v5/manifest.json"),
+        config::IndexBackend::Tantivy => index_dir.join("tantivy-v2/manifest.json"),
+        config::IndexBackend::TantivyRam => return false,
+    };
+    manifest::manifest_present(&manifest)
 }

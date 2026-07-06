@@ -62,7 +62,15 @@ pub fn daemon_freshness_proof(state_root: &Path) -> bool {
     if !runtime.join(WATCHER_READY_FILE_NAME).exists() {
         return false;
     }
-    if !runtime.join(JOURNAL_CLEAN_FILE_NAME).exists() {
+    let Ok(clean_modified) =
+        fs::metadata(runtime.join(JOURNAL_CLEAN_FILE_NAME)).and_then(|meta| meta.modified())
+    else {
+        return false;
+    };
+    if fs::metadata(runtime.join(WAKE_FILE_NAME))
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|wake_modified| wake_modified > clean_modified)
+    {
         return false;
     }
     let Ok(metadata) = fs::metadata(runtime.join(LEASE_FILE_NAME)) else {
@@ -90,11 +98,12 @@ fn ensure_daemon_best_effort() {
     if env::var_os(DISABLE_DAEMON_AUTOSPAWN_ENV).is_some() {
         return;
     }
-    let Some(binary) = daemon_binary() else {
+    let Some(source) = daemon_source_binary() else {
         return;
     };
     let runtime_root = global_runtime_root();
     let _ = fs::create_dir_all(&runtime_root);
+    let binary = install_daemon_binary(&source, &runtime_root).unwrap_or(source);
     let _ = Command::new(binary)
         .arg("--runtime-root")
         .arg(runtime_root)
@@ -104,11 +113,39 @@ fn ensure_daemon_best_effort() {
         .spawn();
 }
 
-fn daemon_binary() -> Option<PathBuf> {
+fn daemon_source_binary() -> Option<PathBuf> {
     let current = env::current_exe().ok()?;
     let dir = current.parent()?;
     let binary = dir.join(DAEMON_BINARY_NAME);
     binary.exists().then_some(binary)
+}
+
+fn install_daemon_binary(source: &Path, runtime_root: &Path) -> std::io::Result<PathBuf> {
+    let dest_dir = runtime_root.join("bin");
+    fs::create_dir_all(&dest_dir)?;
+    let dest = dest_dir.join(DAEMON_BINARY_NAME);
+    if daemon_install_is_current(source, &dest)? {
+        return Ok(dest);
+    }
+
+    let tmp = dest.with_extension(format!("tmp-{}", std::process::id()));
+    fs::copy(source, &tmp)?;
+    fs::rename(tmp, &dest)?;
+    Ok(dest)
+}
+
+fn daemon_install_is_current(source: &Path, dest: &Path) -> std::io::Result<bool> {
+    let source = fs::metadata(source)?;
+    let Ok(dest) = fs::metadata(dest) else {
+        return Ok(false);
+    };
+    if source.len() != dest.len() {
+        return Ok(false);
+    }
+    match (source.modified(), dest.modified()) {
+        (Ok(source), Ok(dest)) => Ok(dest >= source),
+        _ => Ok(true),
+    }
 }
 
 fn register(
@@ -195,7 +232,7 @@ fn hash_paths(index_root: &Path, state_root: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{daemon_freshness_proof, refresh_best_effort};
+    use super::{daemon_freshness_proof, install_daemon_binary, refresh_best_effort};
     use std::{fs, path::PathBuf};
 
     fn scratch(name: &str) -> PathBuf {
@@ -224,5 +261,58 @@ mod tests {
 
         fs::write(runtime.join("journal-clean"), "clean").expect("clean");
         assert!(daemon_freshness_proof(&root));
+    }
+
+    #[test]
+    fn proof_rejects_wake_newer_than_clean() {
+        let root = scratch("wake");
+        refresh_best_effort(&root, &root);
+        let runtime = root.join("runtime");
+        fs::write(runtime.join("watcher-ready"), "ready").expect("ready");
+        fs::write(runtime.join("journal-clean"), "clean").expect("clean");
+        assert!(daemon_freshness_proof(&root));
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(runtime.join("wake"), "wake").expect("wake");
+
+        assert!(!daemon_freshness_proof(&root));
+    }
+
+    #[test]
+    fn lease_refresh_failure_is_non_fatal() {
+        let root = scratch("lease-failure");
+        let state_root = root.join("state-file");
+        fs::write(&state_root, "not a directory").expect("state file");
+
+        refresh_best_effort(&state_root, &state_root);
+    }
+
+    #[test]
+    fn daemon_binary_is_installed_under_runtime_root() {
+        let root = scratch("daemon-install");
+        let source = root.join("eg-indexd-source");
+        fs::write(&source, "daemon v1").expect("source");
+
+        let installed = install_daemon_binary(&source, &root).expect("install");
+
+        assert_eq!(root.join("bin/eg-indexd"), installed);
+        assert_eq!("daemon v1", fs::read_to_string(installed).expect("read"));
+    }
+
+    #[test]
+    fn stale_daemon_install_is_replaced() {
+        let root = scratch("daemon-reinstall");
+        let source = root.join("eg-indexd-source");
+        let installed = root.join("bin/eg-indexd");
+        fs::create_dir_all(installed.parent().expect("parent")).expect("bin");
+        fs::write(&source, "daemon v2 with more bytes").expect("source");
+        fs::write(&installed, "old").expect("old");
+
+        install_daemon_binary(&source, &root).expect("install");
+
+        assert_eq!(
+            "daemon v2 with more bytes",
+            fs::read_to_string(installed).expect("read")
+        );
     }
 }

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::flags::HiArgs;
 
+use super::request::SearchRequest;
+
 /// Normalized paths requested by one search invocation.
 pub struct SearchRoots {
     roots: Vec<SearchRoot>,
@@ -13,6 +15,10 @@ pub struct SearchRoots {
 impl SearchRoots {
     pub fn from_args(args: &HiArgs) -> anyhow::Result<Self> {
         Self::from_paths(args.cwd(), args.search_paths())
+    }
+
+    pub fn from_request(request: &SearchRequest<'_>) -> anyhow::Result<Self> {
+        Self::from_args(request.args())
     }
 
     fn from_paths(cwd: &Path, paths: &[PathBuf]) -> anyhow::Result<Self> {
@@ -138,6 +144,15 @@ mod tests {
 
         assert_eq!(roots.build_root().path(), dir.as_path());
         assert!(roots.contains(Path::new("/tmp"), &dir.join("file.rs")));
+    }
+
+    #[test]
+    fn implicit_cwd_is_the_build_root() {
+        let cwd = scratch("implicit");
+        let roots = SearchRoots::from_paths(&cwd, &[]).expect("roots");
+
+        assert_eq!(roots.build_root().path(), cwd.as_path());
+        assert!(roots.contains(&cwd, &cwd.join("src/lib.rs")));
     }
 
     #[test]

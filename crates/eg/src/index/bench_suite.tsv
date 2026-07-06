@@ -1,0 +1,16 @@
+id	pattern
+literal_main	fn main
+module_decl	(?:mod|pub mod) [a-z_]+
+todo_marker	TODO|FIXME
+hex_literal	0x[0-9a-fA-F]{4,}
+snake_ident	[a-z_]{4,}_[a-z_]{2,}
+path_rs	crates/[a-zA-Z0-9_./-]+\.rs
+quoted_string	"[^"\n]{3,}"
+index_word	\bindex\b
+foo_bar	foo.*bar
+uppercase_const	[A-Z_]{4,}
+duration_or_size	[0-9]+(?:ms|s|KB|MB)
+rust_use	use [a-zA-Z0-9_:]+
+function_def	fn [a-z_][a-z0-9_]*\(
+derive_attr	#\[derive\([A-Za-z0-9_, ]+\)\]
+error_result	Result<[^>\n]+>

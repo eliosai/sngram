@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 /// Index mode selected by the user.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum IndexMode {
+pub enum IndexMode {
     /// Do not use an index.
     NoIndex,
     /// Use an existing compatible index.
@@ -32,14 +32,14 @@ impl IndexMode {
     }
 
     /// Return true for a maintenance mode that inspects instead of searches.
-    pub(super) const fn is_maintenance(self) -> bool {
+    pub const fn is_maintenance(self) -> bool {
         matches!(self, IndexMode::Verify | IndexMode::Repair)
     }
 }
 
 /// Freshness policy deciding when a file counts as changed.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum IndexFreshness {
+pub enum IndexFreshness {
     /// Compare modification time, change time, and length.
     #[default]
     Stat,
@@ -49,14 +49,14 @@ pub(super) enum IndexFreshness {
 
 impl IndexFreshness {
     /// Return true when freshness uses a content hash instead of stat fields.
-    pub(super) const fn is_hash(self) -> bool {
+    pub const fn is_hash(self) -> bool {
         matches!(self, IndexFreshness::Hash)
     }
 }
 
 /// Index backend selected by the user.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum IndexBackend {
+pub enum IndexBackend {
     /// eg's compact mmap-backed postings index.
     Postings,
     /// Tantivy on disk, using its mmap-backed directory.
@@ -84,11 +84,13 @@ pub struct IndexConfig {
     dir: Option<PathBuf>,
     /// Emit structured indexed-search benchmark data instead of match output.
     bench: bool,
+    /// Run the embedded regex suite through indexed and unindexed search.
+    bench_suite: bool,
 }
 
 impl IndexConfig {
     /// Set the index mode from its CLI value.
-    pub(crate) fn set_mode(&mut self, mode: &str) -> anyhow::Result<()> {
+    pub fn set_mode(&mut self, mode: &str) -> anyhow::Result<()> {
         self.mode = match mode {
             "auto" => IndexMode::Auto,
             "rebuild" => IndexMode::Rebuild,
@@ -103,7 +105,7 @@ impl IndexConfig {
     }
 
     /// Set the index backend from its CLI value.
-    pub(crate) fn set_backend(&mut self, backend: &str) -> anyhow::Result<()> {
+    pub fn set_backend(&mut self, backend: &str) -> anyhow::Result<()> {
         self.backend = match backend {
             "postings" => IndexBackend::Postings,
             "tantivy" => IndexBackend::Tantivy,
@@ -117,7 +119,7 @@ impl IndexConfig {
     }
 
     /// Set the freshness policy from its CLI value.
-    pub(crate) fn set_freshness(&mut self, freshness: &str) -> anyhow::Result<()> {
+    pub fn set_freshness(&mut self, freshness: &str) -> anyhow::Result<()> {
         self.freshness = match freshness {
             "stat" => IndexFreshness::Stat,
             "hash" => IndexFreshness::Hash,
@@ -128,42 +130,52 @@ impl IndexConfig {
     }
 
     /// Store an explicit index-state directory and enable the index if needed.
-    pub(crate) fn set_dir(&mut self, dir: PathBuf) {
+    pub fn set_dir(&mut self, dir: PathBuf) {
         self.dir = Some(dir);
         self.enable_if_disabled();
     }
 
     /// Disable indexed search.
-    pub(crate) fn disable(&mut self) {
+    pub fn disable(&mut self) {
         self.mode = IndexMode::NoIndex;
     }
 
     /// Enable structured benchmark output for indexed search.
-    pub(crate) fn enable_bench(&mut self) {
+    pub fn enable_bench(&mut self) {
         self.bench = true;
         self.enable_if_disabled();
     }
 
+    /// Enable the embedded indexed-vs-unindexed benchmark suite.
+    pub fn enable_bench_suite(&mut self) {
+        self.bench_suite = true;
+        self.enable_if_disabled();
+    }
+
     /// Return true when the copied ripgrep path should run directly.
-    pub(crate) fn is_no_index(&self) -> bool {
+    pub fn is_no_index(&self) -> bool {
         self.mode.is_no_index()
     }
 
     /// Return true when the selected mode inspects or repairs without search.
-    pub(crate) fn is_maintenance(&self) -> bool {
+    pub fn is_maintenance(&self) -> bool {
         self.mode.is_maintenance()
     }
 
     /// Return the explicit index-state directory, if configured.
-    pub(crate) fn dir(&self) -> Option<&PathBuf> {
+    pub fn dir(&self) -> Option<&PathBuf> {
         self.dir.as_ref()
     }
 
-    pub(crate) const fn bench(&self) -> bool {
+    pub const fn bench(&self) -> bool {
         self.bench
     }
 
-    pub(crate) const fn mode_name(&self) -> &'static str {
+    pub const fn bench_suite(&self) -> bool {
+        self.bench_suite
+    }
+
+    pub const fn mode_name(&self) -> &'static str {
         match self.mode {
             IndexMode::NoIndex => "no-index",
             IndexMode::Auto => "auto",
@@ -174,7 +186,7 @@ impl IndexConfig {
         }
     }
 
-    pub(crate) const fn backend_name(&self) -> &'static str {
+    pub const fn backend_name(&self) -> &'static str {
         match self.backend {
             IndexBackend::Postings => "postings",
             IndexBackend::Tantivy => "tantivy",
@@ -182,15 +194,15 @@ impl IndexConfig {
         }
     }
 
-    pub(super) const fn mode(&self) -> IndexMode {
+    pub const fn mode(&self) -> IndexMode {
         self.mode
     }
 
-    pub(super) const fn backend(&self) -> IndexBackend {
+    pub const fn backend(&self) -> IndexBackend {
         self.backend
     }
 
-    pub(super) const fn freshness(&self) -> IndexFreshness {
+    pub const fn freshness(&self) -> IndexFreshness {
         self.freshness
     }
 

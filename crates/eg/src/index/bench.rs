@@ -98,6 +98,14 @@ impl BenchReport {
         self.counts.parent_restricted_candidates = restricted as u64;
     }
 
+    pub fn set_forced_candidate_files(&mut self, forced: u64) {
+        self.counts.forced_candidate_files = forced;
+    }
+
+    pub fn set_dirty_forced_candidates(&mut self, dirty: u64) {
+        self.counts.dirty_forced_candidates = dirty;
+    }
+
     pub fn set_verification(&mut self, verified: usize, matched: usize, bytes_verified: u64) {
         self.counts.verified_files = verified as u64;
         self.counts.matched_files = matched as u64;

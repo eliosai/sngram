@@ -34,12 +34,12 @@ const FIELD_FORCED_CANDIDATE: &str = "forced_candidate";
 const MIN_TANTIVY_THREAD_BUDGET: usize = 15_000_000;
 const TANTIVY_THREAD_BUDGET: usize = 64 * 1024 * 1024;
 
-pub(super) struct TantivyIndex {
+pub struct TantivyIndex {
     index: Index,
     summaries: SummaryIndex,
 }
 
-pub(super) fn prepare_index(
+pub fn prepare_index(
     args: &HiArgs,
     table_fingerprint: u64,
     table: &WeightTable,
@@ -84,7 +84,7 @@ pub(super) fn prepare_index(
     }
 }
 
-pub(super) fn refresh_index(
+pub fn refresh_index(
     args: &HiArgs,
     table_fingerprint: u64,
     table: &WeightTable,
@@ -106,7 +106,49 @@ pub(super) fn refresh_index(
     .map(|_| ())
 }
 
-pub(super) fn query_index(
+pub fn rebuild(
+    args: &HiArgs,
+    table_fingerprint: u64,
+    table: &WeightTable,
+    schema: Schema,
+    fields: IndexFields,
+    index_home: &Path,
+    snapshot: &CurrentSnapshot,
+) -> anyhow::Result<()> {
+    rebuild_disk_index(
+        args,
+        table_fingerprint,
+        table,
+        schema,
+        fields,
+        index_home,
+        snapshot,
+    )
+    .map(|_| ())
+}
+
+pub fn open_disk_index(
+    index_home: &Path,
+    snapshot: &CurrentSnapshot,
+) -> anyhow::Result<TantivyIndex> {
+    let data_dir = index_home.join(INDEX_DATA_DIR_NAME);
+    let index = Index::open_in_dir(&data_dir).with_context(|| {
+        format!(
+            "failed to open existing tantivy index at {}; remove it or use --index=rebuild",
+            data_dir.display()
+        )
+    })?;
+    let summaries = SummaryIndex::open(
+        &index_home.join(summary::SUMMARY_FILE_NAME),
+        &index_home.join(summary::DELTA_SUMMARY_FILE_NAME),
+        snapshot.files.len(),
+        DeltaSummaryMode::Absent,
+    )?
+    .with_context(|| format!("summary index missing at {}", index_home.display()))?;
+    Ok(TantivyIndex { index, summaries })
+}
+
+pub fn query_index(
     index: &TantivyIndex,
     fields: IndexFields,
     index_plan: &super::planner::IndexPlan,
@@ -165,6 +207,24 @@ pub(super) fn query_index(
         return Ok(None);
     }
     Ok(Some(ords.into_iter().collect()))
+}
+
+pub fn forced_candidate_ordinals(
+    index: &TantivyIndex,
+    fields: IndexFields,
+    index_plan: &super::planner::IndexPlan,
+) -> anyhow::Result<Vec<usize>> {
+    let reader = index
+        .index
+        .reader()
+        .context("failed to open tantivy index reader")?;
+    let searcher = reader.searcher();
+    let backend = TantivyPlanBackend {
+        searcher: &searcher,
+        fields,
+        summaries: &index.summaries,
+    };
+    executor::forced_candidates(&backend, &index_plan.plan)
 }
 
 fn estimate_with_forced(
@@ -239,7 +299,7 @@ fn count_plan_grams(plan: &QueryPlan) -> usize {
     plan.gram_count()
 }
 
-pub(super) fn schema() -> (Schema, IndexFields) {
+pub fn schema() -> (Schema, IndexFields) {
     let mut builder = Schema::builder();
     let gram = builder.add_u64_field(FIELD_GRAM, INDEXED);
     let doc_ord = builder.add_u64_field(FIELD_DOC_ORD, FAST | STORED);
@@ -484,7 +544,7 @@ fn u64_to_usize(value: u64) -> anyhow::Result<usize> {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct IndexFields {
+pub struct IndexFields {
     gram: Field,
     doc_ord: Field,
     path_hash: Field,

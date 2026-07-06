@@ -14,7 +14,7 @@ use std::{
 use sngram_types::Content;
 
 /// Files at or above this size are skipped to avoid the scanner's 4 GiB limit.
-pub(super) const MAX_INDEXABLE_LEN: u64 = 4 * 1024 * 1024 * 1024;
+pub const MAX_INDEXABLE_LEN: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Bytes read per chunk when sniffing a path for binary content.
 const BINARY_SCAN_BYTES: usize = 8 * 1024;
@@ -23,7 +23,7 @@ const BINARY_SCAN_BYTES: usize = 8 * 1024;
 const ENTROPY_MIN_BYTES: usize = 4 * 1024;
 
 /// Return true when the file is too large for the scanner and must be skipped.
-pub(super) const fn is_oversized(len: u64) -> bool {
+pub const fn is_oversized(len: u64) -> bool {
     len >= MAX_INDEXABLE_LEN
 }
 
@@ -33,7 +33,7 @@ pub(super) const fn is_oversized(len: u64) -> bool {
 /// any NUL in the indexed byte stream excludes the file from the sparse index.
 /// BOM-encoded text is handled separately as a forced candidate, so UTF-16/32
 /// NUL bytes do not cause those files to be dropped.
-pub(super) fn is_binary(bytes: &[u8]) -> bool {
+pub fn is_binary(bytes: &[u8]) -> bool {
     if has_decoding_bom(bytes) {
         return false;
     }
@@ -41,7 +41,7 @@ pub(super) fn is_binary(bytes: &[u8]) -> bool {
 }
 
 /// Return true when a file at `path` looks binary without loading it all.
-pub(super) fn is_binary_path(path: &Path) -> io::Result<bool> {
+pub fn is_binary_path(path: &Path) -> io::Result<bool> {
     let mut file = File::open(path)?;
     let mut buffer = [0u8; BINARY_SCAN_BYTES];
     let mut first = true;
@@ -76,12 +76,12 @@ fn has_binary_head(bytes: &[u8]) -> bool {
 /// but legitimate source files, so this guard sits above normal source/docs
 /// density and targets random printable/base64-like blobs that approach two
 /// unique grams per byte.
-pub(super) const fn is_high_entropy(len: usize, unique: usize) -> bool {
+pub const fn is_high_entropy(len: usize, unique: usize) -> bool {
     len >= ENTROPY_MIN_BYTES && unique.saturating_mul(2) > len.saturating_mul(3)
 }
 
 /// Return true when the file starts with a UTF-16/UTF-32 byte-order mark.
-pub(super) fn has_decoding_bom(bytes: &[u8]) -> bool {
+pub fn has_decoding_bom(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0xFF, 0xFE])
         || bytes.starts_with(&[0xFE, 0xFF])
         || bytes.starts_with(&[0xFF, 0xFE, 0x00, 0x00])

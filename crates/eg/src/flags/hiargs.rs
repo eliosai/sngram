@@ -1298,6 +1298,10 @@ impl Patterns {
         if !matches!(low.mode, Mode::Search(_)) {
             return Ok(Patterns { patterns: vec![] });
         }
+        if low.index.bench_suite() {
+            low.patterns.clear();
+            return Ok(Patterns { patterns: vec![] });
+        }
         if low.index.is_maintenance() && low.patterns.is_empty() {
             return Ok(Patterns { patterns: vec![] });
         }
@@ -1423,8 +1427,10 @@ impl Paths {
         // consequence of letting the user type 'rg foo' and "guessing" that
         // they meant to search the CWD.
         let is_readable_stdin = grep::cli::is_readable_stdin();
-        let use_cwd =
-            !is_readable_stdin || state.stdin_consumed || !matches!(low.mode, Mode::Search(_));
+        let use_cwd = low.index.bench_suite()
+            || !is_readable_stdin
+            || state.stdin_consumed
+            || !matches!(low.mode, Mode::Search(_));
         log::debug!(
             "using heuristics to determine whether to read from \
              stdin or search ./ (\

@@ -62,7 +62,7 @@ const BUILD_PROGRESS_EVERY: usize = 20_000;
 /// Allow one exact sparse lookup pass for mildly pessimistic estimates.
 const SELECTIVITY_REFINE_MULTIPLIER: u64 = 2;
 
-pub(super) fn prepare_index(
+pub fn prepare_index(
     args: &HiArgs,
     table_fingerprint: u64,
     table: &WeightTable,
@@ -91,7 +91,7 @@ pub(super) fn prepare_index(
     }
 }
 
-pub(super) fn refresh_index(
+pub fn refresh_index(
     args: &HiArgs,
     table_fingerprint: u64,
     table: &WeightTable,
@@ -104,11 +104,11 @@ pub(super) fn refresh_index(
 /// Corpus fraction a plan may select before the index stops paying: above
 /// this, candidate verification does strictly more work than a plain scan
 /// (measured 97-99 % FP on numeric/version classes selecting 46-84 %).
-pub(super) const SCAN_FALLBACK_PCT: usize = 30;
+pub const SCAN_FALLBACK_PCT: usize = 30;
 const MIN_SELECTIVITY_CEILING: u64 = 32;
 
 /// `None` means the plan is too unselective for the index — scan instead.
-pub(super) fn query_index(
+pub fn query_index(
     index: &PostingsIndex,
     index_plan: &super::planner::IndexPlan,
 ) -> anyhow::Result<Option<BTreeSet<usize>>> {
@@ -170,7 +170,14 @@ pub(super) fn query_index(
         .map(Some)
 }
 
-pub(super) fn selectivity_ceiling(doc_count: u64) -> u64 {
+pub fn forced_candidate_ordinals(
+    index: &PostingsIndex,
+    index_plan: &super::planner::IndexPlan,
+) -> anyhow::Result<Vec<usize>> {
+    executor::forced_candidates(index, &index_plan.plan)
+}
+
+pub fn selectivity_ceiling(doc_count: u64) -> u64 {
     doc_count
         .saturating_mul(SCAN_FALLBACK_PCT as u64)
         .checked_div(100)
@@ -179,7 +186,7 @@ pub(super) fn selectivity_ceiling(doc_count: u64) -> u64 {
         .min(doc_count)
 }
 
-pub(super) fn selectivity_refinement_ceiling(ceiling: u64, doc_count: u64) -> u64 {
+pub fn selectivity_refinement_ceiling(ceiling: u64, doc_count: u64) -> u64 {
     ceiling
         .saturating_mul(SELECTIVITY_REFINE_MULTIPLIER)
         .min(doc_count)
@@ -390,7 +397,7 @@ fn rebuild_index(
 }
 
 /// Rebuild the postings index in place, for `--index=repair`.
-pub(super) fn rebuild(
+pub fn rebuild(
     args: &HiArgs,
     table_fingerprint: u64,
     table: &WeightTable,
@@ -400,19 +407,24 @@ pub(super) fn rebuild(
     rebuild_index(args, table_fingerprint, table, index_home, snapshot).map(|_| ())
 }
 
+pub fn open_index(index_home: &Path, snapshot: &CurrentSnapshot) -> anyhow::Result<PostingsIndex> {
+    PostingsIndex::open(index_home, snapshot.files.len(), None)?
+        .with_context(|| format!("index at {} missing after rebuild", index_home.display()))
+}
+
 /// Result of an index integrity check: one pass/fail line per check.
-pub(super) struct VerifyReport {
+pub struct VerifyReport {
     checks: Vec<(String, bool)>,
 }
 
 impl VerifyReport {
     /// True when every check passed.
-    pub(super) fn healthy(&self) -> bool {
+    pub fn healthy(&self) -> bool {
         self.checks.iter().all(|(_, ok)| *ok)
     }
 
     /// One human-readable line per check.
-    pub(super) fn lines(&self) -> Vec<String> {
+    pub fn lines(&self) -> Vec<String> {
         self.checks
             .iter()
             .map(|(desc, ok)| format!("  [{}] {desc}", if *ok { "ok" } else { "FAIL" }))
@@ -423,10 +435,7 @@ impl VerifyReport {
 /// Check the postings index for structural faults without searching: manifest
 /// presence and compatibility, section headers and sampled checksums, delta
 /// completeness, and leftover build artifacts.
-pub(super) fn verify_index(
-    index_home: &Path,
-    table_fingerprint: u64,
-) -> anyhow::Result<VerifyReport> {
+pub fn verify_index(index_home: &Path, table_fingerprint: u64) -> anyhow::Result<VerifyReport> {
     let mut checks = Vec::new();
     let mut manifest_file_count = None;
     let base_manifest = read_manifest(&index_home.join(MANIFEST_FILE_NAME))?;
@@ -933,7 +942,7 @@ fn count_plan_grams(plan: &QueryPlan) -> usize {
     plan.gram_count()
 }
 
-pub(super) struct PostingsIndex {
+pub struct PostingsIndex {
     base: Segment,
     delta: Option<Segment>,
     summaries: SummaryIndex,

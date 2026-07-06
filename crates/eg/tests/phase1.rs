@@ -213,6 +213,7 @@ fn help_names_elgrep_and_index_flags() {
     assert!(stdout.contains("SPARSE N-GRAM OPTIONS:"));
     assert!(stdout.contains("--index=MODE"));
     assert!(stdout.contains("--index-backend=BACKEND"));
+    assert!(stdout.contains("--bench-suite"));
     assert!(stdout.contains("--no-index"));
 }
 
@@ -279,10 +280,194 @@ fn index_bench_emits_structured_json_without_match_output() {
     assert_eq!(Some(true), report["ok"].as_bool());
     assert_eq!(Some(true), report["matched"].as_bool());
     assert_eq!(Some("postings"), report["backend"].as_str());
+    assert_eq!(Some(true), report["cold_build"].as_bool());
+    assert_eq!(Some("cold_build"), report["generation_source"].as_str());
     assert!(report["timings_ms"]["total"].as_f64().unwrap() >= 0.0);
     assert!(report["counts"]["candidate_files"].as_u64().unwrap() >= 1);
     assert!(report["false_positives"]["false_positive_files"].is_u64());
     assert!(!stdout.contains("bench unique needle\n"));
+}
+
+#[test]
+fn index_bench_suite_emits_table_and_summary() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("crates/eg/src/index")).unwrap();
+    fs::write(
+        fixture.path("crates/eg/src/index/mod.rs"),
+        r#"
+use std::collections::HashMap;
+#[derive(Debug, Clone)]
+pub mod bench_suite;
+fn main() {
+    const MAX_FILE_SIZE: usize = 4096;
+    let path = "crates/eg/src/index/mod.rs";
+    let timeout = 250ms;
+    let color = 0xDEADBEEF;
+    // TODO: keep index fast
+    println!("{path} {color} {timeout}");
+}
+fn helper_result() -> Result<(), Error> { Ok(()) }
+"#,
+    )
+    .unwrap();
+    fs::write(fixture.path("hit.txt"), "foo123bar\n").unwrap();
+    fs::write(fixture.path("false-positive.txt"), "foo\nbar\n").unwrap();
+
+    let output = eg_with_env_vars(
+        &["--bench-suite", fixture.root.to_str().unwrap()],
+        &[("EG_INDEXD_DISABLE_AUTOSPAWN", "1")],
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("idx_wall"));
+    assert!(stdout.contains("literal_main"));
+    assert!(stdout.contains("summary regexes="));
+    assert!(stdout.contains("false_positive_pct="));
+    assert!(!stdout.trim_start().starts_with('{'));
+}
+
+#[test]
+fn index_bench_reports_rebuild_source() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "bench rebuild needle\n").unwrap();
+
+    let output = eg(&[
+        "--bench",
+        "--index=rebuild",
+        "bench rebuild needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_bench_schema(&report);
+    assert_eq!(Some(true), report["cold_build"].as_bool());
+    assert_eq!(Some("rebuild"), report["generation_source"].as_str());
+    assert_eq!(Some(true), report["matched"].as_bool());
+}
+
+#[test]
+fn index_bench_reports_delta_source_after_changed_file() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), "bench delta old needle\n").unwrap();
+
+    let first = eg(&[
+        "--index=rebuild",
+        "bench delta old",
+        fixture.root.to_str().unwrap(),
+    ]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8(first.stderr).unwrap()
+    );
+
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(fixture.path("sample.txt"), "bench delta changed needle\n").unwrap();
+
+    let output = eg(&[
+        "--bench",
+        "--index=auto",
+        "bench delta changed",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_bench_schema(&report);
+    assert_eq!(Some(false), report["cold_build"].as_bool());
+    assert_eq!(Some("delta"), report["generation_source"].as_str());
+    assert_eq!(Some(true), report["matched"].as_bool());
+}
+
+#[test]
+fn index_bench_reports_forced_candidate_count_on_rejection() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "rare forced candidate needle\n").unwrap();
+    for i in 0..80 {
+        fs::write(
+            fixture.path(format!("encoded_{i:02}.txt")),
+            [0xFF, 0xFE, b'x', b'y', b'z'],
+        )
+        .unwrap();
+    }
+
+    let output = eg(&[
+        "--bench",
+        "--index=rebuild",
+        "--files-with-matches",
+        "rare forced candidate needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(Some(2), output.status.code());
+    assert_bench_schema(&report);
+    assert_eq!(Some(false), report["ok"].as_bool());
+    assert_eq!(Some(true), report["selectivity_rejected"].as_bool());
+    assert_eq!(
+        Some(80),
+        report["counts"]["forced_candidate_files"].as_u64()
+    );
+}
+
+#[test]
+fn index_bench_reports_dirty_forced_candidates() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "dirty forced candidate needle\n").unwrap();
+    fs::write(fixture.path("encoded.txt"), [0xFF, 0xFE, b'a']).unwrap();
+
+    let build = eg(&[
+        "--index=rebuild",
+        "dirty forced candidate",
+        fixture.root.to_str().unwrap(),
+    ]);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(fixture.path("encoded.txt"), [0xFF, 0xFE, b'b']).unwrap();
+
+    let output = eg(&[
+        "--bench",
+        "--index=auto",
+        "dirty forced candidate",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_bench_schema(&report);
+    assert_eq!(Some(1), report["counts"]["forced_candidate_files"].as_u64());
+    assert_eq!(
+        Some(1),
+        report["counts"]["dirty_forced_candidates"].as_u64()
+    );
+    assert_eq!(Some(true), report["matched"].as_bool());
 }
 
 #[test]
@@ -314,6 +499,49 @@ fn index_bench_reports_structured_errors() {
             .as_str()
             .unwrap()
             .contains("--no-index")
+    );
+
+    let non_search = eg(&["--bench", "--files"]);
+    let non_search_stdout = String::from_utf8(non_search.stdout).unwrap();
+    let non_search_report: serde_json::Value = serde_json::from_str(&non_search_stdout).unwrap();
+
+    assert_eq!(Some(2), non_search.status.code());
+    assert_bench_schema(&non_search_report);
+    assert_eq!(Some(false), non_search_report["ok"].as_bool());
+    assert!(
+        non_search_report["unsupported_reason"]
+            .as_str()
+            .unwrap()
+            .contains("only supports search")
+    );
+}
+
+#[test]
+fn index_bench_reports_false_positive_counts_on_controlled_corpus() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "foo123bar\n").unwrap();
+    fs::write(fixture.path("false-positive.txt"), "foo\nbar\n").unwrap();
+
+    let output = eg(&["--bench", r"foo.*bar", fixture.root.to_str().unwrap()]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_bench_schema(&report);
+    assert_eq!(Some(2), report["counts"]["candidate_files"].as_u64());
+    assert_eq!(Some(2), report["counts"]["verified_files"].as_u64());
+    assert_eq!(Some(1), report["counts"]["matched_files"].as_u64());
+    assert_eq!(
+        Some(1),
+        report["false_positives"]["false_positive_files"].as_u64()
+    );
+    assert_eq!(
+        Some(50.0),
+        report["false_positives"]["false_positive_pct"].as_f64()
     );
 }
 
@@ -362,6 +590,80 @@ fn parent_index_serves_child_search_root() {
 }
 
 #[test]
+fn child_index_is_ignored_for_parent_search_root() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("src")).unwrap();
+    fs::write(fixture.path("src/hit.txt"), "child index parent needle\n").unwrap();
+
+    let child_build = eg(&[
+        "--index=rebuild",
+        "child index parent",
+        fixture.path("src").to_str().unwrap(),
+    ]);
+    assert!(
+        child_build.status.success(),
+        "{}",
+        String::from_utf8(child_build.stderr).unwrap()
+    );
+    assert!(fixture.path("src/.eg/index").exists());
+
+    let output = eg(&[
+        "--bench",
+        "child index parent",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_bench_schema(&report);
+    assert_eq!(Some(false), report["used_parent_index"].as_bool());
+    assert_eq!(Some(true), report["cold_build"].as_bool());
+    assert_eq!(Some(true), report["matched"].as_bool());
+}
+
+#[test]
+fn incompatible_parent_index_identity_is_rejected() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("src")).unwrap();
+    fs::write(fixture.path("src/hit.txt"), "identity child needle\n").unwrap();
+
+    let parent_build = eg(&[
+        "--index=rebuild",
+        "--index-backend=tantivy",
+        "identity child",
+        fixture.root.to_str().unwrap(),
+    ]);
+    assert!(
+        parent_build.status.success(),
+        "{}",
+        String::from_utf8(parent_build.stderr).unwrap()
+    );
+
+    let output = eg(&[
+        "--bench",
+        "identity child",
+        fixture.path("src").to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_bench_schema(&report);
+    assert_eq!(Some(false), report["used_parent_index"].as_bool());
+    assert_eq!(Some(true), report["cold_build"].as_bool());
+    assert_eq!(Some(true), report["matched"].as_bool());
+}
+
+#[test]
 fn daemon_ready_marker_enables_manifest_only_hot_snapshot() {
     let fixture = Fixture::new();
     fs::write(fixture.path("hit.txt"), "daemon proof needle\n").unwrap();
@@ -378,21 +680,83 @@ fn daemon_ready_marker_enables_manifest_only_hot_snapshot() {
     fs::write(runtime.join("journal-clean"), "clean").unwrap();
 
     let output = eg(&[
+        "--debug",
         "--bench",
         "daemon proof needle",
         fixture.root.to_str().unwrap(),
     ]);
     let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8(output.stderr).unwrap()
-    );
+    assert!(output.status.success(), "{stderr}");
     assert_bench_schema(&report);
     assert_eq!(Some("daemon"), report["freshness_proof"].as_str());
+    assert!(
+        !stderr.contains("eg index: collected"),
+        "daemon-proofed hot path should not walk: {stderr}"
+    );
     assert_eq!(Some(true), report["matched"].as_bool());
+}
+
+#[test]
+fn daemon_proof_rejects_pending_wake_before_reusing_manifest() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "daemon stale old needle\n").unwrap();
+    let envs = [("EG_INDEXD_DISABLE_AUTOSPAWN", "1")];
+
+    let build = eg_with_env_vars(&["daemon stale old", fixture.root.to_str().unwrap()], &envs);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+    let runtime = fixture.path(".eg/runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(runtime.join("watcher-ready"), "ready").unwrap();
+    fs::write(runtime.join("journal-clean"), "clean").unwrap();
+
+    let hot = eg_with_env_vars(
+        &[
+            "--bench",
+            "daemon stale old",
+            fixture.root.to_str().unwrap(),
+        ],
+        &envs,
+    );
+    let hot_stdout = String::from_utf8(hot.stdout).unwrap();
+    let hot_report: serde_json::Value = serde_json::from_str(&hot_stdout).unwrap();
+    assert!(
+        hot.status.success(),
+        "{}",
+        String::from_utf8(hot.stderr).unwrap()
+    );
+    assert_eq!(Some("daemon"), hot_report["freshness_proof"].as_str());
+
+    fs::write(fixture.path("hit.txt"), "daemon stale new needle\n").unwrap();
+    let refreshed = eg_with_env_vars(
+        &[
+            "--bench",
+            "daemon stale new",
+            fixture.root.to_str().unwrap(),
+        ],
+        &envs,
+    );
+    let refreshed_stdout = String::from_utf8(refreshed.stdout).unwrap();
+    let refreshed_report: serde_json::Value = serde_json::from_str(&refreshed_stdout).unwrap();
+
+    assert!(
+        refreshed.status.success(),
+        "{}",
+        String::from_utf8(refreshed.stderr).unwrap()
+    );
+    assert_bench_schema(&refreshed_report);
+    assert_ne!(
+        Some("daemon"),
+        refreshed_report["freshness_proof"].as_str(),
+        "pending wake should force a non-daemon freshness check"
+    );
+    assert_eq!(Some(true), refreshed_report["matched"].as_bool());
 }
 
 #[test]
@@ -445,6 +809,66 @@ fn daemon_refreshes_changed_index_and_hot_path_uses_daemon_proof() {
     assert_bench_schema(&report);
     assert_eq!(Some("daemon"), report["freshness_proof"].as_str());
     assert_eq!(Some(true), report["matched"].as_bool());
+}
+
+#[test]
+fn daemon_consolidates_child_index_after_parent_build() {
+    let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("src")).unwrap();
+    fs::create_dir_all(fixture.path("other")).unwrap();
+    fs::write(fixture.path("src/hit.txt"), "daemon merge child needle\n").unwrap();
+    fs::write(
+        fixture.path("other/hit.txt"),
+        "daemon merge child sibling needle\n",
+    )
+    .unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_parent_str = runtime_parent.to_str().unwrap();
+    let root_str = fixture.root.to_str().unwrap();
+    let src = fixture.path("src");
+    let src_str = src.to_str().unwrap();
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent_str),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+
+    let child = eg_with_env_vars(&["--index=rebuild", "daemon merge child", src_str], &envs);
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8(child.stderr).unwrap()
+    );
+    assert!(fixture.path("src/.eg/index").exists());
+
+    let parent = eg_with_env_vars(&["--index=rebuild", "daemon merge child", root_str], &envs);
+    assert!(
+        parent.status.success(),
+        "{}",
+        String::from_utf8(parent.stderr).unwrap()
+    );
+    assert!(fixture.path(".eg/index").exists());
+
+    let runtime_root = runtime_parent.join("eg");
+    let daemon = ChildGuard::spawn_daemon(&runtime_root);
+    wait_until(Duration::from_secs(10), || {
+        (!fixture.path("src/.eg/index").exists()).then_some(())
+    });
+    drop(daemon);
+
+    let output = eg_with_env_vars(&["--bench", "daemon merge child", src_str], &envs);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_bench_schema(&report);
+    assert_eq!(Some(true), report["used_parent_index"].as_bool());
+    assert_eq!(Some(true), report["matched"].as_bool());
+    assert_eq!(Some(1), report["counts"]["verified_files"].as_u64());
 }
 
 #[cfg(unix)]

@@ -47,6 +47,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &AfterContext,
     &BeforeContext,
     &Bench,
+    &BenchSuite,
     &Binary,
     &BlockBuffered,
     &ByteOffset,
@@ -3384,6 +3385,40 @@ is suppressed. This flag is only valid when indexed search is enabled.
     }
 }
 
+/// --bench-suite
+#[derive(Debug)]
+struct BenchSuite;
+
+impl Flag for BenchSuite {
+    fn is_switch(&self) -> bool {
+        true
+    }
+    fn name_long(&self) -> &'static str {
+        "bench-suite"
+    }
+    fn doc_category(&self) -> Category {
+        Category::SparseNgram
+    }
+    fn doc_short(&self) -> &'static str {
+        r"Benchmark the embedded sparse n-gram regex suite."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+Run a statically embedded TSV of regexes against the selected paths. Each regex
+is executed once through indexed search and once through the regular unindexed
+search path. Output is a fixed-width table with per-regex timings, index
+statistics, false-positive counts and a summary line.
+"
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        if v.unwrap_switch() {
+            args.index.enable_bench_suite();
+        }
+        Ok(())
+    }
+}
+
 /// --index
 #[derive(Debug)]
 struct Index;
@@ -3503,6 +3538,18 @@ fn test_index_bench() {
     let args = parse_low_raw(["--bench"]).unwrap();
     assert!(args.index.bench());
     assert!(!args.index.is_no_index());
+}
+
+#[cfg(test)]
+mod bench_suite_flag_tests {
+    use super::parse_low_raw;
+
+    #[test]
+    fn bench_suite_enables_index() {
+        let args = parse_low_raw(["--bench-suite"]).unwrap();
+        assert!(args.index.bench_suite());
+        assert!(!args.index.is_no_index());
+    }
 }
 
 /// --index-freshness

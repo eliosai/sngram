@@ -33,7 +33,7 @@ const CONTENT_HASH_WINDOW: usize = 8 * 1024;
 const JSON_MANIFEST_ENV: &str = "EG_INDEX_JSON_MANIFEST";
 
 #[derive(Clone, Copy)]
-pub(super) enum ManifestBackend {
+pub enum ManifestBackend {
     Tantivy,
     Postings,
 }
@@ -61,7 +61,7 @@ impl ManifestBackend {
     }
 }
 
-pub(super) fn current_snapshot(
+pub fn current_snapshot(
     args: &HiArgs,
     index_root: &Path,
     haystacks: &[Haystack],
@@ -125,7 +125,7 @@ pub(super) fn current_snapshot(
     })
 }
 
-pub(super) fn fast_snapshot(
+pub fn fast_snapshot(
     args: &HiArgs,
     index_root: &Path,
     manifest: &Manifest,
@@ -172,7 +172,7 @@ pub(super) fn fast_snapshot(
     }))
 }
 
-pub(super) fn snapshot_from_manifest(index_root: &Path, manifest: &Manifest) -> CurrentSnapshot {
+pub fn snapshot_from_manifest(index_root: &Path, manifest: &Manifest) -> CurrentSnapshot {
     let dirs = manifest
         .dirs
         .iter()
@@ -193,7 +193,7 @@ pub(super) fn snapshot_from_manifest(index_root: &Path, manifest: &Manifest) -> 
     }
 }
 
-pub(super) fn manifest_for(
+pub fn manifest_for(
     backend: ManifestBackend,
     table_fingerprint: u64,
     snapshot: &CurrentSnapshot,
@@ -224,7 +224,7 @@ pub(super) fn manifest_for(
 /// The binary manifest is the commit point; the JSON form is only written for
 /// tooling (see [`write_manifest`]). Either alone is a valid, complete index
 /// manifest, so a missing JSON file is not treated as a missing index.
-pub(super) fn read_manifest(path: &Path) -> anyhow::Result<Option<Manifest>> {
+pub fn read_manifest(path: &Path) -> anyhow::Result<Option<Manifest>> {
     let binary_path = binary_manifest_path(path);
     let json_exists = path.exists();
     let binary_exists = binary_path.exists();
@@ -269,12 +269,12 @@ fn read_binary_manifest(binary_path: &Path) -> anyhow::Result<Manifest> {
 }
 
 /// Return true when a manifest exists in either the binary or JSON form.
-pub(super) fn manifest_present(path: &Path) -> bool {
+pub fn manifest_present(path: &Path) -> bool {
     path.exists() || binary_manifest_path(path).exists()
 }
 
 /// Remove both manifest forms, ignoring files that are already gone.
-pub(super) fn remove_manifest(path: &Path) -> anyhow::Result<()> {
+pub fn remove_manifest(path: &Path) -> anyhow::Result<()> {
     for candidate in [path.to_path_buf(), binary_manifest_path(path)] {
         match fs::remove_file(&candidate) {
             Ok(()) => {},
@@ -288,7 +288,7 @@ pub(super) fn remove_manifest(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(super) fn is_compatible(
+pub fn is_compatible(
     manifest: &Manifest,
     backend: ManifestBackend,
     table_fingerprint: u64,
@@ -300,7 +300,7 @@ pub(super) fn is_compatible(
         && manifest.table_fingerprint == table_fingerprint
 }
 
-pub(super) fn is_filter_compatible(
+pub fn is_filter_compatible(
     manifest: &Manifest,
     args: &HiArgs,
     backend: ManifestBackend,
@@ -316,7 +316,7 @@ pub(super) fn is_filter_compatible(
 /// every build, so by default only the compact binary manifest is written. The
 /// JSON form is added under `--debug` or when [`JSON_MANIFEST_ENV`] is set. The
 /// JSON is written first so the binary lands last and stays the preferred read.
-pub(super) fn write_manifest(path: &Path, manifest: &Manifest) -> anyhow::Result<()> {
+pub fn write_manifest(path: &Path, manifest: &Manifest) -> anyhow::Result<()> {
     if json_manifest_enabled() {
         let bytes = serde_json::to_vec(manifest).context("failed to encode index manifest")?;
         write_synced(path, &bytes)
@@ -337,7 +337,7 @@ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-pub(super) fn changed_ordinals(old: &Manifest, new: &Manifest) -> Option<Vec<usize>> {
+pub fn changed_ordinals(old: &Manifest, new: &Manifest) -> Option<Vec<usize>> {
     if old.version != new.version
         || old.schema_version != new.schema_version
         || old.backend != new.backend
@@ -1011,46 +1011,46 @@ fn changed_ns(_metadata: &fs::Metadata) -> Option<u64> {
     None
 }
 
-pub(super) struct CurrentFile {
-    pub(super) ord: usize,
-    pub(super) path: PathBuf,
+pub struct CurrentFile {
+    pub ord: usize,
+    pub path: PathBuf,
     manifest: ManifestFile,
 }
 
 impl CurrentFile {
-    pub(super) fn path_hash(&self) -> u64 {
+    pub fn path_hash(&self) -> u64 {
         self.manifest.path_hash
     }
 
-    pub(super) fn is_explicit(&self) -> bool {
+    pub fn is_explicit(&self) -> bool {
         self.manifest.explicit
     }
 
-    pub(super) fn is_skipped_binary(&self) -> bool {
+    pub fn is_skipped_binary(&self) -> bool {
         self.manifest.skipped_binary
     }
 }
 
-pub(super) struct CurrentDir {
+pub struct CurrentDir {
     manifest: ManifestDir,
 }
 
-pub(super) struct CurrentSnapshot {
+pub struct CurrentSnapshot {
     walk_fingerprint: u64,
     git_freshness: bool,
-    pub(super) files: Vec<CurrentFile>,
+    pub files: Vec<CurrentFile>,
     dirs: Vec<CurrentDir>,
 }
 
 impl Manifest {
     /// Number of files recorded in this manifest.
-    pub(super) fn file_count(&self) -> usize {
+    pub fn file_count(&self) -> usize {
         self.files.len()
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct Manifest {
+pub struct Manifest {
     version: u32,
     #[serde(default)]
     schema_version: u32,

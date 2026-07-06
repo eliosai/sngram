@@ -6,51 +6,49 @@ use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed};
 
 use super::summary::{SummaryIndex, SummaryStatus};
 
-pub(super) trait PlanBackend {
+pub trait PlanBackend {
     fn summaries(&self) -> &SummaryIndex;
     fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<usize>>;
     fn forced_candidates(&self) -> anyhow::Result<Vec<usize>>;
 }
 
-pub(super) fn execute<B: PlanBackend>(backend: &B, plan: &QueryPlan) -> anyhow::Result<Vec<usize>> {
+pub fn execute<B: PlanBackend>(backend: &B, plan: &QueryPlan) -> anyhow::Result<Vec<usize>> {
     let mut executor = Executor {
         backend,
         cache: HashMap::new(),
     };
     let mut candidates = executor.eval(plan.root())?;
     if !plan.is_none() {
-        let forced = backend
-            .forced_candidates()?
-            .into_iter()
-            .filter(|&ord| summary_may_satisfy(plan.root(), backend.summaries().status(ord)))
-            .collect();
-        candidates = union_sorted(candidates, forced);
+        candidates = union_sorted(candidates, forced_candidates(backend, plan)?);
     }
     candidates.retain(|&ord| summary_may_satisfy(plan.root(), backend.summaries().status(ord)));
     Ok(candidates)
 }
 
-pub(super) fn estimate_candidates<B: PlanBackend>(
-    backend: &B,
-    plan: &QueryPlan,
-    df: &dyn DfStats,
-) -> u64 {
+pub fn estimate_candidates<B: PlanBackend>(backend: &B, plan: &QueryPlan, df: &dyn DfStats) -> u64 {
     estimate_expr(backend.summaries(), plan.root(), df)
 }
 
-pub(super) fn estimate_forced_candidates<B: PlanBackend>(
+pub fn estimate_forced_candidates<B: PlanBackend>(
     backend: &B,
     plan: &QueryPlan,
 ) -> anyhow::Result<u64> {
+    let count = forced_candidates(backend, plan)?.len();
+    Ok(u64::try_from(count).unwrap_or(u64::MAX))
+}
+
+pub fn forced_candidates<B: PlanBackend>(
+    backend: &B,
+    plan: &QueryPlan,
+) -> anyhow::Result<Vec<usize>> {
     if plan.is_none() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
-    let count = backend
+    Ok(backend
         .forced_candidates()?
         .into_iter()
         .filter(|&ord| summary_may_satisfy(plan.root(), backend.summaries().status(ord)))
-        .count();
-    Ok(u64::try_from(count).unwrap_or(u64::MAX))
+        .collect())
 }
 
 fn estimate_expr(summaries: &SummaryIndex, expr: &PlanExpr, df: &dyn DfStats) -> u64 {
@@ -290,7 +288,7 @@ fn intersect_sorted(left: &[usize], right: &[usize]) -> Vec<usize> {
     out
 }
 
-pub(super) fn union_sorted(left: Vec<usize>, right: Vec<usize>) -> Vec<usize> {
+pub fn union_sorted(left: Vec<usize>, right: Vec<usize>) -> Vec<usize> {
     union_sorted_ref(&left, &right)
 }
 

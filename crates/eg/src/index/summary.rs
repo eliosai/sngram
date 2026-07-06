@@ -11,8 +11,8 @@ use sngram_types::{
     ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanFlags, ScanNeed, ScanSummary,
 };
 
-pub(super) const SUMMARY_FILE_NAME: &str = "summaries.bin";
-pub(super) const DELTA_SUMMARY_FILE_NAME: &str = "delta-summaries.bin";
+pub const SUMMARY_FILE_NAME: &str = "summaries.bin";
+pub const DELTA_SUMMARY_FILE_NAME: &str = "delta-summaries.bin";
 
 const MAGIC: [u8; 8] = *b"EGSUM1\0\0";
 const VERSION: u32 = 1;
@@ -25,18 +25,18 @@ const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SummaryStatus {
+pub enum SummaryStatus {
     Skipped,
     UnknownText,
     Known(ScanSummary),
 }
 
 impl SummaryStatus {
-    pub(super) const fn is_text(self) -> bool {
+    pub const fn is_text(self) -> bool {
         matches!(self, Self::Known(_) | Self::UnknownText)
     }
 
-    pub(super) fn satisfies(self, need: &ScanNeed) -> bool {
+    pub fn satisfies(self, need: &ScanNeed) -> bool {
         match self {
             Self::Known(summary) => need.satisfied_by(&summary),
             Self::UnknownText => true,
@@ -46,17 +46,17 @@ impl SummaryStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct SummaryRecord {
+pub struct SummaryRecord {
     ord: u32,
     status: SummaryStatus,
 }
 
 impl SummaryRecord {
-    pub(super) const fn new(ord: u32, status: SummaryStatus) -> Self {
+    pub const fn new(ord: u32, status: SummaryStatus) -> Self {
         Self { ord, status }
     }
 
-    pub(super) const fn status(self) -> SummaryStatus {
+    pub const fn status(self) -> SummaryStatus {
         self.status
     }
 
@@ -66,19 +66,19 @@ impl SummaryRecord {
 }
 
 #[derive(Clone)]
-pub(super) struct SummaryIndex {
+pub struct SummaryIndex {
     base: SummarySegment,
     delta: Option<SummarySegment>,
     doc_count: usize,
 }
 
-pub(super) enum DeltaSummaryMode<'a> {
+pub enum DeltaSummaryMode<'a> {
     Absent,
     ChangedOrdinals(&'a [usize]),
 }
 
 impl SummaryIndex {
-    pub(super) fn open(
+    pub fn open(
         base_path: &Path,
         delta_path: &Path,
         doc_count: usize,
@@ -114,10 +114,7 @@ impl SummaryIndex {
         }))
     }
 
-    pub(super) fn from_records(
-        records: Vec<SummaryRecord>,
-        doc_count: usize,
-    ) -> anyhow::Result<Self> {
+    pub fn from_records(records: Vec<SummaryRecord>, doc_count: usize) -> anyhow::Result<Self> {
         let base = SummarySegment::from_records(records)?;
         if !base.covers_base(doc_count) {
             anyhow::bail!(
@@ -132,7 +129,7 @@ impl SummaryIndex {
         })
     }
 
-    pub(super) fn status(&self, ord: usize) -> SummaryStatus {
+    pub fn status(&self, ord: usize) -> SummaryStatus {
         let Ok(ord) = u32::try_from(ord) else {
             return SummaryStatus::Skipped;
         };
@@ -146,19 +143,19 @@ impl SummaryIndex {
             .unwrap_or(SummaryStatus::Skipped)
     }
 
-    pub(super) fn text_ordinals(&self) -> Vec<usize> {
+    pub fn text_ordinals(&self) -> Vec<usize> {
         self.filter_ordinals(SummaryStatus::is_text)
     }
 
-    pub(super) fn text_count(&self) -> usize {
+    pub fn text_count(&self) -> usize {
         self.count_ordinals(SummaryStatus::is_text)
     }
 
-    pub(super) fn ordinals_satisfying(&self, need: &ScanNeed) -> Vec<usize> {
+    pub fn ordinals_satisfying(&self, need: &ScanNeed) -> Vec<usize> {
         self.filter_ordinals(|status| status.satisfies(need))
     }
 
-    pub(super) fn count_satisfying(&self, need: &ScanNeed) -> usize {
+    pub fn count_satisfying(&self, need: &ScanNeed) -> usize {
         self.count_ordinals(|status| status.satisfies(need))
     }
 
@@ -251,7 +248,7 @@ impl SummarySegment {
     }
 }
 
-pub(super) fn write_records(path: &Path, records: &mut Vec<SummaryRecord>) -> anyhow::Result<()> {
+pub fn write_records(path: &Path, records: &mut Vec<SummaryRecord>) -> anyhow::Result<()> {
     sort_records(records)?;
     let mut body = Vec::with_capacity(records.len() * RECORD_SIZE);
     for &record in records.iter() {
@@ -262,7 +259,7 @@ pub(super) fn write_records(path: &Path, records: &mut Vec<SummaryRecord>) -> an
     durable_write(path, &file)
 }
 
-pub(super) fn verify(path: &Path, expected_records: Option<usize>) -> anyhow::Result<bool> {
+pub fn verify(path: &Path, expected_records: Option<usize>) -> anyhow::Result<bool> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -278,7 +275,7 @@ pub(super) fn verify(path: &Path, expected_records: Option<usize>) -> anyhow::Re
     Ok(true)
 }
 
-pub(super) fn verify_ordinals(path: &Path, ordinals: &[usize]) -> anyhow::Result<bool> {
+pub fn verify_ordinals(path: &Path, ordinals: &[usize]) -> anyhow::Result<bool> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
