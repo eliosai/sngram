@@ -6,34 +6,34 @@ mod classify;
 mod config;
 mod document;
 mod executor;
+mod generation;
 mod location;
 mod manifest;
 mod planner;
 mod postings;
+mod request;
 mod roots;
 mod runtime;
 mod store;
 mod summary;
+mod verify;
 
 use std::{
     collections::BTreeSet,
     fmt::{self, Write as FmtWrite},
-    mem,
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
-    },
     time::Instant,
 };
 
 use anyhow::bail;
 use catalog::GenerationCatalog;
+use generation::Generation;
+use request::{SearchRequest, Unsupported, unsupported};
 use roots::{SearchRoots, absolute_path};
-use sngram_types::{PlanExpr, QueryError, QueryPlan};
+use sngram_types::QueryPlan;
 
 use crate::{
-    flags::{HiArgs, Mode, SearchMode},
+    flags::{HiArgs, Mode},
     haystack::Haystack,
 };
 
@@ -41,10 +41,84 @@ pub use config::IndexConfig;
 
 /// Run an indexed search.
 pub fn run(args: &HiArgs) -> anyhow::Result<bool> {
-    if args.index().bench() {
-        return run_bench(args);
+    IndexedSearch::from_args(args)?.run()
+}
+
+struct IndexedSearch<'a> {
+    args: &'a HiArgs,
+}
+
+impl<'a> IndexedSearch<'a> {
+    fn from_args(args: &'a HiArgs) -> anyhow::Result<Self> {
+        Ok(Self { args })
     }
-    run_inner(args, None)
+
+    fn run(self) -> anyhow::Result<bool> {
+        if runtime::is_daemon_refresh() {
+            run_daemon_refresh(self.args)?;
+            return Ok(true);
+        }
+        if self.args.index().bench() {
+            return run_bench(self.args);
+        }
+        run_inner(self.args, None)
+    }
+}
+
+fn run_daemon_refresh(args: &HiArgs) -> anyhow::Result<()> {
+    let Mode::Search(_) = args.mode() else {
+        return Ok(());
+    };
+    if args.index().is_no_index()
+        || args.index().is_maintenance()
+        || request::searches_stdin(args)
+        || matches!(args.index().backend(), config::IndexBackend::TantivyRam)
+    {
+        return Ok(());
+    }
+
+    let table = sngram_weights::weights();
+    let table_fingerprint = table.fingerprint();
+    let roots = SearchRoots::from_args(args)?;
+    let catalog = GenerationCatalog::open(args, table_fingerprint);
+    let generation = catalog.best_ready_generation(&roots)?;
+    let location = generation.location;
+    runtime::clear_journal_clean(&location.state_root);
+
+    let collected = collect_haystacks(args, &location.state_root)?;
+    let snapshot = manifest::current_snapshot(
+        args,
+        &location.corpus_root,
+        &collected.haystacks,
+        &collected.dirs,
+    )?;
+    let index_dir = location.index_dir();
+    match args.index().backend() {
+        config::IndexBackend::Postings => {
+            postings::refresh_index(
+                args,
+                table_fingerprint,
+                &table,
+                &index_dir.join("postings-v5"),
+                &snapshot,
+            )?;
+        },
+        config::IndexBackend::Tantivy => {
+            let (schema, fields) = store::schema();
+            store::refresh_index(
+                args,
+                table_fingerprint,
+                &table,
+                schema,
+                fields,
+                &index_dir.join("tantivy-v2"),
+                &snapshot,
+            )?;
+        },
+        config::IndexBackend::TantivyRam => unreachable!("filtered above"),
+    }
+    runtime::mark_journal_clean(&location.state_root)?;
+    Ok(())
 }
 
 fn run_bench(args: &HiArgs) -> anyhow::Result<bool> {
@@ -68,31 +142,21 @@ fn run_bench(args: &HiArgs) -> anyhow::Result<bool> {
 
 fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyhow::Result<bool> {
     let parse_started_at = Instant::now();
-    let Mode::Search(mode) = args.mode() else {
-        bail!("indexed mode only supports search");
+    let request = if args.index().is_maintenance() {
+        return maintenance(args);
+    } else {
+        SearchRequest::from_args(args)
     };
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_parse_request(parse_started_at);
     }
-    if args.index().is_no_index() {
-        return unsupported(Unsupported::Feature {
-            what: "`--bench` with `--no-index`",
-            why: "`--bench` measures the sparse n-gram indexed path, so disabling the index leaves no indexed work to measure",
-        });
-    }
-    if args.index().is_maintenance() {
-        return maintenance(args);
-    }
-    if let Some(reason) = unsupported_reason(args, mode) {
-        return unsupported(reason);
-    }
-    if searches_stdin(args) {
-        return unsupported(Unsupported::Stdin);
-    }
-    if !args.matches_possible() {
+    let request = request?;
+    if !request.matches_possible() {
         return Ok(false);
     }
-    let started_at = Instant::now();
+    let args = request.args();
+    let mode = request.mode();
+    let started_at = request.started_at();
     log::debug!(
         "eg index: mode={:?} backend={:?} threads={}",
         args.index().mode(),
@@ -108,21 +172,16 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     let table = sngram_weights::weights();
     let table_fingerprint = table.fingerprint();
     let plan_started_at = Instant::now();
-    let plan = match planner::query_plan(args, &table) {
+    let plan = match planner::QueryPlanner::new(args, &table).plan() {
         Ok(plan) => plan,
-        Err(err) => {
-            if let Some(query_err) = err.downcast_ref::<QueryError>() {
-                match query_err {
-                    QueryError::PatternTooLong { .. } => {
-                        log::debug!("eg index: planner rejected query: {query_err}");
-                        return unsupported(Unsupported::PlannerError);
-                    },
-                    QueryError::InvalidRegex(_) => bail!("{query_err}"),
-                    _ => return unsupported(Unsupported::PlannerError),
-                }
+        Err(planner::PlanError::InvalidRegex(err)) => bail!("{err}"),
+        Err(planner::PlanError::Unsupported(reason)) => {
+            if matches!(reason, Unsupported::TooBroadPattern)
+                && let Some(report) = bench.as_deref_mut()
+            {
+                report.reject_too_broad();
             }
-            log::debug!("eg index: planner rejected query: {err:#}");
-            return unsupported(Unsupported::PlannerError);
+            return unsupported(reason);
         },
     };
     if let Some(report) = bench.as_deref_mut() {
@@ -130,53 +189,30 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
         report.set_query_grams(plan.plan.gram_count());
     }
     log::debug!("eg index: query plan: {}", debug_plan(&plan.plan));
-    match plan.plan.root() {
-        PlanExpr::All => {
-            if let Some(report) = bench.as_deref_mut() {
-                report.reject_too_broad();
-            }
-            return unsupported(Unsupported::TooBroadPattern);
-        },
-        PlanExpr::None => return unsupported(Unsupported::ImpossiblePattern),
-        PlanExpr::AllOf { .. } | PlanExpr::AnyOf { .. } => {},
-    }
-    if !plan.has_gram_constraints() {
-        if let Some(report) = bench.as_deref_mut() {
-            report.reject_too_broad();
-        }
-        return unsupported(Unsupported::TooBroadPattern);
-    }
     let roots_started_at = Instant::now();
     let roots = SearchRoots::from_args(args)?;
     debug_assert!(roots.is_served_by(roots.build_root()));
     let catalog_started_at = Instant::now();
     let catalog = GenerationCatalog::open(args, table_fingerprint);
-    let generation = catalog.best_ready_generation(&roots)?;
-    let location = generation.location;
+    let generation = Generation::from_ready(catalog.best_ready_generation(&roots)?);
+    let index_dir = generation.index_dir();
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_resolve_roots(roots_started_at);
         report.timing_mut().set_catalog_open(catalog_started_at);
-        report.set_index_root(&location.corpus_root, generation.used_parent_index);
+        report.set_index_root(generation.index_root(), generation.used_parent_index());
     }
-    let index_dir = location.index_dir();
-    let cold_build = matches!(args.index().mode(), config::IndexMode::Rebuild)
-        || generation.source == "cold_build"
-        || !index_present(args, &index_dir);
+    let cold_build = generation.is_cold_build(args, &index_dir);
     if let Some(report) = bench.as_deref_mut() {
         report.set_cold_build(cold_build);
         report.set_generation(
             index_dir.display().to_string(),
-            if cold_build {
-                "cold_build"
-            } else {
-                generation.source
-            },
+            generation.bench_source(cold_build),
         );
     }
     let validate_started_at = Instant::now();
-    runtime::refresh_best_effort(&location.corpus_root, &location.state_root);
+    runtime::Lease::new(generation.index_root(), generation.state_root()).refresh_best_effort();
     let (snapshot, loaded_manifest, freshness_proof) =
-        load_snapshot(args, table_fingerprint, &location, &index_dir)?;
+        load_snapshot(args, table_fingerprint, generation.location(), &index_dir)?;
     if let Some(report) = bench.as_deref_mut() {
         report
             .timing_mut()
@@ -192,13 +228,12 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     if args.has_implicit_path() && snapshot.files.is_empty() {
         crate::eprint_nothing_searched();
     }
-    warn_large_implicit_build(args, &location.corpus_root, &index_dir, &snapshot);
+    warn_large_implicit_build(args, generation.index_root(), &index_dir, &snapshot);
     let query_started_at = Instant::now();
-    let Some(mut candidates) = backend_candidates(
+    let Some(mut candidates) = generation.query(
         args,
         table_fingerprint,
         &table,
-        &index_dir,
         &snapshot,
         loaded_manifest.as_ref(),
         &plan,
@@ -218,7 +253,9 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
         report.set_candidates(candidates.len());
         report.set_parent_restricted_candidates(unrestricted_candidates - candidates.len());
     }
-    let matched = verify_candidates(args, mode, started_at, &snapshot, &candidates, bench)?;
+    let matched =
+        verify::CandidateVerifier::new(args, mode, started_at, &snapshot, &candidates, bench)
+            .verify()?;
     Ok(matched)
 }
 
@@ -333,93 +370,6 @@ fn backend_candidates(
     Ok(Some(candidates))
 }
 
-/// Return an unindexable-query reason, or `None` when the index can serve it.
-fn unsupported_reason(args: &HiArgs, _mode: SearchMode) -> Option<Unsupported> {
-    if args.invert_match() {
-        return Some(Unsupported::Feature {
-            what: "inverted matches",
-            why: "`-v/--invert-match` can make every non-matching file relevant, so sparse positive grams cannot safely narrow the search",
-        });
-    }
-    if args.passthru() {
-        return Some(Unsupported::Feature {
-            what: "`--passthru`",
-            why: "passthru prints non-matching lines too, so the index cannot reduce the output to matching candidate files",
-        });
-    }
-    if args.non_default_regex_engine() {
-        return Some(Unsupported::Feature {
-            what: "PCRE2 or hybrid regex engines",
-            why: "the sparse planner currently proves constraints for the default Rust regex semantics only",
-        });
-    }
-    if args.explicit_encoding() {
-        return Some(Unsupported::Feature {
-            what: "explicit text encodings",
-            why: "the index stores byte n-grams from the raw corpus and cannot yet plan over decoded alternate encodings",
-        });
-    }
-    if args.has_preprocessor() {
-        return Some(Unsupported::Feature {
-            what: "preprocessors",
-            why: "the index is built over stored files, not transformed preprocessor output",
-        });
-    }
-    if args.search_zip() {
-        return Some(Unsupported::Feature {
-            what: "compressed archive search",
-            why: "archive members are not present as stable files in the sparse n-gram index",
-        });
-    }
-    if args.null_data() {
-        return Some(Unsupported::Feature {
-            what: "`--null-data`",
-            why: "NUL-delimited line semantics use different boundaries than the newline sentinels stored in the sparse n-gram index",
-        });
-    }
-    if args.index_rejects_binary_mode() {
-        return Some(Unsupported::Feature {
-            what: "binary search flags",
-            why: "indexed eg does not search binary data; remove `--binary`/`--text` or pass `--no-index` for an explicit unindexed run",
-        });
-    }
-    None
-}
-
-#[derive(Clone, Copy)]
-enum Unsupported {
-    Feature {
-        what: &'static str,
-        why: &'static str,
-    },
-    Stdin,
-    PlannerError,
-    TooBroadPattern,
-    ImpossiblePattern,
-    TooManyCandidates,
-}
-
-/// Report an indexed-search request that cannot be served safely.
-fn unsupported<T>(reason: Unsupported) -> anyhow::Result<T> {
-    match reason {
-        Unsupported::Feature { what, why } => bail!(
-            "indexed search cannot run with {what}.\n\nwhy: {why}.\nwhat works: remove the unsupported option, or pass `--no-index` when you intentionally want an exact unindexed scan."
-        ),
-        Unsupported::Stdin => bail!(
-            "indexed search cannot read stdin.\n\nwhy: stdin is a stream, but the sparse n-gram index only covers stable files in the indexed corpus.\nwhat works: write the input to a file and search that path, or pass `--no-index` for an exact stream scan."
-        ),
-        Unsupported::PlannerError | Unsupported::TooBroadPattern => bail!(
-            "indexed search cannot use this pattern because it is too broad for the sparse n-gram index.\n\nwhy: the pattern has no required byte n-gram that can narrow candidate files.\nwhat works: add a literal substring of at least 3 bytes, narrow wide character classes or repetitions, or pass `--no-index` for an exact unindexed scan."
-        ),
-        Unsupported::ImpossiblePattern => bail!(
-            "indexed search cannot use this pattern because it cannot match any text under the current regex options.\n\nwhy: contradictory anchors, boundaries, or character classes made the planner prove the language empty.\nwhat works: check anchors like `$`/`^`, word boundaries like `\\b`/`\\B`, and impossible classes; use `--no-index` only if you want to double-check with the regex engine."
-        ),
-        Unsupported::TooManyCandidates => bail!(
-            "indexed search cannot use this pattern efficiently because it selects too much of the corpus.\n\nwhy: the sparse n-gram estimate is above the indexed-search selectivity ceiling, so verifying candidates would be slower than a scan.\nwhat works: add a rarer literal, narrow numeric or wide character classes, split the search into a more selective pattern, or pass `--no-index` for an exact unindexed scan."
-        ),
-    }
-}
-
 /// File count above which a first-time implicit build gets a warning.
 const GUARDRAIL_FILES: usize = 100_000;
 
@@ -462,13 +412,6 @@ fn is_home_dir(path: &Path) -> bool {
     };
     let canon = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canon(path) == canon(&PathBuf::from(home))
-}
-
-/// Return true when any haystack to search is stdin.
-fn searches_stdin(args: &HiArgs) -> bool {
-    args.search_paths()
-        .iter()
-        .any(|path| path == Path::new("-"))
 }
 
 /// Run `--index=verify` or `--index=repair`: check the index and report, and
@@ -708,19 +651,6 @@ fn plan_gram_count(plan: &QueryPlan) -> usize {
     plan.gram_count()
 }
 
-/// Candidate document ordinals in the manifest's requested output order.
-fn ordered_candidates(
-    snapshot: &manifest::CurrentSnapshot,
-    candidates: &BTreeSet<usize>,
-) -> Vec<usize> {
-    snapshot
-        .files
-        .iter()
-        .enumerate()
-        .filter_map(|(ord, _)| candidates.contains(&ord).then_some(ord))
-        .collect()
-}
-
 fn restrict_candidates(
     args: &HiArgs,
     roots: &SearchRoots,
@@ -733,328 +663,6 @@ fn restrict_candidates(
             .get(*ord)
             .is_some_and(|file| roots.contains(args.cwd(), &file.path))
     });
-}
-
-/// Every document ordinal in the manifest's requested output order.
-fn all_ordered(snapshot: &manifest::CurrentSnapshot) -> Vec<usize> {
-    (0..snapshot.files.len()).collect()
-}
-
-/// Smallest candidate set that a multi-threaded verify is worth spawning for.
-const PARALLEL_VERIFY_MIN: usize = 4096;
-
-/// Return true when the mode reports on the whole corpus, not just matches.
-fn is_full_corpus_mode(args: &HiArgs, mode: SearchMode) -> bool {
-    matches!(mode, SearchMode::FilesWithoutMatch)
-        || (args.include_zero() && matches!(mode, SearchMode::Count | SearchMode::CountMatches))
-}
-
-/// Worker count for verify: single-threaded unless the candidate set is large.
-fn verify_worker_count(args: &HiArgs, ordered: usize) -> usize {
-    if args.threads() > 1 && ordered >= PARALLEL_VERIFY_MIN {
-        args.threads().min(ordered).max(1)
-    } else {
-        1
-    }
-}
-
-fn verify_candidates(
-    args: &HiArgs,
-    mode: SearchMode,
-    started_at: Instant,
-    snapshot: &manifest::CurrentSnapshot,
-    candidates: &BTreeSet<usize>,
-    bench: Option<&mut bench::BenchReport>,
-) -> anyhow::Result<bool> {
-    if let Some(report) = bench {
-        return verify_candidates_for_bench(args, mode, snapshot, candidates, report);
-    }
-    if is_full_corpus_mode(args, mode) {
-        return verify_full_corpus(args, mode, started_at, snapshot, candidates);
-    }
-    let ordered = ordered_candidates(snapshot, candidates);
-    verify_buffered(args, mode, started_at, snapshot, &ordered)
-}
-
-fn verify_candidates_for_bench(
-    args: &HiArgs,
-    mode: SearchMode,
-    snapshot: &manifest::CurrentSnapshot,
-    candidates: &BTreeSet<usize>,
-    report: &mut bench::BenchReport,
-) -> anyhow::Result<bool> {
-    let started_at = Instant::now();
-    let ordered = if is_full_corpus_mode(args, mode) {
-        all_ordered(snapshot)
-    } else {
-        ordered_candidates(snapshot, candidates)
-    };
-    let mut matched_any = false;
-    let mut matched_files = 0usize;
-    let mut verified_files = 0usize;
-    let mut bytes_verified = 0u64;
-    let sink = termcolor::NoColor::new(Vec::new());
-    let mut searcher =
-        args.search_worker(args.matcher()?, args.searcher()?, args.printer(mode, sink))?;
-    for ord in ordered {
-        let Some(file) = snapshot.files.get(ord) else {
-            continue;
-        };
-        let in_candidates = candidates.contains(&ord);
-        if !in_candidates && !is_full_corpus_mode(args, mode) {
-            continue;
-        }
-        let search_result = if in_candidates {
-            verified_files += 1;
-            bytes_verified = bytes_verified.saturating_add(file_len(args.cwd(), &file.path));
-            let haystack = Haystack::from_index_path(file.path.clone(), file.is_explicit());
-            searcher.search(&haystack)
-        } else if file.is_skipped_binary() {
-            continue;
-        } else {
-            searcher.search_absent(&file.path)
-        };
-        let search_result = match search_result {
-            Ok(search_result) => search_result,
-            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => break,
-            Err(err) => {
-                err_message!("{}: {}", file.path.display(), err);
-                continue;
-            },
-        };
-        if search_result.has_match() {
-            matched_any = true;
-            if in_candidates {
-                matched_files += 1;
-            }
-        }
-    }
-    report.set_verification(verified_files, matched_files, bytes_verified);
-    report.timing_mut().set_verify_candidates(started_at);
-    Ok(matched_any)
-}
-
-/// Report on every corpus file for modes that print zero-match files too.
-///
-/// Files the index ruled out have no matches by soundness, so they are emitted
-/// through the printer with an empty search — the exact zero-count or
-/// without-match line — while the candidate set is searched for real. Output is
-/// path-ordered and single-threaded, matching ripgrep's per-file summary lines.
-fn verify_full_corpus(
-    args: &HiArgs,
-    mode: SearchMode,
-    started_at: Instant,
-    snapshot: &manifest::CurrentSnapshot,
-    candidates: &BTreeSet<usize>,
-) -> anyhow::Result<bool> {
-    let ordered = all_ordered(snapshot);
-    let mut matched = false;
-    let mut stats = args.stats();
-    let mut searcher = args.search_worker(
-        args.matcher()?,
-        args.searcher()?,
-        args.printer(mode, args.stdout()),
-    )?;
-    for &ord in &ordered {
-        let Some(file) = snapshot.files.get(ord) else {
-            continue;
-        };
-        let haystack = Haystack::from_index_path(file.path.clone(), file.is_explicit());
-        let search_result = if candidates.contains(&ord) {
-            searcher.search(&haystack)
-        } else if file.is_skipped_binary() {
-            continue;
-        } else {
-            searcher.search_absent(&file.path)
-        };
-        let search_result = match search_result {
-            Ok(search_result) => search_result,
-            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => break,
-            Err(err) => {
-                err_message!("{}: {}", haystack.path().display(), err);
-                continue;
-            },
-        };
-        matched = matched || search_result.has_match();
-        if let Some(ref mut stats) = stats
-            && let Some(search_stats) = search_result.stats()
-        {
-            *stats += search_stats;
-        }
-    }
-    if let Some(ref stats) = stats {
-        let writer = searcher.printer().get_mut();
-        let _ = crate::print_stats(mode, stats, started_at, writer);
-    }
-    Ok(matched)
-}
-
-/// Reorder buffer that releases per-file output strictly in path order.
-struct Reorder {
-    next_emit: usize,
-    slots: Vec<Option<termcolor::Buffer>>,
-}
-
-impl Reorder {
-    fn new(len: usize) -> Self {
-        Self {
-            next_emit: 0,
-            slots: (0..len).map(|_| None).collect(),
-        }
-    }
-
-    /// Store one file's buffered output, then flush the completed prefix.
-    fn record_and_flush(
-        &mut self,
-        pos: usize,
-        buffer: termcolor::Buffer,
-        bufwtr: &termcolor::BufferWriter,
-    ) -> std::io::Result<()> {
-        if let Some(slot) = self.slots.get_mut(pos) {
-            *slot = Some(buffer);
-        }
-        while self.slots.get(self.next_emit).is_some_and(Option::is_some) {
-            if let Some(Some(ready)) = self.slots.get_mut(self.next_emit).map(Option::take) {
-                bufwtr.print(&ready)?;
-            }
-            self.next_emit += 1;
-        }
-        Ok(())
-    }
-}
-
-/// Shared state for the parallel verify workers.
-struct Verify<'a> {
-    args: &'a HiArgs,
-    snapshot: &'a manifest::CurrentSnapshot,
-    ordered: &'a [usize],
-    next_pos: &'a AtomicUsize,
-    matched: &'a AtomicBool,
-    stats: Option<&'a Mutex<grep::printer::Stats>>,
-    reorder: &'a Mutex<Reorder>,
-    bufwtr: &'a termcolor::BufferWriter,
-}
-
-/// Verify a path-ordered candidate set through per-file buffers.
-///
-/// Output is buffered per file and released in path order by the reorder
-/// buffer, so results are deterministic and the buffer writer inserts context
-/// separators between adjacent printed files exactly as ripgrep's parallel path
-/// does. A worker count of one still routes through the buffer writer, which is
-/// why single-threaded indexed output gets the same separators as parallel.
-fn verify_buffered(
-    args: &HiArgs,
-    mode: SearchMode,
-    started_at: Instant,
-    snapshot: &manifest::CurrentSnapshot,
-    ordered: &[usize],
-) -> anyhow::Result<bool> {
-    let bufwtr = args.buffer_writer();
-    let stats = args.stats().map(Mutex::new);
-    let matched = AtomicBool::new(false);
-    let next_pos = AtomicUsize::new(0);
-    let reorder = Mutex::new(Reorder::new(ordered.len()));
-    let mut stats_searcher = args.search_worker(
-        args.matcher()?,
-        args.searcher()?,
-        args.printer(mode, bufwtr.buffer()),
-    )?;
-    let ctx = Verify {
-        args,
-        snapshot,
-        ordered,
-        next_pos: &next_pos,
-        matched: &matched,
-        stats: stats.as_ref(),
-        reorder: &reorder,
-        bufwtr: &bufwtr,
-    };
-    let worker_count = verify_worker_count(args, ordered.len());
-    std::thread::scope(|scope| -> anyhow::Result<()> {
-        let mut handles = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
-            let searcher = args.search_worker(
-                args.matcher()?,
-                args.searcher()?,
-                args.printer(mode, bufwtr.buffer()),
-            )?;
-            let ctx = &ctx;
-            handles.push(scope.spawn(move || verify_worker(ctx, searcher)));
-        }
-        for handle in handles {
-            match handle.join() {
-                Ok(Ok(())) => {},
-                Ok(Err(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {},
-                Ok(Err(err)) => return Err(err.into()),
-                Err(_) => bail!("indexed search worker thread panicked"),
-            }
-        }
-        Ok(())
-    })?;
-    if let Some(ref locked_stats) = stats {
-        let stats = locked_stats
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let wtr = stats_searcher.printer().get_mut();
-        let _ = crate::print_stats(mode, &stats, started_at, &mut *wtr);
-        let _ = bufwtr.print(wtr);
-    }
-    Ok(matched.load(AtomicOrdering::SeqCst))
-}
-
-/// One verify worker: pull path-ordered candidates and emit through the reorder buffer.
-fn verify_worker(
-    ctx: &Verify,
-    mut searcher: crate::search::SearchWorker<termcolor::Buffer>,
-) -> std::io::Result<()> {
-    loop {
-        if ctx.matched.load(AtomicOrdering::SeqCst) && ctx.args.quit_after_match() {
-            return Ok(());
-        }
-        let pos = ctx.next_pos.fetch_add(1, AtomicOrdering::Relaxed);
-        let Some(&ord) = ctx.ordered.get(pos) else {
-            return Ok(());
-        };
-        let buffer = match ctx.snapshot.files.get(ord) {
-            Some(file) => {
-                verify_one(ctx, &mut searcher, file)?;
-                mem::replace(searcher.printer().get_mut(), ctx.bufwtr.buffer())
-            },
-            None => ctx.bufwtr.buffer(),
-        };
-        ctx.reorder
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .record_and_flush(pos, buffer, ctx.bufwtr)?;
-    }
-}
-
-/// Search one candidate file, updating the shared match flag and stats.
-fn verify_one(
-    ctx: &Verify,
-    searcher: &mut crate::search::SearchWorker<termcolor::Buffer>,
-    file: &manifest::CurrentFile,
-) -> std::io::Result<()> {
-    let haystack = Haystack::from_index_path(file.path.clone(), file.is_explicit());
-    let search_result = match searcher.search(&haystack) {
-        Ok(search_result) => search_result,
-        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => return Err(err),
-        Err(err) => {
-            err_message!("{}: {}", haystack.path().display(), err);
-            return Ok(());
-        },
-    };
-    if search_result.has_match() {
-        ctx.matched.store(true, AtomicOrdering::SeqCst);
-    }
-    if let Some(locked_stats) = ctx.stats
-        && let Some(search_stats) = search_result.stats()
-    {
-        *locked_stats
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) += search_stats;
-    }
-    Ok(())
 }
 
 fn index_root(args: &HiArgs) -> anyhow::Result<PathBuf> {
@@ -1076,10 +684,6 @@ fn index_root(args: &HiArgs) -> anyhow::Result<PathBuf> {
             .parent()
             .map_or_else(|| cwd.to_path_buf(), Path::to_path_buf))
     }
-}
-
-fn file_len(cwd: &Path, path: &Path) -> u64 {
-    std::fs::metadata(absolute_path(cwd, path)).map_or(0, |metadata| metadata.len())
 }
 
 struct CollectedHaystacks {

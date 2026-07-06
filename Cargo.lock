@@ -438,6 +438,7 @@ dependencies = [
  "grep",
  "ignore",
  "lexopt",
+ "libc",
  "log",
  "memmap2",
  "rayon",

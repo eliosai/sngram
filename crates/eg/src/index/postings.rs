@@ -91,6 +91,16 @@ pub(super) fn prepare_index(
     }
 }
 
+pub(super) fn refresh_index(
+    args: &HiArgs,
+    table_fingerprint: u64,
+    table: &WeightTable,
+    index_home: &Path,
+    snapshot: &CurrentSnapshot,
+) -> anyhow::Result<()> {
+    rebuild_index(args, table_fingerprint, table, index_home, snapshot).map(|_| ())
+}
+
 /// Corpus fraction a plan may select before the index stops paying: above
 /// this, candidate verification does strictly more work than a plain scan
 /// (measured 97-99 % FP on numeric/version classes selecting 46-84 %).

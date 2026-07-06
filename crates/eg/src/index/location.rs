@@ -22,16 +22,16 @@ const GITIGNORE_NAME: &str = ".gitignore";
 const CACHE_APP_DIR: &str = "eg";
 
 /// Resolved index locations for one invocation.
-pub(super) struct IndexLocation {
+pub struct IndexLocation {
     /// Corpus root anchoring relative paths and Git detection.
-    pub(super) corpus_root: PathBuf,
+    pub corpus_root: PathBuf,
     /// Directory holding the index files, manifest, and lock.
-    pub(super) state_root: PathBuf,
+    pub state_root: PathBuf,
 }
 
 impl IndexLocation {
     /// Directory holding the backend index files.
-    pub(super) fn index_dir(&self) -> PathBuf {
+    pub fn index_dir(&self) -> PathBuf {
         self.state_root.join(INDEX_DIR_NAME)
     }
 }
@@ -40,7 +40,7 @@ impl IndexLocation {
 ///
 /// The corpus root stays as given so manifest paths and Git detection match the
 /// walk; only the XDG cache name canonicalizes it so placement is cwd-stable.
-pub(super) fn resolve(args: &HiArgs, corpus_root: &Path) -> anyhow::Result<IndexLocation> {
+pub fn resolve(args: &HiArgs, corpus_root: &Path) -> anyhow::Result<IndexLocation> {
     let corpus_root = corpus_root.to_path_buf();
     let state_root = args.index().dir().map_or_else(
         || default_state_root(&corpus_root),
@@ -67,7 +67,7 @@ fn default_state_root(corpus_root: &Path) -> PathBuf {
 }
 
 /// Local state directory for an index root, without creating it.
-pub(super) fn local_state_root(corpus_root: &Path) -> PathBuf {
+pub fn local_state_root(corpus_root: &Path) -> PathBuf {
     corpus_root.join(STATE_DIR_NAME)
 }
 

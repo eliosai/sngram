@@ -1,9 +1,11 @@
 //! Query planning from eg patterns to public sparse-gram plans.
 
 use anyhow::{Context, bail};
-use sngram_types::{QueryPlan, WeightTable};
+use sngram_types::{PlanExpr, QueryError, QueryPlan, WeightTable};
 
 use crate::flags::HiArgs;
+
+use super::request::Unsupported;
 
 /// A query plan plus eg-specific execution predicates.
 pub(super) struct IndexPlan {
@@ -21,6 +23,49 @@ impl IndexPlan {
             sngram_types::PlanExpr::AllOf { grams, .. }
             | sngram_types::PlanExpr::AnyOf { grams, .. } => !grams.is_empty(),
         }
+    }
+}
+
+pub struct QueryPlanner<'a> {
+    args: &'a HiArgs,
+    table: &'a WeightTable,
+}
+
+impl<'a> QueryPlanner<'a> {
+    pub const fn new(args: &'a HiArgs, table: &'a WeightTable) -> Self {
+        Self { args, table }
+    }
+
+    pub fn plan(&self) -> Result<IndexPlan, PlanError> {
+        let plan = query_plan(self.args, self.table).map_err(PlanError::from)?;
+        match plan.plan.root() {
+            PlanExpr::All => return Err(PlanError::Unsupported(Unsupported::TooBroadPattern)),
+            PlanExpr::None => return Err(PlanError::Unsupported(Unsupported::ImpossiblePattern)),
+            PlanExpr::AllOf { .. } | PlanExpr::AnyOf { .. } => {},
+        }
+        if !plan.has_gram_constraints() {
+            return Err(PlanError::Unsupported(Unsupported::TooBroadPattern));
+        }
+        Ok(plan)
+    }
+}
+
+pub enum PlanError {
+    Unsupported(Unsupported),
+    InvalidRegex(String),
+}
+
+impl From<anyhow::Error> for PlanError {
+    fn from(err: anyhow::Error) -> Self {
+        if let Some(query_err) = err.downcast_ref::<QueryError>() {
+            return match query_err {
+                QueryError::InvalidRegex(_) => Self::InvalidRegex(query_err.to_string()),
+                QueryError::PatternTooLong { .. } => Self::Unsupported(Unsupported::PlannerError),
+                _ => Self::Unsupported(Unsupported::PlannerError),
+            };
+        }
+        log::debug!("eg index: planner rejected query: {err:#}");
+        Self::Unsupported(Unsupported::PlannerError)
     }
 }
 

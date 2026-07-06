@@ -9,8 +9,9 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Child, Command, Output},
     sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
 };
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -52,6 +53,135 @@ fn eg_with_env(args: &[&str], envs: &[(&str, &Path)]) -> Output {
         command.env(key, value);
     }
     command.output().unwrap()
+}
+
+fn eg_with_env_vars(args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_eg"));
+    command.args(args);
+    for &(key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().unwrap()
+}
+
+struct ChildGuard {
+    child: Child,
+}
+
+impl ChildGuard {
+    fn spawn_daemon(runtime_root: &Path) -> Self {
+        let child = Command::new(env!("CARGO_BIN_EXE_eg-indexd"))
+            .arg("--runtime-root")
+            .arg(runtime_root)
+            .spawn()
+            .unwrap();
+        Self { child }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn wait_until<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
+    let started = Instant::now();
+    loop {
+        if let Some(value) = f() {
+            return value;
+        }
+        assert!(
+            started.elapsed() <= timeout,
+            "timed out waiting for condition"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn assert_bench_schema(report: &serde_json::Value) {
+    for field in [
+        "ok",
+        "matched",
+        "mode",
+        "backend",
+        "search_roots",
+        "index_root",
+        "generation_id",
+        "used_parent_index",
+        "cold_build",
+        "timings_ms",
+        "counts",
+        "false_positives",
+        "bytes",
+        "generation_source",
+        "freshness_proof",
+        "selectivity_rejected",
+        "query_too_broad",
+        "unsupported_reason",
+    ] {
+        assert!(report.get(field).is_some(), "missing bench field {field}");
+    }
+    for field in [
+        "parse_request",
+        "plan_query",
+        "resolve_roots",
+        "catalog_open",
+        "generation_validate",
+        "initial_build",
+        "index_mmap",
+        "index_query",
+        "verify_candidates",
+        "total",
+    ] {
+        assert!(
+            report["timings_ms"].get(field).is_some(),
+            "missing timing {field}"
+        );
+    }
+    for field in [
+        "total_manifest_files",
+        "text_files",
+        "binary_skipped_files",
+        "query_grams",
+        "candidate_files",
+        "verified_files",
+        "matched_files",
+        "forced_candidate_files",
+        "parent_restricted_candidates",
+        "dirty_forced_candidates",
+    ] {
+        assert!(
+            report["counts"].get(field).is_some(),
+            "missing count {field}"
+        );
+    }
+    for field in [
+        "candidate_files",
+        "matched_files",
+        "false_positive_files",
+        "false_positive_pct",
+        "candidate_pct_of_text_files",
+    ] {
+        assert!(
+            report["false_positives"].get(field).is_some(),
+            "missing false positive field {field}"
+        );
+    }
+    for field in [
+        "index_table_bytes",
+        "index_postings_bytes",
+        "summary_bytes",
+        "manifest_bytes",
+        "mmap_bytes",
+        "bytes_verified",
+    ] {
+        assert!(
+            report["bytes"].get(field).is_some(),
+            "missing bytes {field}"
+        );
+    }
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Output {
@@ -145,6 +275,7 @@ fn index_bench_emits_structured_json_without_match_output() {
         "{}",
         String::from_utf8(output.stderr).unwrap()
     );
+    assert_bench_schema(&report);
     assert_eq!(Some(true), report["ok"].as_bool());
     assert_eq!(Some(true), report["matched"].as_bool());
     assert_eq!(Some("postings"), report["backend"].as_str());
@@ -161,6 +292,7 @@ fn index_bench_reports_structured_errors() {
     let broad_report: serde_json::Value = serde_json::from_str(&broad_stdout).unwrap();
 
     assert_eq!(Some(2), broad.status.code());
+    assert_bench_schema(&broad_report);
     assert_eq!(Some(false), broad_report["ok"].as_bool());
     assert_eq!(Some(true), broad_report["query_too_broad"].as_bool());
     assert!(
@@ -175,6 +307,7 @@ fn index_bench_reports_structured_errors() {
     let no_index_report: serde_json::Value = serde_json::from_str(&no_index_stdout).unwrap();
 
     assert_eq!(Some(2), no_index.status.code());
+    assert_bench_schema(&no_index_report);
     assert_eq!(Some(false), no_index_report["ok"].as_bool());
     assert!(
         no_index_report["unsupported_reason"]
@@ -257,6 +390,59 @@ fn daemon_ready_marker_enables_manifest_only_hot_snapshot() {
         "{}",
         String::from_utf8(output.stderr).unwrap()
     );
+    assert_bench_schema(&report);
+    assert_eq!(Some("daemon"), report["freshness_proof"].as_str());
+    assert_eq!(Some(true), report["matched"].as_bool());
+}
+
+#[test]
+fn daemon_refreshes_changed_index_and_hot_path_uses_daemon_proof() {
+    let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "daemon old needle\n").unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_parent_str = runtime_parent.to_str().unwrap();
+    let root_str = fixture.root.to_str().unwrap();
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent_str),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+
+    let build = eg_with_env_vars(&["daemon old needle", root_str], &envs);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+
+    let runtime_root = runtime_parent.join("eg");
+    let daemon = ChildGuard::spawn_daemon(&runtime_root);
+    let state_runtime = fixture.path(".eg/runtime");
+    let initial_clean = wait_until(Duration::from_secs(10), || {
+        fs::metadata(state_runtime.join("journal-clean"))
+            .and_then(|meta| meta.modified())
+            .ok()
+    });
+
+    fs::write(fixture.path("hit.txt"), "daemon new needle\n").unwrap();
+    wait_until(Duration::from_secs(10), || {
+        let modified = fs::metadata(state_runtime.join("journal-clean"))
+            .and_then(|meta| meta.modified())
+            .ok()?;
+        (modified > initial_clean).then_some(modified)
+    });
+
+    let output = eg_with_env_vars(&["--bench", "daemon new needle", root_str], &envs);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    drop(daemon);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_bench_schema(&report);
     assert_eq!(Some("daemon"), report["freshness_proof"].as_str());
     assert_eq!(Some(true), report["matched"].as_bool());
 }

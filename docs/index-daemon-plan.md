@@ -1,199 +1,136 @@
 # Index Daemon Plan
 
-This is the intended architecture for production indexed `eg`. It is a plan,
-not an implementation.
+This is the production shape for indexed `eg`. The daemon is a cache
+maintainer, not a search server.
 
-## Goal
+## Public Boundary
 
-Keep the CLI boundary simple:
+The CLI-facing index API stays small:
 
-- `index::run(&HiArgs)` is the only indexed-search behavior entrypoint.
-- `index::IndexConfig` is the only index configuration type visible to the CLI
-  argument layer.
-- All daemon spawning, runtime paths, index generation selection, refresh
-  policy, and backend details stay inside `index`.
+- `index::run(&HiArgs)` runs indexed search, maintenance, structured bench, and
+  internal daemon refresh.
+- `index::IndexConfig` is the only index configuration type visible to flag
+  parsing.
+- `index` keeps daemon spawning, runtime files, generation selection, refresh,
+  backend details, and candidate verification internal.
 
-The daemon is not a search server. Search stays in the CLI: the CLI plans the
-query, maps the ready index, finds candidate files, and verifies those
-candidates through the copied ripgrep search worker. The daemon only maintains
-ready index generations after an initial build exists.
+Search remains in the foreground CLI process. The CLI plans the query, selects a
+ready generation from disk, maps the index, queries candidates, and verifies
+them through the copied ripgrep worker. The daemon only keeps generations fresh
+after requests have registered them.
 
-## Process Shape
+## Terms
 
-Use a second binary, tentatively `eg-indexd`.
+- `SearchRoots`: the user-requested haystacks for this invocation.
+- `IndexRoot`: the directory whose index can cover a set of `SearchRoots`.
+- `StateRoot`: the `.eg` or XDG cache directory holding index and runtime state.
+- `Generation`: a compatible published index backend plus manifest.
+- `Walk`: the filtered filesystem traversal used to build a generation.
+- `Haystack`: a file accepted by the walk and eligible for indexing/search.
 
-`index::run` owns daemon startup. The user-facing CLI does not expose daemon
-commands. On demand, `index::run` ensures the daemon binary is available at a
-stable runtime path:
+Do not use `scope` in new code. `IndexRoot` and `SearchRoots` are more precise.
 
-```text
-$XDG_RUNTIME_DIR/eg/bin/eg-indexd
-```
+## Runtime Model
 
-When `XDG_RUNTIME_DIR` is unset, use a per-user temp runtime root with the same
-layout. The runtime copy is versioned by the `eg` build identity, so a stale
-daemon binary cannot maintain an index with incompatible code.
+Use one global `eg-indexd` daemon per user runtime root. The CLI never asks the
+daemon questions and never blocks on daemon RPC. It only touches files:
 
-The daemon code should live under:
+- `StateRoot/runtime/lease`
+- `StateRoot/runtime/wake`
+- `$RUNTIME/eg/requests/<key>.request`
 
-```text
-crates/eg/src/index/daemon/
-```
+The request file carries:
 
-and the binary entrypoint should be minimal, forwarding into that module. The
-search CLI still calls only `index::run`.
+- `cwd`
+- `index_root`
+- `state_root`
+- replayable CLI argv
 
-## Scope Model
+The daemon reads requests, watches their `IndexRoot`s, and replays `eg` with an
+internal refresh environment. That refresh path builds from a fresh walk and
+does not plan or verify the original regex.
 
-An index has a scope root. The scope root is the largest compatible directory
-index that can answer the query safely.
+## Disk Proof
 
-Rules:
+A CLI hot path may skip the full freshness walk only when disk proves the
+generation is daemon-maintained:
 
-- A parent index can answer a child query. Searching `/repo/src` can use an
-  existing compatible `/repo` index, then restrict candidate paths to `/repo/src`.
-- A child index cannot answer a parent query. Searching `/repo` cannot use an
-  index that only covers `/repo/src`.
-- When a parent index becomes healthy, child indexes covered by that parent are
-  redundant. The daemon may remove covered child runtime indexes and refresh the
-  parent TTL.
-- Do not merge child index files into a parent index in the first version.
-  Reusing child segments would complicate ordinals, manifests, summaries,
-  deletes, and freshness. Parent rebuild plus incremental maintenance is the
-  simpler correct model.
+1. The backend manifest exists.
+2. The manifest identity matches the requested backend, weights fingerprint,
+   index format, scanner/query format, and walk/filter fingerprint.
+3. `runtime/watcher-ready` exists.
+4. `runtime/journal-clean` exists.
+5. `runtime/lease` is live.
 
-Compatibility is determined by the indexed corpus root plus the walk/filter
-fingerprint, weight fingerprint, index format version, scanner/query format,
-and backend generation format. If any of those differ, the parent is not
-compatible.
-
-## Cold Miss Flow
-
-When `index::run` cannot find a ready generation:
-
-1. Resolve the scope root and runtime state root.
-2. Start the per-scope daemon and wait for a watcher-ready marker.
-3. The CLI performs the initial full build synchronously, as it does today.
-4. Show a progress bar when stderr is a TTY; otherwise emit sparse progress
-   lines under `--debug`.
-5. Publish the initial generation atomically.
-6. Query the generation and verify candidates.
-7. Leave the daemon running to maintain incremental changes until the idle TTL.
-
-Starting the daemon before the full build is important. Files created, removed,
-or changed while the CLI is scanning must be captured by the daemon journal. For
-the first query after publish, any dirty paths observed during the build should
-be treated as forced candidates until the daemon has applied them to a new
-generation.
-
-## Hot Path
-
-When a ready generation exists and the daemon lease is healthy, the CLI should
-avoid a full freshness walk.
-
-The hot path still performs cheap validation:
-
-- generation manifest exists and is complete
-- format and weight fingerprints match
-- walk/filter fingerprint matches
-- daemon lease is alive
-- watcher state is healthy
-- published generation pointer is atomic and immutable
-
-Then the CLI mmaps the index and queries it. This is "no freshness walk", not
-"trust stale files blindly."
-
-## Runtime Protocol
-
-Use files in the runtime state root, not sockets.
-
-Suggested layout:
-
-```text
-runtime/
-  bin/
-    eg-indexd
-  scopes/
-    <scope-key>/
-      lock
-      daemon.pid
-      lease
-      watcher-ready
-      current
-      generations/
-        <generation-id>/
-      journal/
-      requests/
-```
-
-The daemon owns:
-
-- `daemon.pid`
-- `lease`
-- `watcher-ready`
-- `journal/`
-- generation publication after incremental updates
-
-The CLI owns:
-
-- initial full generation build on cold miss
-- atomic first publish
-- query execution and verification
-- touching the lease/request file to keep the daemon alive
-
-`current` must point to an immutable generation. Never mutate a generation in
-place. New work publishes a new generation, then old generations are garbage
-collected after readers can no longer hold them.
+If any check fails, the CLI falls back to the normal manifest freshness path or
+a cold build. The daemon proof is file-based; there is no socket and no blocking
+daemon call.
 
 ## Daemon Responsibilities
 
-The daemon does not perform the initial full build.
+The daemon:
 
-It does:
+- watches active `IndexRoot`s recursively
+- clears `journal-clean` when the watched tree changes
+- refreshes requested generations by replaying `eg` in internal refresh mode
+- writes `journal-clean` only after refresh succeeds
+- removes child index directories covered by a live parent index
+- exits after all leases expire
 
-- watch the scope root recursively
-- debounce filesystem events
-- record events while the initial build is running
-- scan new and changed files
-- remove deleted files
-- maintain delta segments
-- compact deltas into a new immutable generation when thresholds are reached
-- clean up covered child runtime indexes
-- refresh or expire the per-scope TTL
-- shut down after the idle timeout
-- optionally delete runtime-only index state on shutdown
+The current implementation uses Linux inotify for watcher-backed clean markers.
+Non-Linux builds do not publish `watcher-ready`, so the CLI does not trust a
+daemon freshness proof there.
 
-## One Daemon Per Scope
+## Parent And Child Indexes
 
-Use one daemon per index scope for the first production version.
+A parent `IndexRoot` can answer child `SearchRoots`; candidates are restricted
+to the requested roots before verification. A child index cannot answer a parent
+search.
 
-This keeps the model simple:
+When a parent generation exists, covered child index directories are redundant.
+The daemon may delete the child `StateRoot/index` and keep the parent lease
+alive. Do not merge child backend files into the parent in this version; ordinals,
+manifests, summaries, deletes, and freshness make that the wrong first cut.
 
-- one root watcher
-- one lock
-- one lease
-- one journal
-- one current generation pointer
-- one cleanup policy
+## Cold And Hot Paths
 
-A single global daemon can be added later if many active roots become common,
-but it is not the simplest correct architecture.
+Cold miss:
 
-## TTL And Cleanup
+1. Resolve `SearchRoots`.
+2. Choose the broadest compatible ready generation from disk, or the exact
+   `IndexRoot` for a build.
+3. Touch lease/wake/request files.
+4. Walk and build synchronously in the CLI when no usable generation exists.
+5. Query and verify.
 
-The daemon exits after an idle timeout. A query refreshes the lease. The timeout
-can be configured later, but the default should be conservative enough to keep a
-developer session warm without leaving long-lived background work.
+Hot daemon path:
 
-Runtime-only indexes may be deleted at daemon shutdown. A later persistent-cache
-mode can keep generations across daemon exits for faster cold starts. The exact
-default should be chosen after measuring build cost versus disk churn.
+1. Resolve `SearchRoots`.
+2. Select a compatible generation from disk.
+3. Validate the daemon disk proof.
+4. Snapshot from the manifest without a full freshness walk.
+5. Map/query/verify.
 
-## Non-Goals For The First Version
+Progress output belongs only to cold build, rebuild, repair, or explicit debug
+paths. Hot daemon search should be quiet unless `--bench` is active.
 
-- No search server.
-- No socket protocol.
-- No child-to-parent segment merge.
-- No global daemon.
-- No trusting runtime indexes without a healthy lease and watcher state.
-- No public daemon CLI.
+## Bench Mode
+
+`--bench` is valid only for indexed search. It suppresses normal match output
+and emits one JSON object to stdout for success and failure. It should remain a
+real indexed run, not a synthetic benchmark harness.
+
+The report includes timings, counts, false-positive rates, backend byte sizes,
+generation source, freshness proof, and unsupported reasons. Missing fields are
+bugs because comparison scripts need a stable schema.
+
+## Remaining Work
+
+- Refactor `index::run` into `SearchRequest`, `QueryPlanner`, `Generation`,
+  `InitialBuild`, `Lease`, and `CandidateVerifier` so the top-level function is
+  the intended linear story.
+- Move from the legacy mutable backend directory to explicit immutable
+  `Generation` directories with an atomic `current` pointer.
+- Add integration coverage for daemon refresh through the `eg-indexd` binary.
+- Add benchmark targets for hot catalog/mmap, query-only, verify-only, cold
+  build, parent restriction, and bench overhead.

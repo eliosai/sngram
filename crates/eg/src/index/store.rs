@@ -84,6 +84,28 @@ pub(super) fn prepare_index(
     }
 }
 
+pub(super) fn refresh_index(
+    args: &HiArgs,
+    table_fingerprint: u64,
+    table: &WeightTable,
+    schema: Schema,
+    fields: IndexFields,
+    index_home: &Path,
+    snapshot: &CurrentSnapshot,
+) -> anyhow::Result<()> {
+    auto_disk_index(
+        args,
+        table_fingerprint,
+        table,
+        schema,
+        fields,
+        index_home,
+        snapshot,
+        None,
+    )
+    .map(|_| ())
+}
+
 pub(super) fn query_index(
     index: &TantivyIndex,
     fields: IndexFields,

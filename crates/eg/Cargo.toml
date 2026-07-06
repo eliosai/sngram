@@ -15,11 +15,17 @@ path = "src/main.rs"
 name = "eg-indexd"
 path = "src/index/daemon/main.rs"
 
+[[bench]]
+name = "index"
+path = "benches/index.rs"
+harness = false
+
 [dependencies]
 anyhow = "1.0.75"
 bstr = "1.7.0"
 grep = "0.4.1"
 ignore = "0.4.24"
+libc = "0.2"
 lexopt = "0.3.0"
 log = "0.4.5"
 rayon = "1.10.0"
