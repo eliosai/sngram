@@ -1,0 +1,35 @@
+crates/lib/src/query/mod.rs
+  s_f911a7f11fb798::t_404012ac6ddcdb 12
+crates/lib/src/query/needs.rs
+  s_f911a7f11fb798::t_6826ca941d4597 60
+  s_f911a7f11fb798::t_36a18a070190d7 1-39,45-58,80-81,138-139,154,320-471,476-481,486-571
+  s_f911a7f11fb798::t_d7def6b56dbae7 59,61-79,82-98,102-137,140-153,155-225,235-282,288-319
+  s_f911a7f11fb798::t_aa704263213857 40-44,283-287,472-475,482-485
+  s_f911a7f11fb798::t_11781d494b98b1 99-101
+  s_f911a7f11fb798::t_760ac406de7ef5 226-234
+crates/lib/tests/soundness.rs
+  s_f911a7f11fb798::t_a953f25f759a54 186-227,229-255
+  s_f911a7f11fb798::t_7510d2759bb1a7 228
+crates/lib/src/query/planner.rs
+  s_f911a7f11fb798::t_c054fd20029a95 5,11
+  s_f911a7f11fb798::t_bd6b0c7369ba39 259-262,267-277
+  s_f911a7f11fb798::t_1811b21c35e976 278-279
+docs/fp-optimization-plan.md
+  s_f911a7f11fb798::t_f08e81081034d7 83-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "75f10840f9bab16a22975a74be3facd4d8af7a1b",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
