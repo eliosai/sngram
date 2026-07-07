@@ -132,6 +132,10 @@ impl BenchReport {
             .saturating_add(self.bytes.manifest_bytes);
     }
 
+    pub fn set_corpus_text_bytes(&mut self, corpus_text_bytes: u64) {
+        self.bytes.corpus_text_bytes = corpus_text_bytes;
+    }
+
     pub fn reject_selectivity(&mut self) {
         self.selectivity_rejected = true;
     }
@@ -384,6 +388,7 @@ struct Bytes {
     summary_bytes: u64,
     manifest_bytes: u64,
     mmap_bytes: u64,
+    corpus_text_bytes: u64,
     bytes_verified: u64,
 }
 

@@ -53,6 +53,7 @@ impl<'a> CandidateQuery<'a> {
             let forced = postings::forced_candidate_ordinals(&index, self.plan)?;
             report.timing_mut().set_index_open(open_started_at);
             report.set_index_bytes(&index_home);
+            report.set_corpus_text_bytes(index.corpus_text_bytes());
             report.set_forced_candidate_files(u64::try_from(forced.len()).unwrap_or(u64::MAX));
         }
         postings::query_index(&index, self.plan, self.bench.as_deref_mut())

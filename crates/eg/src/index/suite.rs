@@ -1,6 +1,7 @@
 //! Embedded indexed-vs-unindexed regex benchmark suite.
 
 use std::{
+    collections::BTreeMap,
     env,
     ffi::OsString,
     io::{self, Write},
@@ -29,7 +30,14 @@ pub fn run(args: &HiArgs) -> anyhow::Result<bool> {
 
     let suite = BenchSuite::embedded()?;
     let exe = env::current_exe().context("failed to locate eg executable")?;
-    BenchTable::new(suite.run(args, &exe)?).print()?;
+    let table = BenchTable::new(suite.run(args, &exe)?);
+    table.print()?;
+    let false_negatives = table.false_negative_ids();
+    anyhow::ensure!(
+        false_negatives.is_empty(),
+        "false negatives: indexed hits diverge from scan hits for {}",
+        false_negatives.join(", ")
+    );
     Ok(true)
 }
 
@@ -242,6 +250,15 @@ impl BenchRow {
         }
     }
 
+    fn false_negative(&self) -> bool {
+        let Some(report) = self.indexed.report.as_ref() else {
+            return false;
+        };
+        self.indexed.ok()
+            && self.unindexed.ok()
+            && report.counts.matched_files != self.unindexed.matched_files
+    }
+
     fn scan_speedup(&self) -> Option<f64> {
         (self.indexed.ok() && self.unindexed.ok() && self.indexed.run.wall_ms > 0.0)
             .then_some(self.unindexed.run.wall_ms / self.indexed.run.wall_ms)
@@ -265,9 +282,19 @@ struct BenchJson {
     #[serde(default)]
     false_positives: FalsePositiveJson,
     #[serde(default)]
+    bytes: BytesJson,
+    #[serde(default)]
     selectivity_rejected: bool,
     #[serde(default)]
     query_too_broad: bool,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+struct BytesJson {
+    #[serde(default)]
+    mmap_bytes: u64,
+    #[serde(default)]
+    corpus_text_bytes: u64,
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -326,8 +353,50 @@ impl BenchTable {
         for row in &self.rows {
             self.write_row(&mut out, row)?;
         }
+        self.write_class_summaries(&mut out)?;
         self.write_summary(&mut out)?;
         Ok(())
+    }
+
+    fn write_class_summaries(&self, out: &mut impl Write) -> io::Result<()> {
+        let mut classes: BTreeMap<&str, Vec<&BenchRow>> = BTreeMap::new();
+        for row in &self.rows {
+            let class = row.id.split('_').next().unwrap_or(&row.id);
+            classes.entry(class).or_default().push(row);
+        }
+        for (class, rows) in classes {
+            let summary = Summary::from_rows(rows.into_iter());
+            writeln!(
+                out,
+                "class {:<10} regexes={} candidates={} verified={} matches={} false_positives={} false_positive_pct={:.2}",
+                class,
+                summary.regexes,
+                summary.candidates,
+                summary.verified,
+                summary.matches,
+                summary.false_positives,
+                summary.false_positive_pct(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn false_negative_ids(&self) -> Vec<&str> {
+        self.rows
+            .iter()
+            .filter(|row| row.false_negative())
+            .map(|row| row.id.as_str())
+            .collect()
+    }
+
+    fn index_bytes(&self) -> BytesJson {
+        self.warm
+            .iter()
+            .chain(self.rows.iter().map(|row| &row.indexed))
+            .filter_map(|measurement| measurement.report.as_ref())
+            .map(|report| report.bytes)
+            .find(|bytes| bytes.mmap_bytes > 0)
+            .unwrap_or_default()
     }
 
     fn write_header(&self, out: &mut impl Write) -> io::Result<()> {
@@ -389,9 +458,10 @@ impl BenchTable {
 
     fn write_summary(&self, out: &mut impl Write) -> io::Result<()> {
         let summary = Summary::from_rows(&self.rows);
+        let bytes = self.index_bytes();
         writeln!(
             out,
-            "summary regexes={} indexed_ok={} unsupported={} scan_ok={} rg_ok={} warm_wall_ms={:.2} idx_wall_ms={:.2} scan_wall_ms={:.2} rg_wall_ms={:.2} speedup_scan={} speedup_rg={} candidates={} verified={} matches={} false_positives={} false_positive_pct={:.2}",
+            "summary regexes={} indexed_ok={} unsupported={} scan_ok={} rg_ok={} warm_wall_ms={:.2} idx_wall_ms={:.2} scan_wall_ms={:.2} rg_wall_ms={:.2} speedup_scan={} speedup_rg={} candidates={} verified={} matches={} false_positives={} false_positive_pct={:.2} false_negative_rows={} index_bytes={} corpus_bytes={} index_ratio={}",
             summary.regexes,
             summary.indexed_ok,
             summary.unsupported,
@@ -408,6 +478,10 @@ impl BenchTable {
             summary.matches,
             summary.false_positives,
             summary.false_positive_pct(),
+            self.false_negative_ids().len(),
+            bytes.mmap_bytes,
+            bytes.corpus_text_bytes,
+            Ratio(bytes.mmap_bytes, bytes.corpus_text_bytes),
         )
     }
 }
@@ -429,12 +503,10 @@ struct Summary {
 }
 
 impl Summary {
-    fn from_rows(rows: &[BenchRow]) -> Self {
-        let mut summary = Self {
-            regexes: rows.len(),
-            ..Self::default()
-        };
+    fn from_rows<'a>(rows: impl IntoIterator<Item = &'a BenchRow>) -> Self {
+        let mut summary = Self::default();
         for row in rows {
+            summary.regexes += 1;
             summary.add(row);
         }
         summary
@@ -489,6 +561,17 @@ impl std::fmt::Display for Speed {
             Some(speedup) => write!(f, "{speedup:.2}x"),
             None => f.write_str("n/a"),
         }
+    }
+}
+
+struct Ratio(u64, u64);
+
+impl std::fmt::Display for Ratio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.1 == 0 {
+            return f.write_str("n/a");
+        }
+        write!(f, "{:.2}", self.0 as f64 / self.1 as f64)
     }
 }
 
@@ -552,14 +635,151 @@ fn cell(value: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchRun, BenchTable, Summary, cell, parse_suite};
+    use super::{
+        BenchCase, BenchJson, BenchRow, BenchRun, BenchTable, CountsJson, IndexedMeasurement,
+        MeasuredCommand, Summary, UnindexedMeasurement, cell, parse_suite,
+    };
+
+    fn command(stdout: &str) -> MeasuredCommand {
+        MeasuredCommand {
+            code: Some(0),
+            stdout: stdout.to_string(),
+            wall_ms: 1.0,
+        }
+    }
+
+    fn indexed(ok: bool, matched_files: u64) -> IndexedMeasurement {
+        IndexedMeasurement {
+            run: command(""),
+            report: Some(BenchJson {
+                ok,
+                counts: CountsJson {
+                    matched_files,
+                    ..CountsJson::default()
+                },
+                ..BenchJson::default()
+            }),
+        }
+    }
+
+    fn scanned(matched_files: u64) -> UnindexedMeasurement {
+        UnindexedMeasurement {
+            run: command(""),
+            matched_files,
+        }
+    }
+
+    fn row(id: &str, indexed_hits: u64, scan_hits: u64) -> BenchRow {
+        BenchRow::new(
+            &BenchCase {
+                id: id.to_string(),
+                pattern: "p".to_string(),
+                flags: Vec::new(),
+            },
+            indexed(true, indexed_hits),
+            scanned(scan_hits),
+            None,
+        )
+    }
+
+    #[test]
+    fn false_negative_rows_are_detected() {
+        let rows = vec![row("lit_ok", 5, 5), row("gap_fn", 3, 5)];
+        let table = BenchTable::new(BenchRun { warm: None, rows });
+        assert_eq!(vec!["gap_fn"], table.false_negative_ids());
+
+        let mut out = Vec::new();
+        table.write_summary(&mut out).expect("summary");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(text.contains("false_negative_rows=1"));
+    }
+
+    fn row_with_fps(id: &str, verified: u64, matched: u64) -> BenchRow {
+        let mut row = row(id, matched, matched);
+        let report = row.indexed.report.as_mut().expect("report");
+        report.counts.verified_files = verified;
+        report.false_positives.false_positive_files = verified - matched;
+        row
+    }
+
+    #[test]
+    fn summary_reports_index_to_corpus_ratio() {
+        let mut sized = row("lit_sized", 1, 1);
+        let report = sized.indexed.report.as_mut().expect("report");
+        report.bytes.mmap_bytes = 500;
+        report.bytes.corpus_text_bytes = 1000;
+        let table = BenchTable::new(BenchRun {
+            warm: None,
+            rows: vec![sized],
+        });
+
+        let mut out = Vec::new();
+        table.write_summary(&mut out).expect("summary");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(text.contains("index_bytes=500"));
+        assert!(text.contains("corpus_bytes=1000"));
+        assert!(text.contains("index_ratio=0.50"));
+    }
+
+    #[test]
+    fn class_summaries_group_rows_by_id_prefix() {
+        let rows = vec![
+            row_with_fps("lit_rare", 10, 5),
+            row_with_fps("lit_common", 10, 10),
+            row_with_fps("gap_pair", 4, 0),
+        ];
+        let table = BenchTable::new(BenchRun { warm: None, rows });
+
+        let mut out = Vec::new();
+        table.write_class_summaries(&mut out).expect("classes");
+        let text = String::from_utf8(out).expect("utf8");
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert_eq!(2, lines.len());
+        assert!(lines[0].starts_with("class gap"));
+        assert!(lines[0].contains("regexes=1"));
+        assert!(lines[0].contains("false_positive_pct=100.00"));
+        assert!(lines[1].starts_with("class lit"));
+        assert!(lines[1].contains("regexes=2"));
+        assert!(lines[1].contains("false_positive_pct=25.00"));
+    }
+
+    #[test]
+    fn unsupported_rows_are_not_false_negatives() {
+        let unsupported = BenchRow::new(
+            &BenchCase {
+                id: "broad".to_string(),
+                pattern: "p".to_string(),
+                flags: Vec::new(),
+            },
+            indexed(false, 0),
+            scanned(9),
+            None,
+        );
+        let table = BenchTable::new(BenchRun {
+            warm: None,
+            rows: vec![unsupported],
+        });
+        assert!(table.false_negative_ids().is_empty());
+    }
 
     #[test]
     fn embedded_suite_has_many_regexes() {
         let suite = parse_suite(super::SUITE_TSV).expect("suite parses");
-        assert!(suite.cases.len() >= 240);
+        assert!(suite.cases.len() >= 290);
         assert_eq!("lit_rare", suite.cases[0].id);
         assert_eq!("sched_clock", suite.cases[0].pattern);
+    }
+
+    #[test]
+    fn embedded_suite_covers_simple_query_classes() {
+        let suite = parse_suite(super::SUITE_TSV).expect("suite parses");
+        for class in ["simple_", "prose_", "zero_", "gap_", "anchor_", "config_"] {
+            assert!(
+                suite.cases.iter().any(|case| case.id.starts_with(class)),
+                "missing class {class}"
+            );
+        }
     }
 
     #[test]

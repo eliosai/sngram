@@ -800,6 +800,10 @@ impl PostingsIndex {
         Ok(Some(Self { base, summaries }))
     }
 
+    pub fn corpus_text_bytes(&self) -> u64 {
+        self.summaries.text_bytes()
+    }
+
     fn lookup(&self, hash: u64) -> anyhow::Result<Vec<usize>> {
         self.base.lookup(hash)
     }

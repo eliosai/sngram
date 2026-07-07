@@ -130,6 +130,15 @@ impl SummaryIndex {
         self.text_count
     }
 
+    pub fn text_bytes(&self) -> u64 {
+        (0..self.doc_count)
+            .map(|ord| match self.status(ord) {
+                SummaryStatus::Known(summary) => summary.byte_len,
+                _ => 0,
+            })
+            .sum()
+    }
+
     pub fn ordinals_satisfying(&self, need: &ScanNeed) -> Vec<usize> {
         self.filter_ordinals(|status| status.satisfies(need))
     }
@@ -555,6 +564,20 @@ mod tests {
 
         assert_eq!(segment.len(), 2);
         assert!(!segment.covers_base(2));
+    }
+
+    #[test]
+    fn text_bytes_sums_known_summaries() {
+        let mut sized = empty_summary();
+        sized.byte_len = 40;
+        let records = vec![
+            SummaryRecord::new(0, SummaryStatus::Skipped),
+            SummaryRecord::new(1, SummaryStatus::UnknownText),
+            SummaryRecord::new(2, SummaryStatus::Known(sized)),
+        ];
+        let index = SummaryIndex::from_records(records, 3).unwrap();
+
+        assert_eq!(index.text_bytes(), 40);
     }
 
     #[test]

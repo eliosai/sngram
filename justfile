@@ -3,6 +3,14 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 default:
     just --list
 
+# fp suite against a corpus directory
+suite corpus=".":
+    cd {{corpus}} && {{justfile_directory()}}/target/release/eg --bench
+
+# fp suite against the guard corpus
+guard:
+    just suite ~/ripos/gitoxide
+
 eg action="help" *args:
     case "{{action}}" in \
       build) cargo build -p eg --offline {{args}} ;; \

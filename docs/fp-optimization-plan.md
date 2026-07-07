@@ -71,7 +71,10 @@ execution are.
 - Suite output gains per-class FP aggregation (label prefix) and index
   bytes-per-corpus-byte.
 - Make the FN guard explicit: any `hit != scan_hit` row fails the suite run.
-- Pick and wire the guard corpus (env or flag on the suite).
+- Guard corpus: ~/ripos/gitoxide (Rust, structurally unlike the kernel), via
+  `just guard`; `just suite <dir>` runs any corpus.
+- Simple human queries are first-class targets: plain words and phrases
+  ("hello world", TODO, single -w words) get their own suite classes.
 
 ### Phase 1 — wire the dead ScanNeeds (free precision)
 

@@ -316,3 +316,69 @@ path_netdevice	include/linux/netdevice\.h
 # --- gap floor sentinels ---
 gap_spinlock_pair	spin_lock.*spin_unlock
 gap_static_err	static.*return -E
+
+# --- simple human queries: plain words and phrases a person types ---
+simple_hello_world	hello world
+simple_hello_ci	hello world	-i
+simple_hello_title	Hello World
+simple_todo	TODO
+simple_fixme	FIXME
+simple_xxx_marker	XXX
+simple_workaround	workaround
+simple_deprecated	deprecated
+simple_username	username
+simple_password	password
+simple_timeout	timeout
+simple_error_word	error	-w
+simple_log_word	log	-w
+simple_err_word	err	-w
+simple_usb_short	usb
+simple_net_short	net	-w
+simple_main_word	main	-w
+simple_buffer_overflow	buffer overflow
+simple_memory_leak	memory leak
+simple_race_condition	race condition
+simple_use_after_free	use after free
+simple_double_free	double free
+simple_off_by_one	off by one
+simple_not_implemented	not implemented
+simple_dont_use	don't use
+simple_broken	broken	-w
+simple_hack_word	hack	-w
+simple_kernel_panic	kernel panic
+simple_kernel_panic_ci	Kernel Panic	-i
+
+# --- prose phrases from comments and docs ---
+prose_for_example	for example
+prose_in_the_future	in the future
+prose_as_well_as	as well as
+prose_should_never	should never happen
+prose_this_function	This function
+prose_note_that	Note that
+prose_no_longer	no longer
+
+# --- zero-match probes: candidates admitted for absent strings are pure FP ---
+zero_hello_xyzzy	hello_world_xyzzy
+zero_camel_probe	SuperCaliFragilisticName
+zero_phrase	purple monkey dishwasher
+zero_word_run	the the the the the
+zero_ident	qwerty_zxcvb_asdfg
+zero_hex_probe	0xfeedfacecafebeef
+zero_gap	xyzzy_alpha.*xyzzy_omega
+
+# --- more gap shapes ---
+gap_if_goto	if.*goto
+gap_alloc_free	kmalloc.*kfree
+gap_case_break	case.*break;
+gap_three_stage	static.*int.*return
+
+# --- more anchors ---
+anchor_close_brace	^}$
+anchor_return_only	^\treturn;$
+anchor_endif	^#endif
+anchor_star_comment	^ \* 
+
+# --- config and structured text ---
+config_compatible	compatible = "
+config_status_okay	status = "okay"
+config_makefile_obj	obj-\$\(CONFIG_
