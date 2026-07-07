@@ -1,0 +1,51 @@
+crates/eg/src/index/manifest.rs
+  s_f911a7f11fb798::t_2bf574964ed9ad 1325
+  s_f911a7f11fb798::t_340be36e2412e3 1421-1429
+  s_f911a7f11fb798::t_a947688dc3d4eb 542-546
+  s_f911a7f11fb798::t_2c8810591f1ada 1420
+crates/eg/src/index/daemon/watch.rs
+  s_f911a7f11fb798::t_82743c52c5a6f0 276-282
+  s_f911a7f11fb798::t_6e9a34739b3160 322-333,336-343
+  s_f911a7f11fb798::t_898301e44a8df9 334-335
+  s_f911a7f11fb798::t_93ff581a2dfd92 79-81
+  s_f911a7f11fb798::t_148d0d2a9f20b5 159
+crates/eg/src/index/daemon/main.rs
+  s_f911a7f11fb798::t_cb33d0bf9f0267 504-520,522,527-529
+  s_f911a7f11fb798::t_ee1bdbbd750016 106-108
+  s_f911a7f11fb798::t_71ddadaab34005 93-95,97,99,104-105,109-111,113-117
+  s_f911a7f11fb798::t_e6c6fa24cbd360 102
+  s_f911a7f11fb798::t_0a8e012a5d25ae 593-594
+  s_f911a7f11fb798::t_444516f6533067 852-856,874-878
+  s_f911a7f11fb798::t_8306dbbd31f68e 861,868,870
+  s_f911a7f11fb798::t_5981f8742d9c43 75
+  s_f911a7f11fb798::t_299c78098bad12 821,831-836,839
+  s_f911a7f11fb798::t_de34ee546e23eb 521,523-526
+  s_f911a7f11fb798::t_231214d490df31 96
+  s_f911a7f11fb798::t_33e3e4a721512c 718-749,752-765,840
+  s_f911a7f11fb798::t_cca5579c324c65 750-751
+  s_f911a7f11fb798::t_675e2af7a9627a 842-851,857,863-865,871-873,880
+  s_f911a7f11fb798::t_558485c32b3182 591-592
+  s_f911a7f11fb798::t_246c6854ea6322 885
+  s_f911a7f11fb798::t_4574c0cbe90ace 900-901
+  s_f911a7f11fb798::t_4b41440f005bf6 841
+crates/eg/src/index/postings.rs
+  s_f911a7f11fb798::t_23620b7176b326 77-79,91-107
+  s_f911a7f11fb798::t_eaef42e2af65d3 27-28,34
+  s_f911a7f11fb798::t_8a9be12a425acf 108-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9d9a7af16716ce48f8fa77502387caf8ee39b81f",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
