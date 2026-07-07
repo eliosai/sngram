@@ -76,6 +76,9 @@ mod linux {
         }
 
         pub fn watch_tree(&mut self, index_root: &Path, state_root: &Path) -> anyhow::Result<bool> {
+            if !index_root.is_dir() {
+                return Ok(false);
+            }
             self.watch_dir_recursive(index_root, state_root)?;
             Ok(true)
         }
@@ -153,7 +156,7 @@ mod linux {
             let wd = unsafe { libc::inotify_add_watch(self.fd, path.as_ptr(), WATCH_MASK) };
             if wd < 0 {
                 self.watched_dirs.remove(dir);
-                return Err(io::Error::last_os_error().into());
+                return tolerate_unwatchable(io::Error::last_os_error());
             }
             self.dirs_by_watch.insert(
                 wd,
@@ -270,6 +273,13 @@ mod linux {
         Ok(dirs)
     }
 
+    fn tolerate_unwatchable(err: io::Error) -> anyhow::Result<()> {
+        match err.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => Ok(()),
+            _ => Err(err.into()),
+        }
+    }
+
     fn is_state_path(path: &Path, state_root: &Path) -> bool {
         path == state_root
             || path.starts_with(state_root)
@@ -307,6 +317,28 @@ mod linux {
 
             let dirty = watcher.drain_dirty().expect("dirty");
             assert!(dirty.contains(&state));
+        }
+
+        #[test]
+        fn missing_root_is_skipped_without_error() {
+            let root = scratch("missing");
+            let gone = root.join("deleted-corpus");
+            let state = gone.join(".eg");
+
+            let mut watcher = Watcher::new().expect("watcher");
+            let watching = watcher.watch_tree(&gone, &state).expect("must not error");
+            assert!(!watching);
+        }
+
+        #[test]
+        fn existing_tree_reports_watching() {
+            let root = scratch("existing");
+            let state = root.join(".eg");
+            fs::create_dir_all(&state).expect("state");
+            fs::create_dir_all(root.join("kept")).expect("kept");
+
+            let mut watcher = Watcher::new().expect("watcher");
+            assert!(watcher.watch_tree(&root, &state).expect("watch tree"));
         }
 
         #[test]

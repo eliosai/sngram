@@ -24,12 +24,14 @@ use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed, 
 use crate::flags::HiArgs;
 
 use super::manifest::{
-    CurrentFile, CurrentSnapshot, ManifestBackend, manifest_for, write_manifest, write_path_table,
+    CurrentFile, CurrentSnapshot, ManifestBackend, manifest_for, read_manifest, write_manifest,
+    write_path_table,
 };
 use super::progress::{BuildPhase, BuildProgress};
 use super::{
     bench,
     executor::{self, PlanBackend},
+    manifest,
     summary::{self, SummaryIndex, SummaryRecord},
 };
 
@@ -72,6 +74,9 @@ pub fn refresh_index(
     snapshot: &CurrentSnapshot,
     progress: Option<&BuildProgress>,
 ) -> anyhow::Result<bench::BuildTimings> {
+    if published_index_matches(index_home, table_fingerprint, snapshot) {
+        return Ok(bench::BuildTimings::default());
+    }
     rebuild_index(
         args,
         table_fingerprint,
@@ -81,6 +86,25 @@ pub fn refresh_index(
         progress,
     )
     .map(|(_, timings)| timings)
+}
+
+/// True when the published index already covers this exact snapshot
+fn published_index_matches(
+    index_home: &Path,
+    table_fingerprint: u64,
+    snapshot: &CurrentSnapshot,
+) -> bool {
+    let Ok(Some(old)) = read_manifest(&index_home.join(MANIFEST_FILE_NAME)) else {
+        return false;
+    };
+    let new = manifest_for(ManifestBackend::Postings, table_fingerprint, snapshot);
+    if !manifest::is_unchanged(&old, &new) {
+        return false;
+    }
+    matches!(
+        PostingsIndex::open(index_home, snapshot.file_count()),
+        Ok(Some(_))
+    )
 }
 
 /// Corpus fraction a plan may select before the index stops paying: above

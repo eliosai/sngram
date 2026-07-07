@@ -72,7 +72,7 @@ impl Daemon {
         loop {
             let requests = read_requests(&self.runtime_root)?;
             self.clear_dirty()?;
-            self.refresh_requests(&requests)?;
+            self.refresh_requests(&requests);
             consolidate_children(&requests);
             if requests.iter().any(Request::has_live_lease) {
                 self.wait_for_changes(POLL_INTERVAL)?;
@@ -90,20 +90,31 @@ impl Daemon {
     fn prepare_startup(&self) -> anyhow::Result<()> {
         let _ = fs::remove_file(self.runtime_root.join(STARTUP_READY_FILE_NAME));
         let requests = read_requests(&self.runtime_root)?;
-        self.mark_startup_ready()?;
-        if let Err(err) = Self::cleanup_state_roots(&requests) {
-            let _ = fs::remove_file(self.runtime_root.join(STARTUP_READY_FILE_NAME));
-            return Err(err);
+        for request in &requests {
+            match startup_disposition(request) {
+                StartupDisposition::Adopt => adopt_request(request),
+                StartupDisposition::Discard => discard_state(request),
+            }
         }
-        Ok(())
+        self.mark_startup_ready()
     }
 
-    fn refresh_requests(&mut self, requests: &[Request]) -> anyhow::Result<()> {
+    fn refresh_requests(&mut self, requests: &[Request]) {
         for request in requests {
-            self.watch_request(request)?;
-            self.refresh_if_needed(request)?;
+            if !request.index_root.is_dir() {
+                discard_request(request);
+                continue;
+            }
+            if !request.has_live_lease() {
+                continue;
+            }
+            let _ = self.serve_request(request);
         }
-        Ok(())
+    }
+
+    fn serve_request(&mut self, request: &Request) -> anyhow::Result<()> {
+        self.watch_request(request)?;
+        self.refresh_if_needed(request)
     }
 
     fn watch_request(&mut self, request: &Request) -> anyhow::Result<()> {
@@ -148,13 +159,6 @@ impl Daemon {
             remove_file_if_exists(&request.path).with_context(|| {
                 format!("failed to remove daemon request {}", request.path.display())
             })?;
-        }
-        Ok(())
-    }
-
-    fn cleanup_state_roots(requests: &[Request]) -> anyhow::Result<()> {
-        for request in requests {
-            cleanup_state_root(&request.state_root)?;
         }
         Ok(())
     }
@@ -497,6 +501,32 @@ fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
     }
 }
 
+enum StartupDisposition {
+    Adopt,
+    Discard,
+}
+
+fn startup_disposition(request: &Request) -> StartupDisposition {
+    if request.index_root.is_dir() && request.has_live_lease() {
+        StartupDisposition::Adopt
+    } else {
+        StartupDisposition::Discard
+    }
+}
+
+fn adopt_request(request: &Request) {
+    clear_journal_clean(&request.state_root);
+}
+
+fn discard_state(request: &Request) {
+    let _ = cleanup_state_root(&request.state_root);
+}
+
+fn discard_request(request: &Request) {
+    discard_state(request);
+    let _ = remove_file_if_exists(&request.path);
+}
+
 fn consolidate_children(requests: &[Request]) {
     for parent in requests
         .iter()
@@ -558,8 +588,10 @@ fn hex_nibble(byte: u8) -> anyhow::Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_LEASE_TTL, Daemon, LEASE_FILE_NAME, RUNTIME_DIR_NAME, Request,
-        consolidate_children, lease_ttl_from, mark_lease_live, read_request, read_requests,
+        DEFAULT_LEASE_TTL, Daemon, JOURNAL_CLEAN_FILE_NAME, LEASE_FILE_NAME, RUNTIME_DIR_NAME,
+        Request, StartupDisposition, adopt_request, consolidate_children, discard_request,
+        discard_state, lease_ttl_from, mark_lease_live, read_request, read_requests,
+        startup_disposition,
     };
     use std::{
         ffi::OsString,
@@ -684,6 +716,54 @@ arg=6e6565646c65
     }
 
     #[test]
+    fn startup_adopts_live_rooted_requests() {
+        let root = scratch("adopt");
+        let request = request_for(&root);
+        let runtime = root.join(RUNTIME_DIR_NAME);
+        fs::create_dir_all(&runtime).expect("runtime");
+        fs::write(runtime.join(LEASE_FILE_NAME), "lease").expect("lease");
+        fs::write(runtime.join(JOURNAL_CLEAN_FILE_NAME), "clean").expect("clean");
+
+        assert!(matches!(
+            startup_disposition(&request),
+            StartupDisposition::Adopt
+        ));
+        adopt_request(&request);
+        assert!(!runtime.join(JOURNAL_CLEAN_FILE_NAME).exists());
+        assert!(runtime.join(LEASE_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn startup_discards_requests_for_missing_roots() {
+        let root = scratch("discard-root");
+        let mut request = request_for(&root);
+        request.index_root = root.join("gone");
+        let runtime = root.join(RUNTIME_DIR_NAME);
+        fs::create_dir_all(&runtime).expect("runtime");
+        fs::write(runtime.join(LEASE_FILE_NAME), "lease").expect("lease");
+        fs::write(&request.path, "stale").expect("request file");
+
+        assert!(matches!(
+            startup_disposition(&request),
+            StartupDisposition::Discard
+        ));
+        discard_state(&request);
+        assert!(request.path.exists());
+        assert!(!runtime.join(JOURNAL_CLEAN_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn startup_discards_expired_leases() {
+        let root = scratch("discard-lease");
+        let request = request_for(&root);
+
+        assert!(matches!(
+            startup_disposition(&request),
+            StartupDisposition::Discard
+        ));
+    }
+
+    #[test]
     fn wake_newer_than_clean_requests_refresh() {
         let root = scratch("wake");
         let request = request_for(&root);
@@ -738,7 +818,7 @@ arg=6e6565646c65
     }
 
     #[test]
-    fn startup_cleanup_keeps_request_file_for_rebuild() {
+    fn dead_request_discard_removes_state_and_request_file() {
         let root = scratch("startup-cleanup");
         let state = root.join("state");
         let request_path = root.join("entry.request");
@@ -748,44 +828,61 @@ arg=6e6565646c65
             path: request_path.clone(),
             ..request_for(&state)
         };
-        Daemon::cleanup_state_roots(&[request]).expect("cleanup");
+
+        assert!(matches!(
+            startup_disposition(&request),
+            StartupDisposition::Discard
+        ));
+        discard_request(&request);
 
         assert!(!state.join("index").exists());
-        assert!(request_path.exists());
+        assert!(!request_path.exists());
+    }
+
+    fn corpus_with_index(root: &Path, name: &str, live: bool) -> PathBuf {
+        let corpus = root.join(name);
+        fs::create_dir_all(corpus.join("index")).expect("index");
+        fs::write(corpus.join("index/data"), "data").expect("data");
+        if live {
+            let runtime = corpus.join(RUNTIME_DIR_NAME);
+            fs::create_dir_all(&runtime).expect("runtime");
+            fs::write(runtime.join(LEASE_FILE_NAME), "lease").expect("lease");
+            fs::write(runtime.join(JOURNAL_CLEAN_FILE_NAME), "clean").expect("clean");
+        }
+        write_request(
+            &root.join(format!("requests/{name}.request")),
+            &corpus,
+            &corpus,
+        );
+        corpus
     }
 
     #[test]
-    fn startup_cleanup_deletes_all_stale_indexes_after_ready() {
+    fn startup_discards_dead_requests_and_adopts_live_ones() {
         let root = scratch("startup-all-clean");
-        let requests = root.join("requests");
-        let one = root.join("one");
-        let two = root.join("two");
-        fs::create_dir_all(&requests).expect("requests");
-        fs::create_dir_all(one.join("index")).expect("one index");
-        fs::create_dir_all(two.join("index")).expect("two index");
-        fs::write(one.join("index/stale"), "stale").expect("one stale");
-        fs::write(two.join("index/stale"), "stale").expect("two stale");
-        write_request(&requests.join("one.request"), &one, &one);
-        write_request(&requests.join("two.request"), &two, &two);
+        fs::create_dir_all(root.join("requests")).expect("requests");
+        let dead = corpus_with_index(&root, "dead", false);
+        let live = corpus_with_index(&root, "live", true);
         let daemon = Daemon::new(root.clone(), "owner".to_owned()).expect("daemon");
 
-        daemon.prepare_startup().expect("startup cleanup");
+        daemon.prepare_startup().expect("startup");
 
-        assert!(!one.join("index").exists());
-        assert!(!two.join("index").exists());
-        assert_eq!(
-            "owner",
-            fs::read_to_string(root.join("startup-ready"))
-                .expect("startup ready")
-                .trim()
+        assert!(!dead.join("index").exists());
+        assert!(root.join("requests/dead.request").exists());
+        assert!(live.join("index/data").exists());
+        assert!(root.join("requests/live.request").exists());
+        assert!(
+            !live
+                .join(RUNTIME_DIR_NAME)
+                .join(JOURNAL_CLEAN_FILE_NAME)
+                .exists()
         );
-        assert!(requests.join("one.request").exists());
-        assert!(requests.join("two.request").exists());
+        assert!(root.join("startup-ready").exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn startup_cleanup_failure_keeps_daemon_unready() {
+    fn startup_survives_undeletable_state() {
         use std::os::unix::fs::PermissionsExt;
 
         let root = scratch("startup-clean-fail");
@@ -800,9 +897,8 @@ arg=6e6565646c65
         let result = daemon.prepare_startup();
 
         fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).expect("writable");
-        assert!(result.is_err());
-        assert!(!root.join("startup-ready").exists());
-        assert!(state.join("index").exists());
+        assert!(result.is_ok());
+        assert!(root.join("startup-ready").exists());
     }
 
     #[test]

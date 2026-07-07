@@ -539,6 +539,11 @@ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
+/// True when nothing changed between two manifests of the same corpus.
+pub fn is_unchanged(old: &Manifest, new: &Manifest) -> bool {
+    matches!(changed_ordinals(old, new), Some(changed) if changed.is_empty())
+}
+
 pub fn changed_ordinals(old: &Manifest, new: &Manifest) -> Option<Vec<usize>> {
     if old.version != new.version
         || old.schema_version != new.schema_version
@@ -1317,7 +1322,7 @@ mod tests {
 
     use super::{
         Manifest, ManifestFile, binary_manifest_path, changed_ordinals, file_content_changed,
-        read_binary_manifest, write_binary_manifest,
+        is_unchanged, read_binary_manifest, write_binary_manifest,
     };
 
     fn file(len: u64, modified: u64, changed: u64, content: Option<u64>) -> ManifestFile {
@@ -1410,6 +1415,16 @@ mod tests {
         new.files[0].skipped_binary = true;
 
         assert_eq!(changed_ordinals(&old, &new), Some(vec![0]));
+    }
+
+    #[test]
+    fn identical_manifests_are_unchanged() {
+        let old = manifest(vec![file(10, 1, 1, None)]);
+        let new = manifest(vec![file(10, 1, 1, None)]);
+
+        assert!(is_unchanged(&old, &new));
+        assert!(!is_unchanged(&old, &manifest(vec![file(11, 2, 1, None)])));
+        assert!(!is_unchanged(&old, &manifest(Vec::new())));
     }
 
     #[test]
