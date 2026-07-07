@@ -6,18 +6,49 @@ use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed};
 
 use super::summary::{SummaryIndex, SummaryStatus};
 
+/// All-blocks mask for doc-granular entries
+pub const FULL_MASK: u8 = u8::MAX;
+
+/// One posting: a document ordinal and the line blocks the gram touches
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Posting {
+    pub ord: usize,
+    pub mask: u8,
+}
+
+impl Posting {
+    pub const fn full(ord: usize) -> Self {
+        Self {
+            ord,
+            mask: FULL_MASK,
+        }
+    }
+}
+
+/// Whether gram co-occurrence is required per line block or per document
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    Block,
+    Doc,
+}
+
 pub trait PlanBackend {
     fn summaries(&self) -> &SummaryIndex;
-    fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<usize>>;
+    fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<Posting>>;
     fn forced_candidates(&self) -> anyhow::Result<Vec<usize>>;
 }
 
-pub fn execute<B: PlanBackend>(backend: &B, plan: &QueryPlan) -> anyhow::Result<Vec<usize>> {
+pub fn execute<B: PlanBackend>(
+    backend: &B,
+    plan: &QueryPlan,
+    precision: Precision,
+) -> anyhow::Result<Vec<usize>> {
     let mut executor = Executor {
         backend,
+        precision,
         cache: HashMap::new(),
     };
-    let mut candidates = executor.eval(plan.root())?;
+    let mut candidates = docs_of(executor.eval(plan.root())?);
     if !plan.is_none() {
         candidates = union_sorted(candidates, forced_candidates(backend, plan)?);
     }
@@ -49,6 +80,16 @@ pub fn forced_candidates<B: PlanBackend>(
         .into_iter()
         .filter(|&ord| summary_may_satisfy(plan.root(), backend.summaries().status(ord)))
         .collect())
+}
+
+fn docs_of(postings: Vec<Posting>) -> Vec<usize> {
+    let mut docs: Vec<usize> = postings.into_iter().map(|posting| posting.ord).collect();
+    docs.dedup();
+    docs
+}
+
+fn full_postings(ords: Vec<usize>) -> Vec<Posting> {
+    ords.into_iter().map(Posting::full).collect()
 }
 
 fn estimate_expr(summaries: &SummaryIndex, expr: &PlanExpr, df: &dyn DfStats) -> u64 {
@@ -172,13 +213,14 @@ fn needle_may_match(needle: &GramNeedle) -> bool {
 
 struct Executor<'a, B> {
     backend: &'a B,
-    cache: HashMap<GramKey, Rc<Vec<usize>>>,
+    precision: Precision,
+    cache: HashMap<GramKey, Rc<Vec<Posting>>>,
 }
 
 impl<B: PlanBackend> Executor<'_, B> {
-    fn eval(&mut self, expr: &PlanExpr) -> anyhow::Result<Vec<usize>> {
+    fn eval(&mut self, expr: &PlanExpr) -> anyhow::Result<Vec<Posting>> {
         match expr {
-            PlanExpr::All => Ok(self.backend.summaries().text_ordinals()),
+            PlanExpr::All => Ok(full_postings(self.backend.summaries().text_ordinals())),
             PlanExpr::None => Ok(Vec::new()),
             PlanExpr::AllOf {
                 grams,
@@ -198,7 +240,7 @@ impl<B: PlanBackend> Executor<'_, B> {
         grams: &[GramNeedle],
         needs: &[ScanNeed],
         children: &[PlanExpr],
-    ) -> anyhow::Result<Vec<usize>> {
+    ) -> anyhow::Result<Vec<Posting>> {
         let mut lists = Vec::with_capacity(grams.len() + children.len());
         for gram in grams {
             lists.push(Rc::new(self.eval_needle(gram)?));
@@ -206,10 +248,11 @@ impl<B: PlanBackend> Executor<'_, B> {
         for child in children {
             lists.push(Rc::new(self.eval(child)?));
         }
-        let mut candidates = intersect_all(lists, self.backend.summaries().text_ordinals());
+        let all_text = || full_postings(self.backend.summaries().text_ordinals());
+        let mut candidates = intersect_all(lists, all_text);
         if !needs.is_empty() {
-            candidates.retain(|&ord| {
-                let status = self.backend.summaries().status(ord);
+            candidates.retain(|posting| {
+                let status = self.backend.summaries().status(posting.ord);
                 needs.iter().all(|need| status.satisfies(need))
             });
         }
@@ -221,51 +264,57 @@ impl<B: PlanBackend> Executor<'_, B> {
         grams: &[GramNeedle],
         needs: &[ScanNeed],
         children: &[PlanExpr],
-    ) -> anyhow::Result<Vec<usize>> {
+    ) -> anyhow::Result<Vec<Posting>> {
         let mut acc = Vec::new();
         for gram in grams {
-            acc.extend(self.eval_needle(gram)?);
+            acc = union_postings(&acc, &self.eval_needle(gram)?);
         }
         for need in needs {
-            acc.extend(self.backend.summaries().ordinals_satisfying(need));
+            let ords = self.backend.summaries().ordinals_satisfying(need);
+            acc = union_postings(&acc, &full_postings(ords));
         }
         for child in children {
-            acc.extend(self.eval(child)?);
+            acc = union_postings(&acc, &self.eval(child)?);
         }
-        acc.sort_unstable();
-        acc.dedup();
         Ok(acc)
     }
 
-    fn eval_needle(&mut self, needle: &GramNeedle) -> anyhow::Result<Vec<usize>> {
+    fn eval_needle(&mut self, needle: &GramNeedle) -> anyhow::Result<Vec<Posting>> {
         let mut acc = Vec::new();
         for key in needle.keys() {
-            acc.extend_from_slice(&self.lookup_cached(key)?);
+            acc = union_postings(&acc, &self.lookup_cached(key)?);
         }
-        acc.sort_unstable();
-        acc.dedup();
         Ok(acc)
     }
 
-    fn lookup_cached(&mut self, key: GramKey) -> anyhow::Result<Rc<Vec<usize>>> {
+    fn lookup_cached(&mut self, key: GramKey) -> anyhow::Result<Rc<Vec<Posting>>> {
         if let Some(list) = self.cache.get(&key) {
             return Ok(Rc::clone(list));
         }
-        let list = Rc::new(self.backend.lookup_gram(key)?);
+        let mut list = self.backend.lookup_gram(key)?;
+        if self.precision == Precision::Doc {
+            for posting in &mut list {
+                posting.mask = FULL_MASK;
+            }
+        }
+        let list = Rc::new(list);
         self.cache.insert(key, Rc::clone(&list));
         Ok(list)
     }
 }
 
-fn intersect_all(mut lists: Vec<Rc<Vec<usize>>>, all_text: Vec<usize>) -> Vec<usize> {
+fn intersect_all(
+    mut lists: Vec<Rc<Vec<Posting>>>,
+    all_text: impl FnOnce() -> Vec<Posting>,
+) -> Vec<Posting> {
     lists.sort_by_key(|list| list.len());
     let mut iter = lists.into_iter();
     let Some(first) = iter.next() else {
-        return all_text;
+        return all_text();
     };
     let mut acc = first.as_ref().clone();
     for list in iter {
-        acc = intersect_sorted(&acc, &list);
+        acc = intersect_postings(&acc, &list);
         if acc.is_empty() {
             break;
         }
@@ -273,16 +322,23 @@ fn intersect_all(mut lists: Vec<Rc<Vec<usize>>>, all_text: Vec<usize>) -> Vec<us
     acc
 }
 
-fn intersect_sorted(left: &[usize], right: &[usize]) -> Vec<usize> {
+/// Keep ordinals present in both lists whose block masks overlap
+fn intersect_postings(left: &[Posting], right: &[Posting]) -> Vec<Posting> {
     let mut out = Vec::new();
     let mut i = 0;
     let mut j = 0;
     while i < left.len() && j < right.len() {
-        match left[i].cmp(&right[j]) {
+        match left[i].ord.cmp(&right[j].ord) {
             std::cmp::Ordering::Less => i += 1,
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
-                out.push(left[i]);
+                let mask = left[i].mask & right[j].mask;
+                if mask != 0 {
+                    out.push(Posting {
+                        ord: left[i].ord,
+                        mask,
+                    });
+                }
                 i += 1;
                 j += 1;
             },
@@ -291,11 +347,36 @@ fn intersect_sorted(left: &[usize], right: &[usize]) -> Vec<usize> {
     out
 }
 
-pub fn union_sorted(left: Vec<usize>, right: Vec<usize>) -> Vec<usize> {
-    union_sorted_ref(&left, &right)
+pub fn union_postings(left: &[Posting], right: &[Posting]) -> Vec<Posting> {
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let mut i = 0;
+    let mut j = 0;
+    while i < left.len() && j < right.len() {
+        match left[i].ord.cmp(&right[j].ord) {
+            std::cmp::Ordering::Less => {
+                out.push(left[i]);
+                i += 1;
+            },
+            std::cmp::Ordering::Greater => {
+                out.push(right[j]);
+                j += 1;
+            },
+            std::cmp::Ordering::Equal => {
+                out.push(Posting {
+                    ord: left[i].ord,
+                    mask: left[i].mask | right[j].mask,
+                });
+                i += 1;
+                j += 1;
+            },
+        }
+    }
+    out.extend_from_slice(&left[i..]);
+    out.extend_from_slice(&right[j..]);
+    out
 }
 
-fn union_sorted_ref(left: &[usize], right: &[usize]) -> Vec<usize> {
+pub fn union_sorted(left: Vec<usize>, right: Vec<usize>) -> Vec<usize> {
     let mut out = Vec::with_capacity(left.len() + right.len());
     let mut i = 0;
     let mut j = 0;
@@ -335,7 +416,7 @@ mod tests {
 
     struct FakeBackend {
         summaries: SummaryIndex,
-        grams: HashMap<GramKey, Vec<usize>>,
+        grams: HashMap<GramKey, Vec<Posting>>,
         forced: Vec<usize>,
         lookups: RefCell<usize>,
     }
@@ -345,7 +426,7 @@ mod tests {
             &self.summaries
         }
 
-        fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<usize>> {
+        fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<Posting>> {
             *self.lookups.borrow_mut() += 1;
             Ok(self.grams.get(&key).cloned().unwrap_or_default())
         }
@@ -355,28 +436,120 @@ mod tests {
         }
     }
 
+    fn run(backend: &FakeBackend, plan: &QueryPlan) -> Vec<usize> {
+        execute(backend, plan, Precision::Block).unwrap()
+    }
+
+    fn full(ords: &[usize]) -> Vec<Posting> {
+        ords.iter().map(|&ord| Posting::full(ord)).collect()
+    }
+
+    fn masked(pairs: &[(usize, u8)]) -> Vec<Posting> {
+        pairs
+            .iter()
+            .map(|&(ord, mask)| Posting { ord, mask })
+            .collect()
+    }
+
     #[test]
     fn all_of_intersects_grams_and_scan_needs() {
-        let backend = fake_backend(&[(GramKey(1), vec![0, 1])], Vec::new());
+        let backend = fake_backend(&[(GramKey(1), full(&[0, 1]))], Vec::new());
         let plan = QueryPlan::new(PlanExpr::AllOf {
             grams: vec![GramNeedle::Key(GramKey(1))],
             needs: vec![ScanNeed::MinLineCount(2)],
             children: vec![],
         });
 
-        assert_eq!(execute(&backend, &plan).unwrap(), vec![1]);
+        assert_eq!(run(&backend, &plan), vec![1]);
+    }
+
+    #[test]
+    fn all_of_rejects_disjoint_block_masks() {
+        let backend = fake_backend(
+            &[
+                (GramKey(1), masked(&[(1, 0b0000_0001)])),
+                (GramKey(2), masked(&[(1, 0b1000_0000)])),
+            ],
+            Vec::new(),
+        );
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(GramKey(1)), GramNeedle::Key(GramKey(2))],
+            needs: vec![],
+            children: vec![],
+        });
+
+        assert_eq!(run(&backend, &plan), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn all_of_keeps_overlapping_block_masks() {
+        let backend = fake_backend(
+            &[
+                (GramKey(1), masked(&[(1, 0b0000_0011)])),
+                (GramKey(2), masked(&[(1, 0b0000_0010)])),
+            ],
+            Vec::new(),
+        );
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(GramKey(1)), GramNeedle::Key(GramKey(2))],
+            needs: vec![],
+            children: vec![],
+        });
+
+        assert_eq!(run(&backend, &plan), vec![1]);
+    }
+
+    #[test]
+    fn doc_precision_ignores_block_masks() {
+        let backend = fake_backend(
+            &[
+                (GramKey(1), masked(&[(1, 0b0000_0001)])),
+                (GramKey(2), masked(&[(1, 0b1000_0000)])),
+            ],
+            Vec::new(),
+        );
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(GramKey(1)), GramNeedle::Key(GramKey(2))],
+            needs: vec![],
+            children: vec![],
+        });
+
+        assert_eq!(execute(&backend, &plan, Precision::Doc).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn any_of_child_masks_flow_into_parent_intersection() {
+        let backend = fake_backend(
+            &[
+                (GramKey(1), masked(&[(1, 0b0000_0001)])),
+                (GramKey(2), masked(&[(1, 0b0000_0010)])),
+                (GramKey(3), masked(&[(1, 0b0000_0001)])),
+            ],
+            Vec::new(),
+        );
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(GramKey(3))],
+            needs: vec![],
+            children: vec![PlanExpr::AnyOf {
+                grams: vec![GramNeedle::Key(GramKey(1)), GramNeedle::Key(GramKey(2))],
+                needs: vec![],
+                children: vec![],
+            }],
+        });
+
+        assert_eq!(run(&backend, &plan), vec![1]);
     }
 
     #[test]
     fn any_of_unions_scan_needs_and_grams() {
-        let backend = fake_backend(&[(GramKey(7), vec![2])], Vec::new());
+        let backend = fake_backend(&[(GramKey(7), full(&[2]))], Vec::new());
         let plan = QueryPlan::new(PlanExpr::AnyOf {
             grams: vec![GramNeedle::Key(GramKey(7))],
             needs: vec![ScanNeed::MinLineCount(2)],
             children: vec![],
         });
 
-        assert_eq!(execute(&backend, &plan).unwrap(), vec![1, 2]);
+        assert_eq!(run(&backend, &plan), vec![1, 2]);
     }
 
     #[test]
@@ -388,7 +561,7 @@ mod tests {
             children: vec![],
         });
 
-        assert_eq!(execute(&backend, &plan).unwrap(), vec![2]);
+        assert_eq!(run(&backend, &plan), vec![2]);
     }
 
     #[test]
@@ -400,7 +573,7 @@ mod tests {
             children: vec![],
         });
 
-        assert_eq!(execute(&backend, &plan).unwrap(), vec![1, 2]);
+        assert_eq!(run(&backend, &plan), vec![1, 2]);
     }
 
     #[test]
@@ -418,13 +591,13 @@ mod tests {
 
         assert_eq!(sparse, 0);
         assert_eq!(forced, 2);
-        assert_eq!(execute(&backend, &plan).unwrap().len() as u64, forced);
+        assert_eq!(run(&backend, &plan).len() as u64, forced);
     }
 
     #[test]
     fn any_key_uses_one_lookup_per_key() {
         let backend = fake_backend(
-            &[(GramKey(1), vec![0, 2]), (GramKey(2), vec![1, 2])],
+            &[(GramKey(1), full(&[0, 2])), (GramKey(2), full(&[1, 2]))],
             Vec::new(),
         );
         let plan = QueryPlan::new(PlanExpr::AllOf {
@@ -433,7 +606,7 @@ mod tests {
             children: vec![],
         });
 
-        assert_eq!(execute(&backend, &plan).unwrap(), vec![0, 1, 2]);
+        assert_eq!(run(&backend, &plan), vec![0, 1, 2]);
         assert_eq!(*backend.lookups.borrow(), 2);
     }
 
@@ -464,7 +637,7 @@ mod tests {
         ];
 
         for plan in plans {
-            assert_eq!(execute(&backend, &plan).unwrap(), Vec::<usize>::new());
+            assert_eq!(run(&backend, &plan), Vec::<usize>::new());
         }
     }
 
@@ -492,11 +665,11 @@ mod tests {
                 needs: vec![need],
                 children: vec![],
             });
-            assert_eq!(execute(&backend, &plan).unwrap(), vec![1, 2]);
+            assert_eq!(run(&backend, &plan), vec![1, 2]);
         }
     }
 
-    fn fake_backend(pairs: &[(GramKey, Vec<usize>)], forced: Vec<usize>) -> FakeBackend {
+    fn fake_backend(pairs: &[(GramKey, Vec<Posting>)], forced: Vec<usize>) -> FakeBackend {
         let records = vec![
             SummaryRecord::new(0, SummaryStatus::Known(summary(1))),
             SummaryRecord::new(1, SummaryStatus::Known(rich_summary())),

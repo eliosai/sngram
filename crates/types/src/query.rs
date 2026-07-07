@@ -244,7 +244,7 @@ pub trait DfStats {
 }
 
 impl PlanExpr {
-    const MAX_ALL_OF_GRAMS: usize = 3;
+    const MAX_ALL_OF_GRAMS: usize = 32;
 
     fn tune(&mut self, df: &dyn DfStats, stop_df: u64) {
         match self {
@@ -516,7 +516,7 @@ mod tests {
             children: vec![],
         });
 
-        plan.tune(&df, 500);
+        plan.tune(&df, 45);
 
         let PlanExpr::AllOf { grams, .. } = plan.root() else {
             panic!("tuned plan must stay AllOf");
@@ -527,6 +527,7 @@ mod tests {
                 GramNeedle::Key(key(1)),
                 GramNeedle::Key(key(2)),
                 GramNeedle::Key(key(3)),
+                GramNeedle::Key(key(4)),
             ]
         );
     }

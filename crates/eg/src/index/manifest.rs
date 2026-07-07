@@ -18,7 +18,7 @@ use crate::{flags::HiArgs, haystack::Haystack};
 
 const MANIFEST_VERSION: u32 = 6;
 const TANTIVY_SCHEMA_VERSION: u32 = 4;
-const POSTINGS_SCHEMA_VERSION: u32 = 8;
+const POSTINGS_SCHEMA_VERSION: u32 = 9;
 const TANTIVY_BACKEND: &str = "tantivy";
 const POSTINGS_BACKEND: &str = "postings";
 const TANTIVY_COMPAT_VERSION: &str = "0.26.1";

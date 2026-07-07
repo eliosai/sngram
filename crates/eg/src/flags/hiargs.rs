@@ -375,6 +375,11 @@ impl HiArgs {
         &self.index
     }
 
+    /// Return true when -U multiline matching is enabled.
+    pub(crate) fn multiline(&self) -> bool {
+        self.multiline
+    }
+
     /// Return the selected freshness policy for the index.
     /// Return one regex pattern with eg's CLI semantics encoded as inline
     /// regex flags and alternation. `None` means indexed prefiltering is not

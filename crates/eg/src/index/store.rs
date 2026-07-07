@@ -140,7 +140,7 @@ pub fn query_index(
         );
     }
     let execute_started_at = std::time::Instant::now();
-    let ords = executor::execute(&backend, &plan)?;
+    let ords = executor::execute(&backend, &plan, executor::Precision::Doc)?;
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_index_execute(execute_started_at);
     }
@@ -216,8 +216,9 @@ impl PlanBackend for TantivyPlanBackend<'_> {
         self.summaries
     }
 
-    fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<usize>> {
-        self.lookup_term(Term::from_field_u64(self.fields.gram, key.value()))
+    fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<executor::Posting>> {
+        let ords = self.lookup_term(Term::from_field_u64(self.fields.gram, key.value()))?;
+        Ok(ords.into_iter().map(executor::Posting::full).collect())
     }
 
     fn forced_candidates(&self) -> anyhow::Result<Vec<usize>> {
@@ -505,7 +506,7 @@ fn file_document(fields: IndexFields, file: &IndexedDocument) -> TantivyDocument
     if file.forced_candidate {
         document.add_u64(fields.forced_candidate, 1);
     }
-    for &hash in &file.hashes {
+    for &(hash, _mask) in &file.hashes {
         document.add_u64(fields.gram, hash);
     }
     document

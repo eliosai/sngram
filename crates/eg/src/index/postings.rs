@@ -43,14 +43,14 @@ const LOCK_SUFFIX: &str = ".lock";
 const TEMP_SUFFIX: &str = ".rebuilding";
 const OLD_SUFFIX: &str = ".old";
 const SECTION_HEADER_SIZE: usize = 32;
-const SECTION_FORMAT_VERSION: u32 = 6;
+const SECTION_FORMAT_VERSION: u32 = 7;
 const TABLE_MAGIC: [u8; 8] = *b"EGTABL1\0";
 const POSTINGS_MAGIC: [u8; 8] = *b"EGPOST2\0";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// Table record layout: truncated hash32, u40 byte offset, saturating u24 count
 const TABLE_RECORD_SIZE: usize = 12;
-const RUN_PAIR_SIZE: usize = 8;
+const RUN_PAIR_SIZE: usize = 9;
 const MAX_U40: u64 = (1 << 40) - 1;
 const MAX_U24: u32 = (1 << 24) - 1;
 const FILES_PER_RAYON_TASK: usize = 1024;
@@ -160,7 +160,7 @@ pub fn query_index(
         );
     }
     let lookup_started_at = Instant::now();
-    let candidates = execute_plan(index, &plan)?;
+    let candidates = execute_plan(index, &plan, index_plan.precision)?;
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_index_execute(lookup_started_at);
     }
@@ -185,12 +185,16 @@ pub fn query_index(
         .map(Some)
 }
 
-fn execute_plan(index: &PostingsIndex, plan: &QueryPlan) -> anyhow::Result<Vec<usize>> {
-    if let Some(candidates) = FastAllOf::try_execute(index, plan)? {
+fn execute_plan(
+    index: &PostingsIndex,
+    plan: &QueryPlan,
+    precision: executor::Precision,
+) -> anyhow::Result<Vec<usize>> {
+    if let Some(candidates) = FastAllOf::try_execute(index, plan, precision)? {
         let forced = executor::forced_candidates(index, plan)?;
         return Ok(executor::union_sorted(candidates, forced));
     }
-    executor::execute(index, plan)
+    executor::execute(index, plan, precision)
 }
 
 pub fn forced_candidate_ordinals(
@@ -578,9 +582,10 @@ fn scan_file_pairs(
     stats
         .selected
         .fetch_add(document.hashes.len(), AtomicOrdering::Relaxed);
-    pairs.extend(document.hashes.into_iter().map(|hash| Pair {
+    pairs.extend(document.hashes.into_iter().map(|(hash, mask)| Pair {
         hash: truncate_hash(hash),
         ord: document.ord,
+        mask,
     }));
     Ok(())
 }
@@ -590,6 +595,7 @@ fn push_forced(pairs: &mut Vec<Pair>, ord: u32, stats: &BuildStats) {
     pairs.push(Pair {
         hash: truncate_hash(FORCED_CANDIDATE_HASH),
         ord,
+        mask: executor::FULL_MASK,
     });
     stats.forced.fetch_add(1, AtomicOrdering::Relaxed);
 }
@@ -606,7 +612,14 @@ fn write_run(
     stats: &BuildStats,
 ) -> anyhow::Result<()> {
     pairs.sort_unstable();
-    pairs.dedup();
+    pairs.dedup_by(|next, kept| {
+        if next.hash == kept.hash && next.ord == kept.ord {
+            kept.mask |= next.mask;
+            true
+        } else {
+            false
+        }
+    });
     let pair_count = pairs.len();
     let id = next_run.fetch_add(1, AtomicOrdering::Relaxed);
     let path = run_path(runs_dir, id);
@@ -664,7 +677,7 @@ fn merge_runs(
     }
 
     let mut current_hash = None;
-    let mut docs = Vec::<u32>::new();
+    let mut docs = Vec::<(u32, u8)>::new();
     while let Some(item) = heap.pop() {
         if current_hash != Some(item.pair.hash) {
             if let Some(hash) = current_hash {
@@ -673,8 +686,10 @@ fn merge_runs(
             }
             current_hash = Some(item.pair.hash);
         }
-        if docs.last().copied() != Some(item.pair.ord) {
-            docs.push(item.pair.ord);
+        if let Some(last) = docs.last_mut().filter(|last| last.0 == item.pair.ord) {
+            last.1 |= item.pair.mask;
+        } else {
+            docs.push((item.pair.ord, item.pair.mask));
         }
         merge_progress.pair_done();
         let reader = readers
@@ -754,7 +769,7 @@ fn flush_posting(
     table_writer: &mut SectionWriter,
     postings_writer: &mut SectionWriter,
     hash: u32,
-    docs: &[u32],
+    docs: &[(u32, u8)],
 ) -> anyhow::Result<()> {
     let len = u32::try_from(docs.len()).context("posting list length does not fit in u32")?;
     let offset = postings_writer.body_len;
@@ -828,7 +843,7 @@ impl PostingsIndex {
         self.summaries.text_bytes()
     }
 
-    fn lookup(&self, hash: u64) -> anyhow::Result<Vec<usize>> {
+    fn lookup(&self, hash: u64) -> anyhow::Result<Vec<executor::Posting>> {
         self.base.lookup(hash)
     }
 
@@ -853,12 +868,16 @@ impl PlanBackend for PostingsIndex {
         &self.summaries
     }
 
-    fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<usize>> {
+    fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<executor::Posting>> {
         self.lookup(key.value())
     }
 
     fn forced_candidates(&self) -> anyhow::Result<Vec<usize>> {
-        self.lookup(FORCED_CANDIDATE_HASH)
+        Ok(self
+            .lookup(FORCED_CANDIDATE_HASH)?
+            .into_iter()
+            .map(|posting| posting.ord)
+            .collect())
     }
 }
 
@@ -892,8 +911,8 @@ impl Segment {
         self.postings.get(SECTION_HEADER_SIZE..).unwrap_or_default()
     }
 
-    fn lookup(&self, hash: u64) -> anyhow::Result<Vec<usize>> {
-        self.posting_list(hash).map(|list| list.ordinals())
+    fn lookup(&self, hash: u64) -> anyhow::Result<Vec<executor::Posting>> {
+        self.posting_list(hash).map(|list| list.postings())
     }
 
     fn posting_list(&self, hash: u64) -> anyhow::Result<PostingList<'_>> {
@@ -944,20 +963,29 @@ impl<'a> PostingList<'a> {
         self.count as usize
     }
 
-    fn ordinals(self) -> Vec<usize> {
+    fn postings(self) -> Vec<executor::Posting> {
         let mut out = Vec::with_capacity(self.len());
         let mut pos = 0usize;
         let mut ord = 0u32;
-        for idx in 0..self.count {
+        let mut first = true;
+        while pos < self.bytes.len() {
             let Some(value) = read_uvarint(self.bytes, &mut pos) else {
                 break;
             };
-            ord = if idx == 0 {
+            let Some(&mask) = self.bytes.get(pos) else {
+                break;
+            };
+            pos += 1;
+            ord = if first {
                 value
             } else {
                 ord.wrapping_add(value)
             };
-            out.push(ord as usize);
+            first = false;
+            out.push(executor::Posting {
+                ord: ord as usize,
+                mask,
+            });
         }
         out
     }
@@ -968,20 +996,26 @@ struct FastAllOf<'a> {
     driver: FastNeedle,
     filters: Vec<FastNeedle>,
     needs: &'a [ScanNeed],
+    precision: executor::Precision,
 }
 
 impl<'a> FastAllOf<'a> {
     fn try_execute(
         index: &'a PostingsIndex,
         plan: &'a QueryPlan,
+        precision: executor::Precision,
     ) -> anyhow::Result<Option<Vec<usize>>> {
-        let Some(query) = Self::from_plan(index, plan)? else {
+        let Some(query) = Self::from_plan(index, plan, precision)? else {
             return Ok(None);
         };
         Ok(Some(query.execute()))
     }
 
-    fn from_plan(index: &'a PostingsIndex, plan: &'a QueryPlan) -> anyhow::Result<Option<Self>> {
+    fn from_plan(
+        index: &'a PostingsIndex,
+        plan: &'a QueryPlan,
+        precision: executor::Precision,
+    ) -> anyhow::Result<Option<Self>> {
         let PlanExpr::AllOf {
             grams,
             needs,
@@ -1001,6 +1035,7 @@ impl<'a> FastAllOf<'a> {
             driver,
             filters: needles,
             needs,
+            precision,
         }))
     }
 
@@ -1015,21 +1050,43 @@ impl<'a> FastAllOf<'a> {
     }
 
     fn execute(self) -> Vec<usize> {
-        let mut candidates = self.driver.ordinals();
-        candidates.retain(|&ord| self.keeps(ord));
+        let mut candidates = Vec::new();
+        for posting in self.driver.postings() {
+            if self.keeps(posting) {
+                candidates.push(posting.ord);
+            }
+        }
         candidates
     }
 
-    fn keeps(&self, ord: usize) -> bool {
-        let status = self.index.summaries.status(ord);
-        status.is_text()
-            && self.filters.iter().all(|needle| needle.contains(ord))
-            && self.needs.iter().all(|need| status.satisfies(need))
+    fn keeps(&self, posting: executor::Posting) -> bool {
+        let status = self.index.summaries.status(posting.ord);
+        if !status.is_text() {
+            return false;
+        }
+        let mut mask = self.effective(posting.mask);
+        for filter in &self.filters {
+            let Some(filter_mask) = filter.mask_at(posting.ord) else {
+                return false;
+            };
+            mask &= self.effective(filter_mask);
+            if mask == 0 {
+                return false;
+            }
+        }
+        self.needs.iter().all(|need| status.satisfies(need))
+    }
+
+    const fn effective(&self, mask: u8) -> u8 {
+        match self.precision {
+            executor::Precision::Block => mask,
+            executor::Precision::Doc => executor::FULL_MASK,
+        }
     }
 }
 
 struct FastNeedle {
-    lists: Vec<Vec<usize>>,
+    lists: Vec<Vec<executor::Posting>>,
     len: usize,
 }
 
@@ -1037,7 +1094,7 @@ impl FastNeedle {
     fn open(index: &PostingsIndex, needle: &GramNeedle) -> anyhow::Result<Self> {
         let lists = needle
             .keys()
-            .map(|key| index.posting_list(key.value()).map(PostingList::ordinals))
+            .map(|key| index.posting_list(key.value()).map(PostingList::postings))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let len = lists.iter().map(Vec::len).sum();
         Ok(Self { lists, len })
@@ -1047,20 +1104,22 @@ impl FastNeedle {
         self.len
     }
 
-    fn ordinals(&self) -> Vec<usize> {
-        let mut ords = Vec::with_capacity(self.len);
+    fn postings(&self) -> Vec<executor::Posting> {
+        let mut acc: Vec<executor::Posting> = Vec::new();
         for list in &self.lists {
-            ords.extend_from_slice(list);
+            acc = executor::union_postings(&acc, list);
         }
-        ords.sort_unstable();
-        ords.dedup();
-        ords
+        acc
     }
 
-    fn contains(&self, ord: usize) -> bool {
-        self.lists
-            .iter()
-            .any(|list| list.binary_search(&ord).is_ok())
+    fn mask_at(&self, ord: usize) -> Option<u8> {
+        let mut mask = 0u8;
+        for list in &self.lists {
+            if let Ok(idx) = list.binary_search_by_key(&ord, |posting| posting.ord) {
+                mask |= list[idx].mask;
+            }
+        }
+        (mask != 0).then_some(mask)
     }
 }
 
@@ -1247,12 +1306,13 @@ fn write_table_record(
     Ok(())
 }
 
-fn write_posting_gaps(writer: &mut SectionWriter, docs: &[u32]) -> anyhow::Result<()> {
-    let mut buffer = Vec::with_capacity(docs.len().saturating_mul(2));
+fn write_posting_gaps(writer: &mut SectionWriter, docs: &[(u32, u8)]) -> anyhow::Result<()> {
+    let mut buffer = Vec::with_capacity(docs.len().saturating_mul(3));
     let mut previous = 0u32;
-    for (idx, &doc) in docs.iter().enumerate() {
+    for (idx, &(doc, mask)) in docs.iter().enumerate() {
         let value = if idx == 0 { doc } else { doc - previous };
         push_uvarint(&mut buffer, value);
+        buffer.push(mask);
         previous = doc;
     }
     writer.write_all(&buffer)
@@ -1358,7 +1418,8 @@ fn section_header(magic: [u8; 8], count: u64, checksum: u64) -> [u8; SECTION_HEA
 fn write_pair(writer: &mut BufWriter<File>, pair: Pair) -> anyhow::Result<()> {
     let mut bytes = [0u8; RUN_PAIR_SIZE];
     bytes[..4].copy_from_slice(&pair.hash.to_le_bytes());
-    bytes[4..].copy_from_slice(&pair.ord.to_le_bytes());
+    bytes[4..8].copy_from_slice(&pair.ord.to_le_bytes());
+    bytes[8] = pair.mask;
     writer.write_all(&bytes)?;
     Ok(())
 }
@@ -1371,7 +1432,8 @@ fn read_pair(reader: &mut BufReader<File>) -> anyhow::Result<Option<Pair>> {
     reader.read_exact(&mut bytes)?;
     Ok(Some(Pair {
         hash: u32::from_le_bytes(bytes[..4].try_into().expect("four bytes")),
-        ord: u32::from_le_bytes(bytes[4..].try_into().expect("four bytes")),
+        ord: u32::from_le_bytes(bytes[4..8].try_into().expect("four bytes")),
+        mask: bytes[8],
     }))
 }
 
@@ -1457,6 +1519,7 @@ impl BuildStats {
 struct Pair {
     hash: u32,
     ord: u32,
+    mask: u8,
 }
 
 impl Ord for Pair {
@@ -1497,8 +1560,8 @@ mod tests {
     use super::{
         FNV_OFFSET, IndexOpen, MAX_PAIRS_PER_RUN, MIN_PAIRS_PER_RUN, POSTINGS_MAGIC, Pair,
         PostingList, RUN_PAIR_SIZE, SECTION_HEADER_SIZE, SectionWriter, Segment, TABLE_MAGIC,
-        TABLE_RECORD_SIZE, find_record, fnv1a_state, pairs_per_run, push_uvarint, read_pair,
-        read_uvarint, sampled_checksum, section_header, suffixed_path,
+        TABLE_RECORD_SIZE, executor::Posting, find_record, fnv1a_state, pairs_per_run,
+        push_uvarint, read_pair, read_uvarint, sampled_checksum, section_header, suffixed_path,
         verify_section_with_checksum, write_pair, write_posting_gaps,
     };
     use std::{
@@ -1546,12 +1609,13 @@ mod tests {
     }
 
     #[test]
-    fn posting_list_decodes_delta_varints() {
-        let docs = [3u32, 8, 13, 300, 70000];
+    fn posting_list_decodes_delta_varints_with_masks() {
+        let docs = [(3u32, 0b0000_0001u8), (8, 0b1000_0000), (70000, 0xFF)];
         let mut bytes = Vec::new();
         let mut previous = 0u32;
-        for (idx, &doc) in docs.iter().enumerate() {
+        for (idx, &(doc, mask)) in docs.iter().enumerate() {
             push_uvarint(&mut bytes, if idx == 0 { doc } else { doc - previous });
+            bytes.push(mask);
             previous = doc;
         }
         let list = PostingList {
@@ -1560,7 +1624,23 @@ mod tests {
         };
 
         assert_eq!(list.len(), docs.len());
-        assert_eq!(list.ordinals(), vec![3, 8, 13, 300, 70000]);
+        assert_eq!(
+            list.postings(),
+            vec![
+                Posting {
+                    ord: 3,
+                    mask: 0b0000_0001
+                },
+                Posting {
+                    ord: 8,
+                    mask: 0b1000_0000
+                },
+                Posting {
+                    ord: 70000,
+                    mask: 0xFF
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1575,10 +1655,15 @@ mod tests {
         let dir = scratch("pair-io");
         let path = dir.join("run.bin");
         let pairs = [
-            Pair { hash: 3, ord: 1 },
+            Pair {
+                hash: 3,
+                ord: 1,
+                mask: 0b0000_0100,
+            },
             Pair {
                 hash: u32::MAX - 1,
                 ord: u32::MAX,
+                mask: 0xFF,
             },
         ];
         {
@@ -1603,7 +1688,9 @@ mod tests {
     fn posting_gap_writer_round_trips_through_section() {
         let dir = scratch("posting-gaps");
         let path = dir.join("postings.bin");
-        let docs = (0..40_000u32).map(|ord| ord * 3).collect::<Vec<_>>();
+        let docs = (0..40_000u32)
+            .map(|ord| (ord * 3, (ord % 8 + 1) as u8))
+            .collect::<Vec<_>>();
         let mut writer = SectionWriter::create(&path, POSTINGS_MAGIC).unwrap();
 
         write_posting_gaps(&mut writer, &docs).unwrap();
@@ -1611,15 +1698,16 @@ mod tests {
 
         let bytes = fs::read(path).unwrap();
         let body = &bytes[SECTION_HEADER_SIZE..];
-        assert!(body.len() < docs.len() * 2);
+        assert!(body.len() < docs.len() * 3);
         let list = PostingList {
             bytes: body,
             count: docs.len() as u32,
         };
-        assert_eq!(
-            list.ordinals(),
-            docs.iter().map(|&ord| ord as usize).collect::<Vec<_>>()
-        );
+        let decoded = list.postings();
+        assert_eq!(decoded.len(), docs.len());
+        for (posting, &(ord, mask)) in decoded.iter().zip(&docs) {
+            assert_eq!((posting.ord, posting.mask), (ord as usize, mask));
+        }
     }
 
     fn framed(magic: [u8; 8], record_size: usize, records: usize) -> Vec<u8> {

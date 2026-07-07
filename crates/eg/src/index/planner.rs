@@ -10,6 +10,7 @@ use super::request::Unsupported;
 /// A query plan plus eg-specific execution predicates.
 pub struct IndexPlan {
     pub plan: QueryPlan,
+    pub precision: super::executor::Precision,
 }
 
 impl IndexPlan {
@@ -82,5 +83,10 @@ pub fn query_plan(args: &HiArgs, table: &WeightTable) -> anyhow::Result<IndexPla
             args.patterns()
         )
     })?;
-    Ok(IndexPlan { plan })
+    let precision = if args.multiline() {
+        super::executor::Precision::Doc
+    } else {
+        super::executor::Precision::Block
+    };
+    Ok(IndexPlan { plan, precision })
 }

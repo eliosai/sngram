@@ -23,8 +23,8 @@ const OWNER_FILE_NAME: &str = "daemon-owner";
 const LEASE_FILE_NAME: &str = "lease";
 const WAKE_FILE_NAME: &str = "wake";
 const INDEX_DIR_NAME: &str = "index";
-const POSTINGS_MANIFEST: &str = "postings-v6/manifest.bin";
-const POSTINGS_JSON_MANIFEST: &str = "postings-v6/manifest.json";
+const POSTINGS_MANIFEST: &str = "postings-v7/manifest.bin";
+const POSTINGS_JSON_MANIFEST: &str = "postings-v7/manifest.json";
 const TANTIVY_JSON_MANIFEST: &str = "tantivy-v2/manifest.json";
 const LOCK_FILE_NAME: &str = "daemon.lock";
 const STARTUP_READY_FILE_NAME: &str = "startup-ready";
@@ -937,9 +937,9 @@ arg=6e6565646c65
         let child_root = parent_root.join("src");
         let parent_state = root.join("parent-state");
         let child_state = root.join("child-state");
-        fs::create_dir_all(parent_state.join("index/postings-v6")).expect("parent index");
+        fs::create_dir_all(parent_state.join("index/postings-v7")).expect("parent index");
         fs::create_dir_all(child_state.join("index")).expect("child index");
-        fs::write(parent_state.join("index/postings-v6/manifest.json"), "{}").expect("manifest");
+        fs::write(parent_state.join("index/postings-v7/manifest.json"), "{}").expect("manifest");
         let mut parent = request_for(&parent_state);
         parent.index_root = parent_root;
         let mut child = request_for(&child_state);
@@ -964,9 +964,9 @@ arg=6e6565646c65
         let child_root = parent_root.join("src");
         let parent_state = root.join("parent-state");
         let child_state = root.join("child-state");
-        fs::create_dir_all(parent_state.join("index/postings-v6")).expect("parent index");
+        fs::create_dir_all(parent_state.join("index/postings-v7")).expect("parent index");
         fs::create_dir_all(child_state.join("index")).expect("child index");
-        fs::write(parent_state.join("index/postings-v6/manifest.json"), "{}").expect("manifest");
+        fs::write(parent_state.join("index/postings-v7/manifest.json"), "{}").expect("manifest");
         for state in [&parent_state, &child_state] {
             let runtime = state.join("runtime");
             fs::create_dir_all(&runtime).expect("runtime");

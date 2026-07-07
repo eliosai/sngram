@@ -453,6 +453,7 @@ dependencies = [
  "lexopt",
  "libc",
  "log",
+ "memchr",
  "memmap2",
  "rayon",
  "regex-syntax",

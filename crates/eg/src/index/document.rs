@@ -10,6 +10,8 @@ use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use sngram_types::{ScanError, ScanEvent, ScanSummary, WeightTable};
 
+use super::executor::FULL_MASK;
+
 use super::{
     manifest::CurrentFile,
     summary::{SummaryRecord, SummaryStatus},
@@ -19,7 +21,7 @@ pub struct IndexedDocument {
     pub ord: u32,
     pub path_hash: u64,
     pub forced_candidate: bool,
-    pub hashes: Vec<u64>,
+    pub hashes: Vec<(u64, u8)>,
     pub summary: SummaryRecord,
 }
 
@@ -75,7 +77,7 @@ pub fn scan(
             SummaryStatus::UnknownText,
         ));
     }
-    let Some((mut hashes, summary)) = scan_bytes(table, bytes)? else {
+    let Some((hashes, summary)) = scan_bytes(table, bytes)? else {
         return Ok(document(
             ord,
             path_hash,
@@ -84,8 +86,16 @@ pub fn scan(
             SummaryStatus::Skipped,
         ));
     };
+    let mut hashes = hashes;
     hashes.sort_unstable();
-    hashes.dedup();
+    hashes.dedup_by(|next, kept| {
+        if next.0 == kept.0 {
+            kept.1 |= next.1;
+            true
+        } else {
+            false
+        }
+    });
     let forced_candidate = super::classify::is_high_entropy(bytes.len(), hashes.len());
     if forced_candidate {
         hashes.clear();
@@ -102,11 +112,14 @@ pub fn scan(
 fn scan_bytes(
     table: &WeightTable,
     bytes: &[u8],
-) -> anyhow::Result<Option<(Vec<u64>, ScanSummary)>> {
+) -> anyhow::Result<Option<(Vec<(u64, u8)>, ScanSummary)>> {
+    let blocks = BlockMap::new(bytes);
     let mut hashes = Vec::new();
     let mut summary = None;
     let scan = sngram::scan(table, Cursor::new(bytes), |event| match event {
-        ScanEvent::Gram(gram) => hashes.push(gram.key.value()),
+        ScanEvent::Gram(gram) => {
+            hashes.push((gram.key.value(), blocks.mask(&gram.span)));
+        },
         ScanEvent::Finish(facts) => summary = Some(*facts),
     });
     if matches!(scan, Err(ScanError::Binary)) {
@@ -117,11 +130,48 @@ fn scan_bytes(
     Ok(Some((hashes, summary)))
 }
 
+/// Maps content byte spans to the scaled 8-block line mask they touch
+struct BlockMap {
+    newlines: Vec<usize>,
+    line_count: usize,
+}
+
+impl BlockMap {
+    fn new(bytes: &[u8]) -> Self {
+        let newlines: Vec<usize> = memchr::memchr_iter(b'\n', bytes).collect();
+        let trailing = bytes.last().is_some_and(|&byte| byte != b'\n');
+        let line_count = (newlines.len() + usize::from(trailing)).max(1);
+        Self {
+            newlines,
+            line_count,
+        }
+    }
+
+    fn mask(&self, span: &sngram_types::ByteRange) -> u8 {
+        let first = self.block_of(self.line_of(span.start));
+        let last = self.block_of(self.line_of(span.end.saturating_sub(1).max(span.start)));
+        let mut mask = 0u8;
+        for block in first..=last {
+            mask |= 1 << block;
+        }
+        if mask == 0 { FULL_MASK } else { mask }
+    }
+
+    fn line_of(&self, offset: usize) -> usize {
+        self.newlines.partition_point(|&newline| newline < offset)
+    }
+
+    fn block_of(&self, line: usize) -> u8 {
+        let block = line.min(self.line_count - 1) * 8 / self.line_count;
+        u8::try_from(block.min(7)).unwrap_or(7)
+    }
+}
+
 fn document(
     ord: u32,
     path_hash: u64,
     forced_candidate: bool,
-    hashes: Vec<u64>,
+    hashes: Vec<(u64, u8)>,
     status: SummaryStatus,
 ) -> IndexedDocument {
     IndexedDocument {
@@ -162,5 +212,39 @@ impl AsRef<[u8]> for FileBytes {
             Self::Mmap(bytes) => bytes,
             Self::Owned(bytes) => bytes,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BlockMap;
+    use sngram_types::ByteRange;
+
+    #[test]
+    fn eight_line_doc_maps_lines_to_distinct_blocks() {
+        let map = BlockMap::new(b"a\nb\nc\nd\ne\nf\ng\nh\n");
+        assert_eq!(map.mask(&ByteRange::new(0, 1)), 0b0000_0001);
+        assert_eq!(map.mask(&ByteRange::new(14, 15)), 0b1000_0000);
+    }
+
+    #[test]
+    fn newline_spanning_gram_sets_both_blocks() {
+        let map = BlockMap::new(b"a\nb\nc\nd\ne\nf\ng\nh\n");
+        assert_eq!(map.mask(&ByteRange::new(0, 3)), 0b0000_0011);
+    }
+
+    #[test]
+    fn single_line_doc_uses_the_first_block() {
+        let map = BlockMap::new(b"only one line without newline");
+        assert_eq!(map.mask(&ByteRange::new(5, 9)), 0b0000_0001);
+    }
+
+    #[test]
+    fn long_doc_scales_lines_across_blocks() {
+        let content = b"x\n".repeat(80);
+        let map = BlockMap::new(&content);
+        assert_eq!(map.mask(&ByteRange::new(0, 1)), 0b0000_0001);
+        assert_eq!(map.mask(&ByteRange::new(158, 159)), 0b1000_0000);
+        assert_eq!(map.mask(&ByteRange::new(80, 81)), 0b0001_0000);
     }
 }
