@@ -1,0 +1,67 @@
+crates/eg/src/index/manifest.rs
+  s_f911a7f11fb798::t_c565fd84544081 21
+crates/eg/src/index/snapshot.rs
+  s_f911a7f11fb798::t_c565fd84544081 35
+crates/eg/tests/index_integration.rs
+  s_f911a7f11fb798::t_c565fd84544081 357,1270
+  s_f911a7f11fb798::t_90f9a957b0575b 2310-2323,2331-2332,2334-2353
+  s_f911a7f11fb798::t_50a0ca9d555b8d 2324-2330,2333
+crates/eg/src/index/document.rs
+  s_f911a7f11fb798::t_af3c82f3a9e2ac 13-14,24,80,89,91-98,115-116,120-122,133-167
+  s_f911a7f11fb798::t_7d29dd24755061 168,217-250
+  s_f911a7f11fb798::t_324eb7f58b46c9 174
+  s_f911a7f11fb798::t_8d3da0487bdf92 169
+crates/eg/src/index/store.rs
+  s_f911a7f11fb798::t_4cdec307b9a6b0 143,219-221
+  s_f911a7f11fb798::t_357583a717e02e 509
+crates/eg/src/index/executor.rs
+  s_f911a7f11fb798::t_fe0aea5c3fd846 9-34,37,41-45,48,51,85-94,216-217,221,223,243,251-252,254-255,267,270,273-274,277,282,285,290,294-300,306-309,313,317,325-326,331,335-341,355-376,379
+  s_f911a7f11fb798::t_c565fd84544081 350
+  s_f911a7f11fb798::t_1d72b63aea4034 419,429,439-453,456,463-540,545,552,564,576,594,600,609,640,668,672
+  s_f911a7f11fb798::t_996037489cab29 351-354
+crates/eg/src/flags/hiargs.rs
+  s_f911a7f11fb798::t_af72ac976f169c 378-382
+crates/types/src/query.rs
+  s_f911a7f11fb798::t_8fa2142b0318d6 247
+  s_f911a7f11fb798::t_da04fcfed78c04 519,530
+crates/eg/src/index/postings.rs
+  s_f911a7f11fb798::t_cba0089ac9ec15 979
+  s_f911a7f11fb798::t_2e873349281779 680,689-692,772,1309-1310,1312,1315
+  s_f911a7f11fb798::t_f74268600a20ad 846,871,876-880,914-915
+  s_f911a7f11fb798::t_ea41dc93897949 1563-1564
+  s_f911a7f11fb798::t_f8159fa04830e4 1612-1613,1616,1618,1627-1643,1658-1662,1666,1691-1693,1701,1706-1710
+  s_f911a7f11fb798::t_803889767ef4a0 163,188-193,197,999,1006,1008,1014-1018,1038,1053-1058,1062-1084,1089,1097,1107-1108,1110,1112,1115-1122
+  s_f911a7f11fb798::t_3b0a04b4ec21f2 53,585,588,598,615-622,1421-1422,1435-1436,1522
+  s_f911a7f11fb798::t_32b41367967a28 966,970-971,975-978,984-988
+  s_f911a7f11fb798::t_c565fd84544081 46
+crates/eg/src/index/catalog.rs
+  s_f911a7f11fb798::t_c565fd84544081 88
+crates/eg/src/index/daemon_refresh.rs
+  s_f911a7f11fb798::t_c565fd84544081 58
+crates/eg/Cargo.toml
+  s_f911a7f11fb798::t_a44d81a36ecb1a 33
+crates/eg/src/index/backend.rs
+  s_f911a7f11fb798::t_c565fd84544081 49
+crates/eg/src/index/daemon/main.rs
+  s_f911a7f11fb798::t_c565fd84544081 26-27,940,942,967,969
+crates/eg/src/index/planner.rs
+  s_f911a7f11fb798::t_3b0a04b4ec21f2 13,86-91
+Cargo.lock
+  s_f911a7f11fb798::t_3c46d491aa7361 456
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e4a9a37926b116e4b9fd81a3c9f38b016eb7e052",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
