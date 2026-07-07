@@ -109,17 +109,21 @@ Planner emits every need it can prove; index format unchanged.
   dedicated df=1 packing — table is 0.84GB for 70.5M grams). Schedule it with the
   Phase 3 format bump so corpora rebuild once.
 
-### Phase 3 — line-block postings (postings-v6)
+### Phase 3 — line-block postings (postings-v7, done 2026-07-07)
 
-- Each posting carries coarse intra-doc location; candidate encodings to bench:
-  fixed 64-bucket bitmap per (gram, doc) vs (doc, block-id) pairs.
-- A gram spanning a line boundary sets both blocks (sentinel/anchor grams stay sound).
-- Executor: AllOf intersects block sets within the plan's line scope; empty block
-  intersection rejects the doc. AnyOf unions. `-U` and any multiline plan drop block
-  constraints to doc granularity.
-- eg scan path attributes each gram span to blocks via the newline offsets it already
-  tracks for summaries.
-- Expected: gap queries 99% → ~0, scatter 90% → <10.
+- Each posting carries an 8-bucket scaled line mask (+1 byte/posting); executor
+  intersects masks in AllOf, unions in AnyOf, `-U` falls back to doc granularity;
+  newline-spanning grams set both blocks.
+- tune() keeps all grams under the stop threshold (cap 32, was 3) — df-only thinning
+  starved cross-literal intersections of one literal's grams entirely.
+- Linux: aggregate FP 37.44 → 32.62, speedup 2.23x, FN=0, ratio 1.06 → 1.42.
+  Broad wins: ci −16pp, crlf −22pp, opt −16pp, lazy −14pp, pf −13pp, field −12pp.
+- Honest miss: gap stayed ~90% — spin_lock-class grams occur 20+ times per large
+  file and saturate any fixed-block mask. Same force limits wide/simple residuals.
+- Follow-on design (phase 3.5, after 4/5): per-line positions for selective grams
+  only (df·occurrences below a budget), Zoekt's rarest-pair distance check without
+  Zoekt's full positional cost. Remaining FP mass: gap 110k, simple 52k, wide 23k,
+  seam 14.5k of 257k total.
 
 ### Phase 4 — mint-time tuning sweep (gates the final training run)
 
