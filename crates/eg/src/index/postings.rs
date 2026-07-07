@@ -43,14 +43,16 @@ const LOCK_SUFFIX: &str = ".lock";
 const TEMP_SUFFIX: &str = ".rebuilding";
 const OLD_SUFFIX: &str = ".old";
 const SECTION_HEADER_SIZE: usize = 32;
-const SECTION_FORMAT_VERSION: u32 = 5;
+const SECTION_FORMAT_VERSION: u32 = 6;
 const TABLE_MAGIC: [u8; 8] = *b"EGTABL1\0";
 const POSTINGS_MAGIC: [u8; 8] = *b"EGPOST2\0";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-/// Table record layout: hash, posting-list byte offset, then ordinal count
-const TABLE_RECORD_SIZE: usize = 20;
-const RUN_PAIR_SIZE: usize = 12;
+/// Table record layout: truncated hash32, u40 byte offset, saturating u24 count
+const TABLE_RECORD_SIZE: usize = 12;
+const RUN_PAIR_SIZE: usize = 8;
+const MAX_U40: u64 = (1 << 40) - 1;
+const MAX_U24: u32 = (1 << 24) - 1;
 const FILES_PER_RAYON_TASK: usize = 1024;
 const INDEX_RAM_CAP_BYTES: usize = 512 * 1024 * 1024;
 const MIN_PAIRS_PER_RUN: usize = 128 * 1024;
@@ -577,7 +579,7 @@ fn scan_file_pairs(
         .selected
         .fetch_add(document.hashes.len(), AtomicOrdering::Relaxed);
     pairs.extend(document.hashes.into_iter().map(|hash| Pair {
-        hash,
+        hash: truncate_hash(hash),
         ord: document.ord,
     }));
     Ok(())
@@ -586,7 +588,7 @@ fn scan_file_pairs(
 /// Record a forced-candidate posting for a file whose grams are not indexed.
 fn push_forced(pairs: &mut Vec<Pair>, ord: u32, stats: &BuildStats) {
     pairs.push(Pair {
-        hash: FORCED_CANDIDATE_HASH,
+        hash: truncate_hash(FORCED_CANDIDATE_HASH),
         ord,
     });
     stats.forced.fetch_add(1, AtomicOrdering::Relaxed);
@@ -751,7 +753,7 @@ impl<'a> MergeProgress<'a> {
 fn flush_posting(
     table_writer: &mut SectionWriter,
     postings_writer: &mut SectionWriter,
-    hash: u64,
+    hash: u32,
     docs: &[u32],
 ) -> anyhow::Result<()> {
     let len = u32::try_from(docs.len()).context("posting list length does not fit in u32")?;
@@ -1194,15 +1196,21 @@ struct PostingLocation {
     next_offset: Option<u64>,
 }
 
+/// Fold a 64-bit gram key into the stored 32-bit hash; collisions merge lists
+const fn truncate_hash(hash: u64) -> u32 {
+    hash as u32
+}
+
 fn find_record(table: &[u8], hash: u64) -> anyhow::Result<Option<PostingLocation>> {
     if !table.len().is_multiple_of(TABLE_RECORD_SIZE) {
         anyhow::bail!("index table has invalid length");
     }
+    let hash = truncate_hash(hash);
     let mut lo = 0usize;
     let mut hi = table.len() / TABLE_RECORD_SIZE;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let mid_hash = read_u64_at(table, mid * TABLE_RECORD_SIZE)?;
+        let mid_hash = read_u32_at(table, mid * TABLE_RECORD_SIZE)?;
         match mid_hash.cmp(&hash) {
             Ordering::Less => lo = mid + 1,
             Ordering::Greater => hi = mid,
@@ -1215,26 +1223,27 @@ fn find_record(table: &[u8], hash: u64) -> anyhow::Result<Option<PostingLocation
 fn record_at(table: &[u8], idx: usize) -> anyhow::Result<PostingLocation> {
     let next_start = (idx + 1) * TABLE_RECORD_SIZE;
     let next_offset = if next_start < table.len() {
-        Some(read_u64_at(table, next_start + 8)?)
+        Some(read_u40_at(table, next_start + 4)?)
     } else {
         None
     };
     Ok(PostingLocation {
-        offset: read_u64_at(table, idx * TABLE_RECORD_SIZE + 8)?,
-        count: read_u32_at(table, idx * TABLE_RECORD_SIZE + 16)?,
+        offset: read_u40_at(table, idx * TABLE_RECORD_SIZE + 4)?,
+        count: read_u24_at(table, idx * TABLE_RECORD_SIZE + 9)?,
         next_offset,
     })
 }
 
 fn write_table_record(
     writer: &mut SectionWriter,
-    hash: u64,
+    hash: u32,
     offset: u64,
     len: u32,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(offset <= MAX_U40, "posting offset exceeds u40");
     writer.write_all(&hash.to_le_bytes())?;
-    writer.write_all(&offset.to_le_bytes())?;
-    writer.write_all(&len.to_le_bytes())?;
+    writer.write_all(&offset.to_le_bytes()[..5])?;
+    writer.write_all(&len.min(MAX_U24).to_le_bytes()[..3])?;
     Ok(())
 }
 
@@ -1348,8 +1357,8 @@ fn section_header(magic: [u8; 8], count: u64, checksum: u64) -> [u8; SECTION_HEA
 
 fn write_pair(writer: &mut BufWriter<File>, pair: Pair) -> anyhow::Result<()> {
     let mut bytes = [0u8; RUN_PAIR_SIZE];
-    bytes[..8].copy_from_slice(&pair.hash.to_le_bytes());
-    bytes[8..].copy_from_slice(&pair.ord.to_le_bytes());
+    bytes[..4].copy_from_slice(&pair.hash.to_le_bytes());
+    bytes[4..].copy_from_slice(&pair.ord.to_le_bytes());
     writer.write_all(&bytes)?;
     Ok(())
 }
@@ -1361,17 +1370,29 @@ fn read_pair(reader: &mut BufReader<File>) -> anyhow::Result<Option<Pair>> {
     let mut bytes = [0u8; RUN_PAIR_SIZE];
     reader.read_exact(&mut bytes)?;
     Ok(Some(Pair {
-        hash: u64::from_le_bytes(bytes[..8].try_into().expect("eight bytes")),
-        ord: u32::from_le_bytes(bytes[8..].try_into().expect("four bytes")),
+        hash: u32::from_le_bytes(bytes[..4].try_into().expect("four bytes")),
+        ord: u32::from_le_bytes(bytes[4..].try_into().expect("four bytes")),
     }))
 }
 
-fn read_u64_at(bytes: &[u8], offset: usize) -> anyhow::Result<u64> {
-    let end = offset.checked_add(8).context("u64 read offset overflow")?;
+fn read_u40_at(bytes: &[u8], offset: usize) -> anyhow::Result<u64> {
+    let end = offset.checked_add(5).context("u40 read offset overflow")?;
     let Some(slice) = bytes.get(offset..end) else {
-        anyhow::bail!("u64 read past end of table");
+        anyhow::bail!("u40 read past end of table");
     };
-    Ok(u64::from_le_bytes(slice.try_into().expect("eight bytes")))
+    let mut buf = [0u8; 8];
+    buf[..5].copy_from_slice(slice);
+    Ok(u64::from_le_bytes(buf))
+}
+
+fn read_u24_at(bytes: &[u8], offset: usize) -> anyhow::Result<u32> {
+    let end = offset.checked_add(3).context("u24 read offset overflow")?;
+    let Some(slice) = bytes.get(offset..end) else {
+        anyhow::bail!("u24 read past end of table");
+    };
+    let mut buf = [0u8; 4];
+    buf[..3].copy_from_slice(slice);
+    Ok(u32::from_le_bytes(buf))
 }
 
 fn read_u32_at(bytes: &[u8], offset: usize) -> anyhow::Result<u32> {
@@ -1434,7 +1455,7 @@ impl BuildStats {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Pair {
-    hash: u64,
+    hash: u32,
     ord: u32,
 }
 
@@ -1487,19 +1508,19 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    fn table_body(records: &[(u64, u64, u32)]) -> Vec<u8> {
+    fn table_body(records: &[(u32, u64, u32)]) -> Vec<u8> {
         let mut body = Vec::new();
         for &(hash, offset, len) in records {
             body.extend_from_slice(&hash.to_le_bytes());
-            body.extend_from_slice(&offset.to_le_bytes());
-            body.extend_from_slice(&len.to_le_bytes());
+            body.extend_from_slice(&offset.to_le_bytes()[..5]);
+            body.extend_from_slice(&len.to_le_bytes()[..3]);
         }
         body
     }
 
     #[test]
     fn find_record_returns_location_with_neighbor_offset() {
-        let records = [(10u64, 0u64, 3u32), (20, 5, 0), (30, 5, 5)];
+        let records = [(10u32, 0u64, 3u32), (20, 5, 0), (30, 5, 5)];
         let body = table_body(&records);
 
         let first = find_record(&body, 10).unwrap().expect("first");
@@ -1556,7 +1577,7 @@ mod tests {
         let pairs = [
             Pair { hash: 3, ord: 1 },
             Pair {
-                hash: u64::MAX - 1,
+                hash: u32::MAX - 1,
                 ord: u32::MAX,
             },
         ];
