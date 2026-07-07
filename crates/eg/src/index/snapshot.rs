@@ -32,7 +32,7 @@ impl<'a> SnapshotLoader<'a> {
         index_dir: &'a Path,
     ) -> Self {
         let manifest_path = match args.index().backend() {
-            config::IndexBackend::Postings => index_dir.join("postings-v5/manifest.json"),
+            config::IndexBackend::Postings => index_dir.join("postings-v6/manifest.json"),
             config::IndexBackend::Tantivy => index_dir.join("tantivy-v2/manifest.json"),
         };
         Self {

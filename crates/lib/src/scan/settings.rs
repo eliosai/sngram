@@ -5,7 +5,7 @@ pub struct ScanSettings;
 
 impl ScanSettings {
     pub const MIN_GRAM_LEN: usize = 3;
-    pub const MAX_GRAM_LEN: usize = 100;
+    pub const MAX_GRAM_LEN: usize = 16;
     pub const STACK_CAP: usize = 128;
     pub const PREFIX_RING: usize = 128;
     pub const PREFIX_RING_MASK: usize = Self::PREFIX_RING - 1;

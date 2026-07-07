@@ -354,7 +354,7 @@ fn default_search_builds_and_uses_index() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("default indexed needle"));
-    assert!(fixture.path(".eg/index/postings-v5/manifest.bin").exists());
+    assert!(fixture.path(".eg/index/postings-v6/manifest.bin").exists());
 }
 
 #[test]
@@ -1267,7 +1267,7 @@ fn auto_index_refreshes_changed_files_through_daemon_republish() {
         String::from_utf8(first.stderr).unwrap()
     );
 
-    let marker = fixture.root.join(".eg/index/postings-v5/auto-marker");
+    let marker = fixture.root.join(".eg/index/postings-v6/auto-marker");
     fs::write(&marker, "keep").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
     fs::write(fixture.path("sample.txt"), "beta changed needle\n").unwrap();

@@ -13,9 +13,9 @@ use std::{collections::HashSet, io::Cursor};
 
 use sngram_types::{ScanError, ScanEvent, WeightTable};
 
-// Frozen algorithm parameters; must mirror crates/lib/src/extract.rs.
+// Frozen algorithm parameters; must mirror crates/lib/src/scan/settings.rs
 const MIN_LEN: usize = 3;
-const MAX_LEN: usize = 100;
+const MAX_LEN: usize = 16;
 const STACK_CAP: usize = 128;
 
 /// Reference hull: emit every (start, end) where the border pairs outweigh
