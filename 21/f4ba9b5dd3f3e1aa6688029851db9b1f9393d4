@@ -1,0 +1,21 @@
+TODO.md
+  s_f911a7f11fb798::t_21aa12b3588922 1-2
+docs/fp-optimization-plan.md
+  s_f911a7f11fb798::t_ccfdad8ed71f6d 1-129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "21f4ba9b5dd3f3e1aa6688029851db9b1f9393d4",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
