@@ -95,14 +95,19 @@ Planner emits every need it can prove; index format unchanged.
 - Watch: AnyOf-need union paths walk all summaries, O(doc_count); keep needs on
   candidate-bounded paths or bench the walk.
 
-### Phase 2 — shrink the index
+### Phase 2 — shrink the index (done 2026-07-07)
 
-- Gram-cap sweep {16, 24, 32, 64}: scan gates, cover force-splits at the same cap
-  (soundness argument identical to today's 100). Pick by FP/size/latency knee on
-  linux, sanity-check on guard corpus.
-- Postings: delta + varint (or stream-vbyte) doc lists.
-- Table: shrink records (hash-bucketed layout, narrower offsets, derive len).
-- Target after this phase: ≤ 50% of corpus, before line-blocks are added back in.
+- Delta-varint postings (postings-v6): linux postings 2.94GB → 0.80GB.
+- Gram-cap sweep {100, 64, 32, 24, 16} with full suite per point: cap 16 won every
+  axis (FP 38.04→37.44, size, speed), matching the reference default. No knee above
+  16; probing below 16 is open.
+- 12-byte table records: truncated hash32 (collisions merge lists, sound superset,
+  +31 candidates in 848k), u40 offset, advisory u24 count; run pairs 8 bytes.
+- Result: linux 7.0GB → 1.68GB (ratio 1.06), guard 5.12 → 1.47, speedup 1.55x →
+  1.97x, FN=0 throughout.
+- The ≤0.50 ratio target needs a deeper table restructure (two-level hash directory,
+  dedicated df=1 packing — table is 0.84GB for 70.5M grams). Schedule it with the
+  Phase 3 format bump so corpora rebuild once.
 
 ### Phase 3 — line-block postings (postings-v6)
 
