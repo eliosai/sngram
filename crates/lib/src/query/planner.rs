@@ -2,13 +2,13 @@
 
 use regex_syntax::hir::Hir;
 use sngram_types::{
-    Gram, GramKey, GramNeedle, HashKey, PlanExpr, QueryError, QueryPlan, SaturatingByteCounts256,
-    ScanNeed, WeightTable,
+    Gram, GramKey, GramNeedle, HashKey, PlanExpr, QueryError, QueryPlan, ScanNeed, WeightTable,
 };
 
 use super::{
     algebra::{Op, Query},
     analyze::{Analyzer, PlanContext},
+    needs::RootNeeds,
     parser::QueryParser,
     settings::QuerySettings,
     strings::StringSet,
@@ -51,31 +51,6 @@ impl<'a> QueryPlanner<'a> {
     }
 }
 
-struct RootNeeds {
-    min_len: u64,
-    byte_counts: ByteCountNeed,
-}
-
-impl RootNeeds {
-    fn from_hir(hir: &Hir) -> Self {
-        Self {
-            min_len: min_match_len(hir),
-            byte_counts: ByteCountNeed::from_hir(hir),
-        }
-    }
-
-    fn into_vec(self) -> Vec<ScanNeed> {
-        let mut needs = Vec::with_capacity(2);
-        if self.min_len > 0 {
-            needs.push(ScanNeed::MinByteLen(self.min_len));
-        }
-        if let Some(need) = self.byte_counts.into_scan_need() {
-            needs.push(need);
-        }
-        needs
-    }
-}
-
 fn with_root_needs(expr: PlanExpr, needs: RootNeeds) -> PlanExpr {
     let needs = needs.into_vec();
     if needs.is_empty() || expr.is_none() {
@@ -108,99 +83,6 @@ fn append_root_needs(expr: PlanExpr, new_needs: Vec<ScanNeed>) -> PlanExpr {
             needs: new_needs,
             children: vec![other],
         },
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct ByteCountNeed {
-    counts: SaturatingByteCounts256,
-}
-
-impl ByteCountNeed {
-    fn from_hir(hir: &Hir) -> Self {
-        use regex_syntax::hir::HirKind;
-
-        match hir.kind() {
-            HirKind::Empty | HirKind::Look(_) | HirKind::Class(_) => Self::default(),
-            HirKind::Literal(lit) => Self::from_literal(&lit.0),
-            HirKind::Repetition(rep) => Self::from_hir(&rep.sub).repeated(rep.min),
-            HirKind::Capture(capture) => Self::from_hir(&capture.sub),
-            HirKind::Concat(subs) => Self::from_concat(subs),
-            HirKind::Alternation(subs) => Self::from_alternation(subs),
-        }
-    }
-
-    fn from_literal(bytes: &[u8]) -> Self {
-        let mut need = Self::default();
-        for &byte in bytes {
-            need.counts.observe(byte);
-        }
-        need
-    }
-
-    fn from_concat(subs: &[Hir]) -> Self {
-        subs.iter()
-            .map(Self::from_hir)
-            .fold(Self::default(), |mut acc, need| {
-                acc.add(need);
-                acc
-            })
-    }
-
-    fn from_alternation(subs: &[Hir]) -> Self {
-        let Some((first, rest)) = subs.split_first() else {
-            return Self::default();
-        };
-        let mut acc = Self::from_hir(first);
-        for sub in rest {
-            acc.keep_branch_min(Self::from_hir(sub));
-        }
-        acc
-    }
-
-    fn repeated(mut self, min: u32) -> Self {
-        for count in &mut self.counts.counts {
-            *count = repeat_count(*count, min);
-        }
-        self
-    }
-
-    fn add(&mut self, other: Self) {
-        for (left, right) in self.counts.counts.iter_mut().zip(other.counts.counts) {
-            *left = left.saturating_add(right);
-        }
-    }
-
-    fn keep_branch_min(&mut self, other: Self) {
-        for (left, right) in self.counts.counts.iter_mut().zip(other.counts.counts) {
-            *left = (*left).min(right);
-        }
-    }
-
-    fn into_scan_need(self) -> Option<ScanNeed> {
-        (!self.counts.is_empty()).then_some(ScanNeed::MinByteCounts(Box::new(self.counts)))
-    }
-}
-
-fn repeat_count(count: u8, times: u32) -> u8 {
-    let product = u32::from(count).saturating_mul(times);
-    u8::try_from(product).unwrap_or(u8::MAX)
-}
-
-fn min_match_len(hir: &Hir) -> u64 {
-    use regex_syntax::hir::HirKind;
-
-    match hir.kind() {
-        HirKind::Empty | HirKind::Look(_) => 0,
-        HirKind::Literal(lit) => u64::try_from(lit.0.len()).unwrap_or(u64::MAX),
-        HirKind::Class(_) => 1,
-        HirKind::Repetition(rep) => u64::from(rep.min).saturating_mul(min_match_len(&rep.sub)),
-        HirKind::Capture(capture) => min_match_len(&capture.sub),
-        HirKind::Concat(subs) => subs
-            .iter()
-            .map(min_match_len)
-            .fold(0u64, u64::saturating_add),
-        HirKind::Alternation(subs) => subs.iter().map(min_match_len).min().unwrap_or(0),
     }
 }
 
@@ -374,9 +256,25 @@ mod tests {
         assert!(has_or(&expr_of("(a+hello|b+world)")));
         assert!(!expr_of("a{3,5}bcdef").is_all());
         assert!(!expr_of("foo[α-γ]bar").is_all());
-        assert_eq!(expr_of("ab[cd]ef"), expr_of("abcef|abdef"));
+        assert_eq!(
+            without_root_needs(expr_of("ab[cd]ef")),
+            without_root_needs(expr_of("abcef|abdef"))
+        );
         assert_eq!(expr_of("x{5}"), expr_of("xxxxx"));
         assert_eq!(expr_of("h{3,5}i"), expr_of("hhhi|hhhhi|hhhhhi"));
+    }
+
+    fn without_root_needs(expr: PlanExpr) -> PlanExpr {
+        match expr {
+            PlanExpr::AllOf {
+                grams, children, ..
+            } => PlanExpr::AllOf {
+                grams,
+                needs: Vec::new(),
+                children,
+            },
+            other => other,
+        }
     }
 
     #[test]

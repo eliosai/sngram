@@ -9,6 +9,7 @@ mod algebra;
 mod analyze;
 mod combine;
 mod info;
+mod needs;
 mod parser;
 mod pattern;
 mod planner;

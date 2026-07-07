@@ -183,6 +183,76 @@ fn plan_never_misses_a_real_match_on_realistic_code() {
     }
 }
 
+const ANCHOR_PATTERNS: &[&str] = &[
+    "^first",
+    "^second",
+    "third$",
+    "line$",
+    "^#include",
+    "^[ \\t]+return",
+    "^[ \\t]*return;$",
+    "(^foo|bar$)",
+    "^\\w+ delay",
+    "\\Afirst",
+    "third\\z",
+    "^$",
+    "^\\n",
+    "ends\\n$",
+    "^[0-9]+:",
+    r"^\p{Greek}",
+    r"\p{Greek}$",
+];
+
+fn anchor_corpus() -> Vec<&'static [u8]> {
+    vec![
+        b"first line\nsecond line\nthird".as_slice(),
+        b"first".as_slice(),
+        b"third".as_slice(),
+        b"\nleading empty\n\n".as_slice(),
+        b"no trailing newline".as_slice(),
+        b"foo\r\ncrlf line\r\n".as_slice(),
+        b"  indented return;\n\treturn;\n".as_slice(),
+        b"#include <stdio.h>\nint main() {}\n".as_slice(),
+        b"bar\nfoo".as_slice(),
+        b"12: numbered".as_slice(),
+        b"line that ends\nand more".as_slice(),
+        b"".as_slice(),
+        b"\n".as_slice(),
+        b"x".as_slice(),
+        "\u{3bc}s delay\n\u{3a9}".as_bytes(),
+        "tail \u{3c9}".as_bytes(),
+    ]
+}
+
+/// Anchors under the verifier's line-oriented semantics: the oracle compiles
+/// with `multi_line` so `^`/`$` match at every line boundary, exactly as eg
+/// verifies candidates.
+#[test]
+fn anchored_plans_never_miss_line_matches() {
+    let t = weight_table();
+    let docs = anchor_corpus();
+    for &re in ANCHOR_PATTERNS {
+        let planned = query(&t, re).expect("pattern parses");
+        if planned.is_all() {
+            continue;
+        }
+        let oracle = regex::bytes::RegexBuilder::new(re)
+            .multi_line(true)
+            .build()
+            .expect("oracle parses pattern");
+        for doc in &docs {
+            let (grams, summary) = index_scan(&t, doc);
+            if oracle.is_match(doc) {
+                assert!(
+                    satisfies(planned.root(), &grams, &summary),
+                    "FALSE NEGATIVE: {re:?} matches {:?} but the plan rejects it",
+                    String::from_utf8_lossy(doc),
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn plan_never_misses_on_exhaustive_small_alphabet_sweep() {
     let t = weight_table();

@@ -80,11 +80,17 @@ execution are.
 
 Planner emits every need it can prove; index format unchanged.
 
-- `LineStartsWithAnyByte`/`LineEndsWithAnyByte` from `^`/`$` boundary byte sets.
-- `StartsWith`/`EndsWith` from `\A`/`\z` exact prefixes/suffixes.
-- `HasFlags` from required byte classes (digit, upper, non-ascii, crlf).
-- `MinLineCount` from required `\n` literals.
-- Per-branch needs on AnyOf/AllOf children, not root-only.
+- `ContainsAnyByte` from required classes: UTF-8 lead-byte set per class, unioned
+  across alternation branches, capped at 4 sets of ≤128 bytes. Subsumes `HasFlags`
+  (a required digit class ≡ the digit byte-presence set), so `HasFlags` stays unused.
+- `LineStartsWithAnyByte`/`LineEndsWithAnyByte` from fully `^`/`$`-anchored patterns;
+  skipped when the edge byte set could contain `\n` (empty lines record no edge byte).
+- `StartsWith`/`EndsWith` from `\A`/`\z` literal edges (≤16 bytes).
+- `MinLineCount` dropped: `MinByteCounts` already demands the required `\n` count,
+  and the safe bound (`k` newlines ⇒ ≥`k` lines) adds nothing beyond it.
+- Anchored soundness pinned by a dedicated multi-line-oracle sweep in soundness.rs
+  (the verifier is line-oriented; the old oracle compiled without multi_line).
+- Deferred to a later slice: per-branch needs on AnyOf/AllOf children.
 - Forced candidates get filtered by the same needs (already plumbed, verify).
 - Watch: AnyOf-need union paths walk all summaries, O(doc_count); keep needs on
   candidate-bounded paths or bench the walk.
