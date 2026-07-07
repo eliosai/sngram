@@ -1,0 +1,55 @@
+crates/eg/src/index/summary.rs
+  s_f911a7f11fb798::t_b7bef46b9866ae 133-141
+  s_f911a7f11fb798::t_b05d32b7810901 570-582
+  s_f911a7f11fb798::t_2992957a290bc9 569
+crates/eg/src/index/suite.rs
+  s_f911a7f11fb798::t_1886bac75e80d6 461,464
+  s_f911a7f11fb798::t_afe56322e51b0e 482-484
+  s_f911a7f11fb798::t_71a25b1703c44a 382,638-696,747-764,783
+  s_f911a7f11fb798::t_fbe22f2c975160 4
+  s_f911a7f11fb798::t_281e425e4ecba9 384-391
+  s_f911a7f11fb798::t_6daf50ea9af095 33-40
+  s_f911a7f11fb798::t_768557c5fb9395 392-401
+  s_f911a7f11fb798::t_62d4c98907ac14 481
+  s_f911a7f11fb798::t_2c834acf8b72a0 769,774-782
+  s_f911a7f11fb798::t_a7f36a376b0b63 356,361-380
+  s_f911a7f11fb798::t_dfa9b7c97b040f 253-261
+  s_f911a7f11fb798::t_f6edad90c85044 506-507,509
+  s_f911a7f11fb798::t_c457aec866cc53 706-724
+  s_f911a7f11fb798::t_a58da00bdccdba 285-286,292-297
+  s_f911a7f11fb798::t_037f69eeb22e92 298,567-577
+  s_f911a7f11fb798::t_baef5bca457e1d 697-705,725-746
+  s_f911a7f11fb798::t_1fc45e676b286b 299
+  s_f911a7f11fb798::t_87ef4c7a243461 381
+  s_f911a7f11fb798::t_d38c619af7cc6f 383
+  s_f911a7f11fb798::t_7b89c1552ffc9e 784
+docs/fp-optimization-plan.md
+  s_f911a7f11fb798::t_a3532457374e3a 74-77
+crates/eg/src/index/bench.rs
+  s_f911a7f11fb798::t_287dbd589a012a 135-138
+  s_f911a7f11fb798::t_d4f1ad479afe2d 391
+crates/eg/src/index/postings.rs
+  s_f911a7f11fb798::t_e4d48eb992eae4 803-806
+crates/eg/src/index/data/fp-queries.tsv
+  s_f911a7f11fb798::t_3ce42108f9edfa 319-384
+justfile
+  s_f911a7f11fb798::t_529c7fd6faa534 6-13
+crates/eg/src/index/backend.rs
+  s_f911a7f11fb798::t_99c8693681d6c0 56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6bcb29902bcddaaefe662f8ed9efa8193cb5f727",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
