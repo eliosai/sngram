@@ -77,16 +77,19 @@ fn estimate_all_of(
     df: &dyn DfStats,
     total: u64,
 ) -> u64 {
-    let gram_estimates = grams
+    let mut estimate = total;
+    for needle in grams {
+        estimate = estimate.min(estimate_needle(needle, df, total));
+    }
+    for child in children {
+        estimate = estimate.min(estimate_expr(summaries, child, df));
+    }
+    if !grams.is_empty() || !children.is_empty() {
+        return estimate;
+    }
+    needs
         .iter()
-        .map(|needle| estimate_needle(needle, df, total));
-    let need_estimates = needs.iter().map(|need| count_need(summaries, need));
-    let child_estimates = children
-        .iter()
-        .map(|child| estimate_expr(summaries, child, df));
-    gram_estimates
-        .chain(need_estimates)
-        .chain(child_estimates)
+        .map(|need| count_need(summaries, need))
         .min()
         .unwrap_or(total)
 }

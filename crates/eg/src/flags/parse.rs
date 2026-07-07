@@ -120,21 +120,18 @@ fn set_log_levels(low: &LowArgs) {
     }
 }
 
-/// Parse the sequence of CLI arguments given a low level typed set of
-/// arguments.
-///
-/// This is exposed for testing that the correct low-level arguments are parsed
-/// from a CLI. It just runs the parser once over the CLI arguments. It doesn't
-/// setup logging or read from a config file.
-///
-/// This assumes the iterator given does *not* begin with the binary name.
 #[cfg(test)]
-pub(crate) fn parse_low_raw(
-    rawargs: impl IntoIterator<Item = impl Into<OsString>>,
-) -> anyhow::Result<LowArgs> {
-    let mut args = LowArgs::default();
-    Parser::new().parse(rawargs, &mut args)?;
-    Ok(args)
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Parse CLI arguments into low-level arguments without logging or config.
+    pub(crate) fn parse_low_raw(
+        rawargs: impl IntoIterator<Item = impl Into<OsString>>,
+    ) -> anyhow::Result<LowArgs> {
+        let mut args = LowArgs::default();
+        Parser::new().parse(rawargs, &mut args)?;
+        Ok(args)
+    }
 }
 
 /// Return the metadata for the flag of the given name.

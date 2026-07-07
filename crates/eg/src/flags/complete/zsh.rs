@@ -37,7 +37,7 @@ pub(crate) fn generate() -> String {
         .replace("compdef _rg rg", "compdef _eg eg")
         .replace(
             "    '(: * -)'--pcre2-version'[print the version of PCRE2 used by ripgrep, if available]'",
-            "    '(: * -)'--pcre2-version'[print the version of PCRE2 used by elgrep, if available]'\n    '--index=[use sparse n-gram indexed search]:index mode:(auto rebuild)'\n    '--index-backend=[select sparse n-gram index backend]:index backend:(postings tantivy tantivy-ram)'\n    '--no-index[disable sparse n-gram indexed search]'",
+            "    '(: * -)'--pcre2-version'[print the version of PCRE2 used by elgrep, if available]'\n    '--index=[use sparse n-gram indexed search]:index mode:(auto)'\n    '--index-backend=[select sparse n-gram index backend]:index backend:(postings tantivy)'\n    '--no-index[disable sparse n-gram indexed search]'",
         )
         .replace("!ENCODINGS!", super::ENCODINGS.trim_end())
         .replace("!HYPERLINK_ALIASES!", &hyperlink_alias_descriptions)

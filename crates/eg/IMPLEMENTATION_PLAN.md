@@ -10,36 +10,36 @@
 - Use unprefixed flags: `--no-index`, `--index`, `--index-backend`.
 - Use no silent fallback in indexed modes. Unsupported indexed searches return an error.
 - Treat exact ripgrep verification as part of indexed search, not as fallback.
-- Run performance work through CodSpeed. Do not report raw `cargo bench` timings.
+- Use raw CLI and Divan benchmarks for performance work. Report command lines,
+  corpus, output mode, and cold/hot daemon state with the timing numbers.
 
 ## CLI modes
 
-Bench and support these modes first:
+Bench and support these modes:
 
 ```text
 eg --no-index
-eg --index=auto
-eg --index=rebuild
-eg --index-backend=tantivy-ram
+eg
+eg --bench
 ```
 
-`--index=rebuild` measures build plus query time. Bench reports split build, open, plan, index query, and verification times.
+The default path uses a daemon-owned sparse n-gram index. `--no-index` runs the
+copied ripgrep scan path. `--bench` runs the real indexed path and reports the
+daemon cold/hot phases separately.
 
-Initial flags:
+Supported index flags:
 
 ```text
 --no-index
---index=auto|rebuild
 --index-dir PATH
---index-backend=tantivy|tantivy-ram
---index-table PATH
---index-table-size SIZE
---index-threads NUM
---index-memory BYTES
---max-index-filesize SIZE
---index-status
---index-stats
+--index-backend=postings|tantivy
+--bench
+--bench-suite
 ```
+
+There is no foreground rebuild, verify, repair, or require mode. If no
+daemon-proofed index exists, foreground `eg` may block once while the daemon
+builds and publishes one. After that, every usable index must be daemon-owned.
 
 ## Ripgrep integration
 
@@ -48,11 +48,17 @@ Initial flags:
 3. Add one extension point after ripgrep builds haystacks and before workers search files.
 4. Keep ripgrep printers responsible for stdout, stderr, JSON, colors, stats, and exit codes.
 
-Search flow: parse rg args, build rg haystacks, run copied rg path for `--no-index`, open or rebuild the index, plan sparse grams, query Tantivy, map doc ords to paths, verify candidates with ripgrep workers, and print with ripgrep printers.
+Search flow: parse rg args, run copied rg path for `--no-index`, otherwise plan
+sparse grams, resolve the best daemon-proofed generation from disk, mmap/open
+the manifest and backend, query candidate ordinals, restrict candidates to the
+requested roots, verify candidates with ripgrep workers, and print with ripgrep
+printers.
 
 ## Index design
 
-Use Tantivy as a numeric inverted index: one source file per Tantivy document, repeated indexed `u64` sparse n-gram hashes, fast `u64` `doc_ord`, external manifest for paths and metadata, mmap for normal runs, RAM only for `--index-backend=tantivy-ram`.
+The production backend is eg's compact mmap-backed postings index. Disk Tantivy
+remains experimental. In-memory index backends are not part of the daemon-owned
+model because foreground search must only read a published on-disk generation.
 
 Use `sngram::scan` for build extraction and `sngram::query` for query plans. Deduplicate gram hashes per file before adding the document.
 
@@ -60,11 +66,27 @@ If a pattern produces an unconstrained plan, indexed mode errors and tells the u
 
 ## Freshness
 
-The manifest records the table hash, root path, ripgrep commit, `eg` version, file size, mtime, and content hash policy. Indexed mode errors on stale files, missing files, new files, table mismatch, root mismatch, or schema mismatch. Later work may add explicit overlay support, but v1 keeps the rule strict.
+Foreground `eg` does not prove freshness by walking the tree. It accepts an
+index only when disk proves daemon ownership:
+
+- compatible backend manifest exists
+- manifest identity matches the weights, index format, scanner/query format,
+  and walk/filter fingerprint
+- a live daemon lock owner matches the state root owner token
+- watcher-ready exists
+- journal-clean exists
+- no newer wake/dirty epoch invalidates the clean marker
+- the lease is live
+
+If proof fails, the index is invalid for foreground search. The daemon deletes
+stale generations on startup before publishing readiness and deletes maintained
+generations on graceful shutdown.
 
 ## Build pipeline
 
-Use ripgrep ignore traversal to list files. Rayon workers read files, extract sparse grams, sort and deduplicate hashes, then send prepared documents to one Tantivy writer. The builder commits the index and writes manifest plus stats atomically.
+Daemon refresh uses ripgrep ignore traversal to list files. Workers read files,
+extract sparse grams, sort and deduplicate hashes, write backend data, summaries,
+and manifest, then publish a clean marker only after the generation is complete.
 
 ## Tests
 
@@ -76,20 +98,26 @@ Use ripgrep ignore traversal to list files. Rayon workers read files, extract sp
 - Add candidate tests that prove matching files appear in the candidate set.
 - Add Unicode tests for Chinese, Japanese, Hebrew, English, and mixed Python.
 
-## CodSpeed benches
+## Benchmarks
 
-Use Divan through `codspeed-divan-compat`. Add `codspeed.yml` for whole-command benchmarks when Divan cannot express the workload. Use simulation for CPU-bound micro paths and walltime for end-to-end search, file IO, indexing, and mmap behavior.
+Use Divan for micro paths and raw CLI timing for end-to-end search, file IO,
+indexing, mmap behavior, and daemon hot/cold behavior. Compare identical output
+modes when checking `eg` against `rg`.
 
 Bench modes:
 
 ```text
 eg --no-index
-eg --index=auto
-eg --index=rebuild
-eg --index-backend=tantivy-ram
+eg --bench
+eg --bench-suite
 ```
 
-Metrics: wall time, build time, index open time, query plan time, Tantivy query time, ripgrep verification time, files and bytes indexed, index size, candidate files, verified files, matching files, false positives, false positive rate, bytes verified over corpus bytes, speedup against `eg --no-index`, stdout hash, and exit code equality.
+Metrics: wall time, daemon proof time, cold daemon wait/build time, manifest
+open time, index mmap/open time, sparse lookup time, candidate restriction time,
+ripgrep verification time, files and bytes indexed, index size, candidate files,
+verified files, matching files, false positives, false-positive rate, bytes
+verified over corpus bytes, speedup against `eg --no-index`, `rg` comparison,
+stdout hash, and exit code equality.
 
 ## Bench corpora
 
@@ -109,9 +137,9 @@ Multilingual corpus:
 
 1. Vendor/import ripgrep and make `eg --no-index` pass parity tests.
 2. Add unprefixed index flags with hard errors for indexed mode.
-3. Add Tantivy schema, manifest, and RAM backend tests.
+3. Add daemon-owned manifest and backend tests.
 4. Add sparse n-gram index builder.
-5. Add query-plan to Tantivy translation.
+5. Add query-plan to backend translation.
 6. Add candidate verification through ripgrep workers.
-7. Add CodSpeed Divan benches and command benches.
+7. Add Divan benches and raw CLI command benchmarks.
 8. Add Linux runtime clone setup and committed multilingual corpus.

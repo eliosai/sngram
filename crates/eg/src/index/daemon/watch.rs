@@ -23,6 +23,14 @@ impl Watcher {
     pub fn drain_dirty(&mut self) -> anyhow::Result<Vec<std::path::PathBuf>> {
         Ok(Vec::new())
     }
+
+    pub fn wait_dirty(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        std::thread::sleep(timeout);
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -35,6 +43,7 @@ mod linux {
         fs, io, mem,
         os::{fd::RawFd, unix::ffi::OsStrExt},
         path::{Path, PathBuf},
+        time::Duration,
     };
 
     const WATCH_MASK: u32 = libc::IN_ATTRIB
@@ -78,6 +87,28 @@ mod linux {
                 self.record_events(&buffer[..usize::try_from(len)?], &mut dirty)?;
             }
             Ok(dirty.into_iter().collect())
+        }
+
+        pub fn wait_dirty(&mut self, timeout: Duration) -> anyhow::Result<Vec<PathBuf>> {
+            if self.wait_for_event(timeout)? {
+                return self.drain_dirty();
+            }
+            Ok(Vec::new())
+        }
+
+        fn wait_for_event(&self, timeout: Duration) -> anyhow::Result<bool> {
+            let mut pollfd = libc::pollfd {
+                fd: self.fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout = timeout.as_millis().try_into().unwrap_or(i32::MAX);
+            let ready = unsafe { libc::poll(&raw mut pollfd, 1, timeout) };
+            match ready.cmp(&0) {
+                std::cmp::Ordering::Greater => Ok(pollfd.revents & libc::POLLIN != 0),
+                std::cmp::Ordering::Equal => Ok(false),
+                std::cmp::Ordering::Less => Err(io::Error::last_os_error().into()),
+            }
         }
 
         fn read_events(&self, buffer: &mut [u8]) -> anyhow::Result<Option<isize>> {
@@ -240,7 +271,11 @@ mod linux {
     }
 
     fn is_state_path(path: &Path, state_root: &Path) -> bool {
-        path == state_root || path.starts_with(state_root)
+        path == state_root
+            || path.starts_with(state_root)
+            || path
+                .components()
+                .any(|component| component.as_os_str() == ".eg")
     }
 
     #[cfg(test)]
@@ -283,6 +318,22 @@ mod linux {
             let mut watcher = Watcher::new().expect("watcher");
             assert!(watcher.watch_tree(&root, &state).expect("watch tree"));
             fs::write(state.join("runtime-marker"), "ignored").expect("write");
+            std::thread::sleep(Duration::from_millis(20));
+
+            assert!(watcher.drain_dirty().expect("dirty").is_empty());
+        }
+
+        #[test]
+        fn nested_state_root_events_are_ignored() {
+            let root = scratch("nested-state");
+            let state = root.join(".eg");
+            let nested_state = root.join("src/.eg");
+            fs::create_dir_all(&state).expect("state");
+            fs::create_dir_all(&nested_state).expect("nested state");
+
+            let mut watcher = Watcher::new().expect("watcher");
+            assert!(watcher.watch_tree(&root, &state).expect("watch tree"));
+            fs::write(nested_state.join("runtime-marker"), "ignored").expect("write");
             std::thread::sleep(Duration::from_millis(20));
 
             assert!(watcher.drain_dirty().expect("dirty").is_empty());

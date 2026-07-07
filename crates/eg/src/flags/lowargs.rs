@@ -409,16 +409,6 @@ impl ContextMode {
             ContextMode::Limited(ContextModeLimited { ref mut both, .. }) => *both = Some(lines),
         }
     }
-
-    /// A convenience function for use in tests that returns the limited
-    /// context. If this mode isn't limited, then it panics.
-    #[cfg(test)]
-    pub(crate) fn get_limited(&self) -> (usize, usize) {
-        match *self {
-            ContextMode::Passthru => unreachable!("context mode is passthru"),
-            ContextMode::Limited(ref limited) => limited.get(),
-        }
-    }
 }
 
 /// A context mode for a finite number of lines.

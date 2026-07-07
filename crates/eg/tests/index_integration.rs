@@ -1,4 +1,4 @@
-//! Phase-one integration tests for the elgrep CLI port.
+//! Integration tests for indexed and unindexed elgrep CLI behavior.
 #![allow(
     missing_docs,
     clippy::too_many_lines,
@@ -9,12 +9,16 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Child, Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
+    process::{Child, Command, ExitStatus, Output},
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+static EG_COMMAND_LOCK: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     root: PathBuf,
@@ -23,7 +27,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> Fixture {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("eg-phase1-{}-{id}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("eg-index-integration-{}-{id}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         Fixture { root }
     }
@@ -40,14 +45,20 @@ impl Drop for Fixture {
 }
 
 fn eg(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_eg"))
-        .args(args)
-        .output()
-        .unwrap()
+    let _guard = EG_COMMAND_LOCK.lock().unwrap();
+    let mut command = eg_command();
+    command.args(args).output().unwrap()
+}
+
+fn eg_in(args: &[&str], cwd: &Path) -> Output {
+    let _guard = EG_COMMAND_LOCK.lock().unwrap();
+    let mut command = eg_command();
+    command.current_dir(cwd).args(args).output().unwrap()
 }
 
 fn eg_with_env(args: &[&str], envs: &[(&str, &Path)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_eg"));
+    let _guard = EG_COMMAND_LOCK.lock().unwrap();
+    let mut command = eg_command();
     command.args(args);
     for &(key, value) in envs {
         command.env(key, value);
@@ -56,7 +67,8 @@ fn eg_with_env(args: &[&str], envs: &[(&str, &Path)]) -> Output {
 }
 
 fn eg_with_env_vars(args: &[&str], envs: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_eg"));
+    let _guard = EG_COMMAND_LOCK.lock().unwrap();
+    let mut command = eg_command();
     command.args(args);
     for &(key, value) in envs {
         command.env(key, value);
@@ -64,25 +76,97 @@ fn eg_with_env_vars(args: &[&str], envs: &[(&str, &str)]) -> Output {
     command.output().unwrap()
 }
 
+fn eg_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_eg"));
+    command.env("XDG_RUNTIME_DIR", isolated_runtime_dir());
+    command
+}
+
+fn isolated_runtime_dir() -> PathBuf {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "eg-index-integration-runtime-{}-{id}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+
+fn install_daemon_fixture(dest: &Path) {
+    fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    let staged_daemon = dest.with_extension(format!("tmp-{}", std::process::id()));
+    fs::copy(env!("CARGO_BIN_EXE_eg-indexd"), &staged_daemon).unwrap();
+    let permissions = fs::metadata(env!("CARGO_BIN_EXE_eg-indexd"))
+        .unwrap()
+        .permissions();
+    fs::set_permissions(&staged_daemon, permissions).unwrap();
+    fs::File::open(&staged_daemon).unwrap().sync_all().unwrap();
+    fs::rename(staged_daemon, dest).unwrap();
+}
+
 struct ChildGuard {
-    child: Child,
+    child: Option<Child>,
 }
 
 impl ChildGuard {
     fn spawn_daemon(runtime_root: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_eg-indexd"))
+        Self::spawn_daemon_binary(Path::new(env!("CARGO_BIN_EXE_eg-indexd")), runtime_root)
+    }
+
+    fn spawn_daemon_binary(binary: &Path, runtime_root: &Path) -> Self {
+        let child = spawn_daemon_process(binary, runtime_root);
+        wait_until(Duration::from_secs(10), || {
+            runtime_root.join("startup-ready").exists().then_some(())
+        });
+        Self { child: Some(child) }
+    }
+
+    fn kill_and_wait(mut self) -> ExitStatus {
+        let child = self.child.as_mut().unwrap();
+        let _ = child.kill();
+        let status = child.wait().unwrap();
+        self.child.take();
+        status
+    }
+
+    fn wait_for_exit(mut self, timeout: Duration) -> ExitStatus {
+        let started = Instant::now();
+        loop {
+            let child = self.child.as_mut().unwrap();
+            if let Some(status) = child.try_wait().unwrap() {
+                self.child.take();
+                return status;
+            }
+            assert!(
+                started.elapsed() <= timeout,
+                "timed out waiting for daemon exit"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+fn spawn_daemon_process(binary: &Path, runtime_root: &Path) -> Child {
+    wait_until(Duration::from_secs(2), || {
+        match Command::new(binary)
             .arg("--runtime-root")
             .arg(runtime_root)
             .spawn()
-            .unwrap();
-        Self { child }
-    }
+        {
+            Ok(child) => Some(Ok(child)),
+            Err(err) if err.raw_os_error() == Some(26) => None,
+            Err(err) => Some(Err(err)),
+        }
+    })
+    .unwrap()
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -124,15 +208,30 @@ fn assert_bench_schema(report: &serde_json::Value) {
         assert!(report.get(field).is_some(), "missing bench field {field}");
     }
     for field in [
+        "request_validate",
         "parse_request",
         "plan_query",
-        "resolve_roots",
-        "catalog_open",
-        "generation_validate",
-        "initial_build",
-        "index_mmap",
-        "index_query",
-        "verify_candidates",
+        "resolve_root",
+        "catalog_probe",
+        "daemon_register",
+        "daemon_start",
+        "cold_build_total",
+        "daemon_ready",
+        "daemon_proof",
+        "manifest_open",
+        "walk_collect",
+        "snapshot_build",
+        "scan_documents",
+        "write_postings",
+        "write_summary",
+        "write_manifest",
+        "publish_generation",
+        "index_open",
+        "index_tune",
+        "index_execute",
+        "index_lookup",
+        "candidate_restrict",
+        "verify_haystacks",
         "total",
     ] {
         assert!(
@@ -145,12 +244,12 @@ fn assert_bench_schema(report: &serde_json::Value) {
         "text_files",
         "binary_skipped_files",
         "query_grams",
+        "tuned_query_grams",
         "candidate_files",
         "verified_files",
         "matched_files",
         "forced_candidate_files",
         "parent_restricted_candidates",
-        "dirty_forced_candidates",
     ] {
         assert!(
             report["counts"].get(field).is_some(),
@@ -213,18 +312,19 @@ fn help_names_elgrep_and_index_flags() {
     assert!(stdout.contains("SPARSE N-GRAM OPTIONS:"));
     assert!(stdout.contains("--index=MODE"));
     assert!(stdout.contains("--index-backend=BACKEND"));
-    assert!(stdout.contains("--bench-suite"));
+    assert!(stdout.contains("--bench"));
+    assert!(!stdout.contains("--bench-suite"));
     assert!(stdout.contains("--no-index"));
 }
 
 #[test]
-fn rebuild_index_searches_matching_files() {
+fn auto_index_searches_matching_files() {
     let fixture = Fixture::new();
     fs::write(fixture.path("hit.txt"), "alpha unique needle\n").unwrap();
     fs::write(fixture.path("miss.txt"), "beta only\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "unique needle",
         fixture.root.to_str().unwrap(),
     ]);
@@ -289,7 +389,7 @@ fn index_bench_emits_structured_json_without_match_output() {
 }
 
 #[test]
-fn index_bench_suite_emits_table_and_summary() {
+fn index_bench_emits_suite_table_and_summary() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.path("crates/eg/src/index")).unwrap();
     fs::write(
@@ -297,7 +397,7 @@ fn index_bench_suite_emits_table_and_summary() {
         r#"
 use std::collections::HashMap;
 #[derive(Debug, Clone)]
-pub mod bench_suite;
+pub mod bench_data;
 fn main() {
     const MAX_FILE_SIZE: usize = 4096;
     let path = "crates/eg/src/index/mod.rs";
@@ -313,10 +413,7 @@ fn helper_result() -> Result<(), Error> { Ok(()) }
     fs::write(fixture.path("hit.txt"), "foo123bar\n").unwrap();
     fs::write(fixture.path("false-positive.txt"), "foo\nbar\n").unwrap();
 
-    let output = eg_with_env_vars(
-        &["--bench-suite", fixture.root.to_str().unwrap()],
-        &[("EG_INDEXD_DISABLE_AUTOSPAWN", "1")],
-    );
+    let output = eg_in(&["--bench"], &fixture.root);
     let stdout = String::from_utf8(output.stdout).unwrap();
 
     assert!(
@@ -325,21 +422,26 @@ fn helper_result() -> Result<(), Error> { Ok(()) }
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("idx_wall"));
-    assert!(stdout.contains("literal_main"));
+    assert!(stdout.contains("scan_wall"));
+    assert!(stdout.contains("rg_wall"));
+    assert!(stdout.contains("lit_rare"));
     assert!(stdout.contains("summary regexes="));
+    assert!(stdout.contains("warm_wall_ms="));
+    assert!(stdout.contains("speedup_scan="));
+    assert!(stdout.contains("speedup_rg="));
     assert!(stdout.contains("false_positive_pct="));
     assert!(!stdout.trim_start().starts_with('{'));
 }
 
 #[test]
-fn index_bench_reports_rebuild_source() {
+fn index_bench_reports_cold_daemon_build_source() {
     let fixture = Fixture::new();
-    fs::write(fixture.path("hit.txt"), "bench rebuild needle\n").unwrap();
+    fs::write(fixture.path("hit.txt"), "bench cold build needle\n").unwrap();
 
     let output = eg(&[
         "--bench",
-        "--index=rebuild",
-        "bench rebuild needle",
+        "--index=auto",
+        "bench cold build needle",
         fixture.root.to_str().unwrap(),
     ]);
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -352,35 +454,63 @@ fn index_bench_reports_rebuild_source() {
     );
     assert_bench_schema(&report);
     assert_eq!(Some(true), report["cold_build"].as_bool());
-    assert_eq!(Some("rebuild"), report["generation_source"].as_str());
+    assert_eq!(Some("cold_build"), report["generation_source"].as_str());
     assert_eq!(Some(true), report["matched"].as_bool());
+    for field in [
+        "walk_collect",
+        "snapshot_build",
+        "scan_documents",
+        "write_postings",
+        "write_summary",
+        "write_manifest",
+        "publish_generation",
+    ] {
+        assert!(
+            report["timings_ms"][field]
+                .as_f64()
+                .is_some_and(|ms| ms > 0.0),
+            "expected cold build timing for {field}: {}",
+            report["timings_ms"][field]
+        );
+    }
 }
 
 #[test]
-fn index_bench_reports_delta_source_after_changed_file() {
+fn index_bench_reports_hot_source_after_daemon_refresh() {
     let fixture = Fixture::new();
-    fs::write(fixture.path("sample.txt"), "bench delta old needle\n").unwrap();
+    let runtime_fixture = Fixture::new();
+    fs::write(fixture.path("sample.txt"), "bench daemon old needle\n").unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_parent_str = runtime_parent.to_str().unwrap();
+    let root_str = fixture.root.to_str().unwrap();
+    let envs = [("XDG_RUNTIME_DIR", runtime_parent_str)];
 
-    let first = eg(&[
-        "--index=rebuild",
-        "bench delta old",
-        fixture.root.to_str().unwrap(),
-    ]);
+    let first = eg_with_env_vars(&["--index=auto", "bench daemon old", root_str], &envs);
     assert!(
         first.status.success(),
         "{}",
         String::from_utf8(first.stderr).unwrap()
     );
+    let state_runtime = fixture.path(".eg/runtime");
+    let initial_clean = wait_until(Duration::from_secs(10), || {
+        fs::metadata(state_runtime.join("journal-clean"))
+            .and_then(|meta| meta.modified())
+            .ok()
+    });
 
     std::thread::sleep(Duration::from_millis(20));
-    fs::write(fixture.path("sample.txt"), "bench delta changed needle\n").unwrap();
+    fs::write(fixture.path("sample.txt"), "bench daemon changed needle\n").unwrap();
+    wait_until(Duration::from_secs(10), || {
+        let modified = fs::metadata(state_runtime.join("journal-clean"))
+            .and_then(|meta| meta.modified())
+            .ok()?;
+        (modified > initial_clean).then_some(modified)
+    });
 
-    let output = eg(&[
-        "--bench",
-        "--index=auto",
-        "bench delta changed",
-        fixture.root.to_str().unwrap(),
-    ]);
+    let output = eg_with_env_vars(
+        &["--bench", "--index=auto", "bench daemon changed", root_str],
+        &envs,
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
@@ -391,7 +521,7 @@ fn index_bench_reports_delta_source_after_changed_file() {
     );
     assert_bench_schema(&report);
     assert_eq!(Some(false), report["cold_build"].as_bool());
-    assert_eq!(Some("delta"), report["generation_source"].as_str());
+    assert_eq!(Some("hot"), report["generation_source"].as_str());
     assert_eq!(Some(true), report["matched"].as_bool());
 }
 
@@ -409,7 +539,7 @@ fn index_bench_reports_forced_candidate_count_on_rejection() {
 
     let output = eg(&[
         "--bench",
-        "--index=rebuild",
+        "--index=auto",
         "--files-with-matches",
         "rare forced candidate needle",
         fixture.root.to_str().unwrap(),
@@ -428,13 +558,13 @@ fn index_bench_reports_forced_candidate_count_on_rejection() {
 }
 
 #[test]
-fn index_bench_reports_dirty_forced_candidates() {
+fn index_bench_reports_forced_candidates_after_republish() {
     let fixture = Fixture::new();
     fs::write(fixture.path("hit.txt"), "dirty forced candidate needle\n").unwrap();
     fs::write(fixture.path("encoded.txt"), [0xFF, 0xFE, b'a']).unwrap();
 
     let build = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "dirty forced candidate",
         fixture.root.to_str().unwrap(),
     ]);
@@ -463,10 +593,6 @@ fn index_bench_reports_dirty_forced_candidates() {
     );
     assert_bench_schema(&report);
     assert_eq!(Some(1), report["counts"]["forced_candidate_files"].as_u64());
-    assert_eq!(
-        Some(1),
-        report["counts"]["dirty_forced_candidates"].as_u64()
-    );
     assert_eq!(Some(true), report["matched"].as_bool());
 }
 
@@ -548,6 +674,9 @@ fn index_bench_reports_false_positive_counts_on_controlled_corpus() {
 #[test]
 fn parent_index_serves_child_search_root() {
     let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let envs = [("XDG_RUNTIME_DIR", runtime_parent.as_path())];
     fs::create_dir_all(fixture.path("src")).unwrap();
     fs::create_dir_all(fixture.path("other")).unwrap();
     fs::write(fixture.path("src/hit.txt"), "shared parent child needle\n").unwrap();
@@ -557,22 +686,28 @@ fn parent_index_serves_child_search_root() {
     )
     .unwrap();
 
-    let build = eg(&[
-        "--index=rebuild",
-        "shared parent",
-        fixture.root.to_str().unwrap(),
-    ]);
+    let build = eg_with_env(
+        &[
+            "--index=auto",
+            "shared parent",
+            fixture.root.to_str().unwrap(),
+        ],
+        &envs,
+    );
     assert!(
         build.status.success(),
         "{}",
         String::from_utf8(build.stderr).unwrap()
     );
 
-    let output = eg(&[
-        "--bench",
-        "shared parent",
-        fixture.path("src").to_str().unwrap(),
-    ]);
+    let output = eg_with_env(
+        &[
+            "--bench",
+            "shared parent",
+            fixture.path("src").to_str().unwrap(),
+        ],
+        &envs,
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
@@ -596,7 +731,7 @@ fn child_index_is_ignored_for_parent_search_root() {
     fs::write(fixture.path("src/hit.txt"), "child index parent needle\n").unwrap();
 
     let child_build = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "child index parent",
         fixture.path("src").to_str().unwrap(),
     ]);
@@ -633,7 +768,7 @@ fn incompatible_parent_index_identity_is_rejected() {
     fs::write(fixture.path("src/hit.txt"), "identity child needle\n").unwrap();
 
     let parent_build = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "--index-backend=tantivy",
         "identity child",
         fixture.root.to_str().unwrap(),
@@ -700,63 +835,33 @@ fn daemon_ready_marker_enables_manifest_only_hot_snapshot() {
 }
 
 #[test]
-fn daemon_proof_rejects_pending_wake_before_reusing_manifest() {
+fn stale_index_without_live_daemon_is_rejected() {
     let fixture = Fixture::new();
     fs::write(fixture.path("hit.txt"), "daemon stale old needle\n").unwrap();
-    let envs = [("EG_INDEXD_DISABLE_AUTOSPAWN", "1")];
 
-    let build = eg_with_env_vars(&["daemon stale old", fixture.root.to_str().unwrap()], &envs);
+    let build = eg(&["daemon stale old", fixture.root.to_str().unwrap()]);
     assert!(
         build.status.success(),
         "{}",
         String::from_utf8(build.stderr).unwrap()
     );
-    let runtime = fixture.path(".eg/runtime");
-    fs::create_dir_all(&runtime).unwrap();
-    fs::write(runtime.join("watcher-ready"), "ready").unwrap();
-    fs::write(runtime.join("journal-clean"), "clean").unwrap();
+    assert!(fixture.path(".eg/index").exists());
 
-    let hot = eg_with_env_vars(
+    let stale = eg_with_env_vars(
         &[
             "--bench",
             "daemon stale old",
             fixture.root.to_str().unwrap(),
         ],
-        &envs,
+        &[("EG_INDEXD_DISABLE_AUTOSPAWN", "1")],
     );
-    let hot_stdout = String::from_utf8(hot.stdout).unwrap();
-    let hot_report: serde_json::Value = serde_json::from_str(&hot_stdout).unwrap();
-    assert!(
-        hot.status.success(),
-        "{}",
-        String::from_utf8(hot.stderr).unwrap()
-    );
-    assert_eq!(Some("daemon"), hot_report["freshness_proof"].as_str());
+    let stderr = String::from_utf8(stale.stderr).unwrap();
 
-    fs::write(fixture.path("hit.txt"), "daemon stale new needle\n").unwrap();
-    let refreshed = eg_with_env_vars(
-        &[
-            "--bench",
-            "daemon stale new",
-            fixture.root.to_str().unwrap(),
-        ],
-        &envs,
-    );
-    let refreshed_stdout = String::from_utf8(refreshed.stdout).unwrap();
-    let refreshed_report: serde_json::Value = serde_json::from_str(&refreshed_stdout).unwrap();
-
+    assert!(!stale.status.success());
     assert!(
-        refreshed.status.success(),
-        "{}",
-        String::from_utf8(refreshed.stderr).unwrap()
+        stderr.contains("indexed search needs eg-indexd"),
+        "{stderr}"
     );
-    assert_bench_schema(&refreshed_report);
-    assert_ne!(
-        Some("daemon"),
-        refreshed_report["freshness_proof"].as_str(),
-        "pending wake should force a non-daemon freshness check"
-    );
-    assert_eq!(Some(true), refreshed_report["matched"].as_bool());
 }
 
 #[test]
@@ -772,6 +877,8 @@ fn daemon_refreshes_changed_index_and_hot_path_uses_daemon_proof() {
         ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
     ];
 
+    let runtime_root = runtime_parent.join("eg");
+    let daemon = ChildGuard::spawn_daemon(&runtime_root);
     let build = eg_with_env_vars(&["daemon old needle", root_str], &envs);
     assert!(
         build.status.success(),
@@ -779,8 +886,6 @@ fn daemon_refreshes_changed_index_and_hot_path_uses_daemon_proof() {
         String::from_utf8(build.stderr).unwrap()
     );
 
-    let runtime_root = runtime_parent.join("eg");
-    let daemon = ChildGuard::spawn_daemon(&runtime_root);
     let state_runtime = fixture.path(".eg/runtime");
     let initial_clean = wait_until(Duration::from_secs(10), || {
         fs::metadata(state_runtime.join("journal-clean"))
@@ -812,6 +917,198 @@ fn daemon_refreshes_changed_index_and_hot_path_uses_daemon_proof() {
 }
 
 #[test]
+fn daemon_invalidates_changed_file_before_hot_search() {
+    let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "old daemon stale window needle\n").unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_parent_str = runtime_parent.to_str().unwrap();
+    let root_str = fixture.root.to_str().unwrap();
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent_str),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+
+    let runtime_root = runtime_parent.join("eg");
+    let daemon = ChildGuard::spawn_daemon(&runtime_root);
+    let build = eg_with_env_vars(&["old daemon stale window", root_str], &envs);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+    wait_until(Duration::from_secs(10), || {
+        fixture
+            .path(".eg/runtime/journal-clean")
+            .exists()
+            .then_some(())
+    });
+
+    fs::write(fixture.path("hit.txt"), "new daemon stale window needle\n").unwrap();
+    let output = eg_with_env_vars(&["--bench", "new daemon stale window", root_str], &envs);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    drop(daemon);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_bench_schema(&report);
+    assert_eq!(Some(true), report["matched"].as_bool());
+    assert!(report["counts"]["candidate_files"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
+fn runtime_installed_daemon_refreshes_changed_index() {
+    let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "runtime copy old needle\n").unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_parent_str = runtime_parent.to_str().unwrap();
+    let root_str = fixture.root.to_str().unwrap();
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent_str),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+
+    let runtime_root = runtime_parent.join("eg");
+    let installed_daemon = runtime_root.join("bin/eg-indexd");
+    install_daemon_fixture(&installed_daemon);
+    let daemon = ChildGuard::spawn_daemon_binary(&installed_daemon, &runtime_root);
+    let build = eg_with_env_vars(&["runtime copy old", root_str], &envs);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+
+    let state_runtime = fixture.path(".eg/runtime");
+    let initial_clean = wait_until(Duration::from_secs(10), || {
+        fs::metadata(state_runtime.join("journal-clean"))
+            .and_then(|meta| meta.modified())
+            .ok()
+    });
+
+    fs::write(fixture.path("hit.txt"), "runtime copy new needle\n").unwrap();
+    wait_until(Duration::from_secs(10), || {
+        let modified = fs::metadata(state_runtime.join("journal-clean"))
+            .and_then(|meta| meta.modified())
+            .ok()?;
+        (modified > initial_clean).then_some(modified)
+    });
+
+    let output = eg_with_env_vars(&["--bench", "runtime copy new", root_str], &envs);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    drop(daemon);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert_bench_schema(&report);
+    assert_eq!(Some("daemon"), report["freshness_proof"].as_str());
+    assert_eq!(Some(true), report["matched"].as_bool());
+}
+
+#[test]
+fn daemon_graceful_idle_exit_deletes_index_markers_and_request() {
+    let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "daemon graceful needle\n").unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_parent_str = runtime_parent.to_str().unwrap();
+    let runtime_root = runtime_parent.join("eg");
+    let root_str = fixture.root.to_str().unwrap();
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent_str),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+
+    let daemon = ChildGuard::spawn_daemon(&runtime_root);
+    let build = eg_with_env_vars(&["daemon graceful needle", root_str], &envs);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+    assert!(fixture.path(".eg/index").exists());
+    assert!(runtime_root.join("startup-ready").exists());
+    assert!(has_request_file(&runtime_root));
+
+    fs::remove_file(fixture.path(".eg/runtime/lease")).unwrap();
+    let status = daemon.wait_for_exit(Duration::from_secs(10));
+
+    assert!(status.success());
+    assert!(!fixture.path(".eg/index").exists());
+    assert!(!fixture.path(".eg/runtime/journal-clean").exists());
+    assert!(!fixture.path(".eg/runtime/watcher-ready").exists());
+    assert!(!fixture.path(".eg/runtime/daemon-owner").exists());
+    assert!(!runtime_root.join("startup-ready").exists());
+    assert!(!has_request_file(&runtime_root));
+}
+
+#[test]
+fn killed_daemon_leaves_index_unusable_until_next_startup_deletes_it() {
+    let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "daemon crash needle\n").unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_parent_str = runtime_parent.to_str().unwrap();
+    let runtime_root = runtime_parent.join("eg");
+    let root_str = fixture.root.to_str().unwrap();
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent_str),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+
+    let daemon = ChildGuard::spawn_daemon(&runtime_root);
+    let build = eg_with_env_vars(&["daemon crash needle", root_str], &envs);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+    assert!(fixture.path(".eg/index").exists());
+    assert!(has_request_file(&runtime_root));
+
+    let _ = daemon.kill_and_wait();
+    let stale = eg_with_env_vars(&["--bench", "daemon crash needle", root_str], &envs);
+    let stderr = String::from_utf8(stale.stderr).unwrap();
+    assert!(!stale.status.success());
+    assert!(
+        stderr.contains("indexed search needs eg-indexd"),
+        "{stderr}"
+    );
+    assert!(fixture.path(".eg/index").exists());
+
+    let _ = fs::remove_file(fixture.path(".eg/runtime/lease"));
+    let mut restart =
+        spawn_daemon_process(Path::new(env!("CARGO_BIN_EXE_eg-indexd")), &runtime_root);
+    let status = wait_until(Duration::from_secs(10), || restart.try_wait().unwrap());
+
+    assert!(status.success());
+    assert!(!fixture.path(".eg/index").exists());
+    assert!(!fixture.path(".eg/runtime/journal-clean").exists());
+    assert!(!fixture.path(".eg/runtime/watcher-ready").exists());
+    assert!(!fixture.path(".eg/runtime/daemon-owner").exists());
+    assert!(!runtime_root.join("startup-ready").exists());
+    assert!(!has_request_file(&runtime_root));
+}
+
+fn has_request_file(runtime_root: &Path) -> bool {
+    fs::read_dir(runtime_root.join("requests"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("request"))
+}
+
+#[test]
 fn daemon_consolidates_child_index_after_parent_build() {
     let fixture = Fixture::new();
     let runtime_fixture = Fixture::new();
@@ -833,7 +1130,9 @@ fn daemon_consolidates_child_index_after_parent_build() {
         ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
     ];
 
-    let child = eg_with_env_vars(&["--index=rebuild", "daemon merge child", src_str], &envs);
+    let runtime_root = runtime_parent.join("eg");
+    let daemon = ChildGuard::spawn_daemon(&runtime_root);
+    let child = eg_with_env_vars(&["--index=auto", "daemon merge child", src_str], &envs);
     assert!(
         child.status.success(),
         "{}",
@@ -841,20 +1140,18 @@ fn daemon_consolidates_child_index_after_parent_build() {
     );
     assert!(fixture.path("src/.eg/index").exists());
 
-    let parent = eg_with_env_vars(&["--index=rebuild", "daemon merge child", root_str], &envs);
+    let parent = eg_with_env_vars(&["--index=auto", "daemon merge child", root_str], &envs);
     assert!(
         parent.status.success(),
         "{}",
         String::from_utf8(parent.stderr).unwrap()
     );
     assert!(fixture.path(".eg/index").exists());
+    let _ = fs::remove_file(fixture.path("src/.eg/runtime/lease"));
 
-    let runtime_root = runtime_parent.join("eg");
-    let daemon = ChildGuard::spawn_daemon(&runtime_root);
     wait_until(Duration::from_secs(10), || {
         (!fixture.path("src/.eg/index").exists()).then_some(())
     });
-    drop(daemon);
 
     let output = eg_with_env_vars(&["--bench", "daemon merge child", src_str], &envs);
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -869,6 +1166,7 @@ fn daemon_consolidates_child_index_after_parent_build() {
     assert_eq!(Some(true), report["used_parent_index"].as_bool());
     assert_eq!(Some(true), report["matched"].as_bool());
     assert_eq!(Some(1), report["counts"]["verified_files"].as_u64());
+    drop(daemon);
 }
 
 #[cfg(unix)]
@@ -904,7 +1202,7 @@ fn default_indexed_search_supports_everything_literal() {
     fs::write(fixture.path("hit.txt"), "Everything initial fixture\n").unwrap();
     fs::write(fixture.path("miss.txt"), "nothing relevant\n").unwrap();
 
-    let output = eg(&["Everything", fixture.root.to_str().unwrap()]);
+    let output = eg(&["Everything initial", fixture.root.to_str().unwrap()]);
     let stdout = String::from_utf8(output.stdout).unwrap();
 
     assert!(
@@ -917,12 +1215,12 @@ fn default_indexed_search_supports_everything_literal() {
 }
 
 #[test]
-fn auto_index_unchanged_uses_fast_freshness_snapshot() {
+fn auto_index_unchanged_uses_daemon_proofed_snapshot() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "fast freshness needle\n").unwrap();
 
     let first = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "fast freshness needle",
         fixture.root.to_str().unwrap(),
     ]);
@@ -944,7 +1242,7 @@ fn auto_index_unchanged_uses_fast_freshness_snapshot() {
     assert!(second.status.success(), "{stderr}");
     assert!(stdout.contains("fast freshness needle"));
     assert!(
-        stderr.contains("eg index: loaded fast freshness snapshot"),
+        stderr.contains("eg index: loaded daemon-proofed manifest snapshot"),
         "{stderr}"
     );
     assert!(
@@ -954,12 +1252,12 @@ fn auto_index_unchanged_uses_fast_freshness_snapshot() {
 }
 
 #[test]
-fn auto_index_refreshes_changed_files_without_full_rebuild() {
+fn auto_index_refreshes_changed_files_through_daemon_republish() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "alpha stable needle\n").unwrap();
 
     let first = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "stable needle",
         fixture.root.to_str().unwrap(),
     ]);
@@ -986,12 +1284,12 @@ fn auto_index_refreshes_changed_files_without_full_rebuild() {
     assert!(changed.status.success(), "{stderr}");
     assert!(stdout.contains("changed needle"));
     assert!(
-        stderr.contains("eg index: loaded fast freshness snapshot"),
+        stderr.contains("eg index: loaded daemon-proofed manifest snapshot"),
         "{stderr}"
     );
     assert!(
-        marker.exists(),
-        "auto mode should refresh changed files without deleting the index home"
+        !marker.exists(),
+        "daemon republish should replace the stale index home"
     );
 
     let stale = eg(&[
@@ -1016,7 +1314,7 @@ fn auto_index_ignores_stale_base_postings_for_changed_files() {
     }
 
     let first = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "bootstrap_unique",
         fixture.root.to_str().unwrap(),
     ]);
@@ -1038,7 +1336,7 @@ fn auto_index_ignores_stale_base_postings_for_changed_files() {
     let stale = eg(&[
         "--debug",
         "--index=auto",
-        "zzzz_obsolete_token_zzzz",
+        "zzzz_obsolete_token_zzzz file 0",
         fixture.root.to_str().unwrap(),
     ]);
     let stderr = String::from_utf8(stale.stderr).unwrap();
@@ -1061,7 +1359,7 @@ fn indexed_byte_count_needs_prune_short_repetition_candidates() {
 
     let output = eg(&[
         "--debug",
-        "--index=rebuild",
+        "--index=auto",
         "--files-with-matches",
         "(ab){5}",
         fixture.root.to_str().unwrap(),
@@ -1079,7 +1377,7 @@ fn indexed_byte_count_needs_prune_short_repetition_candidates() {
 }
 
 #[test]
-fn auto_index_uses_git_freshness_for_git_worktrees() {
+fn auto_index_uses_daemon_proof_for_git_worktrees() {
     let fixture = Fixture::new();
     if Command::new("git").arg("--version").output().is_err() {
         return;
@@ -1108,7 +1406,7 @@ fn auto_index_uses_git_freshness_for_git_worktrees() {
     fs::write(fixture.path("untracked.txt"), "git freshness untracked\n").unwrap();
 
     let first = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "git freshness",
         fixture.root.to_str().unwrap(),
     ]);
@@ -1127,12 +1425,12 @@ fn auto_index_uses_git_freshness_for_git_worktrees() {
     let clean_stderr = String::from_utf8(clean.stderr).unwrap();
     assert!(clean.status.success(), "{clean_stderr}");
     assert!(
-        clean_stderr.contains("eg index: git freshness snapshot"),
+        clean_stderr.contains("eg index: loaded daemon-proofed manifest snapshot"),
         "{clean_stderr}"
     );
     assert!(
         !clean_stderr.contains("eg index: collected"),
-        "git fast path should not walk the tree: {clean_stderr}"
+        "daemon-proofed path should not walk the tree: {clean_stderr}"
     );
 
     fs::write(fixture.path("tracked.txt"), "git changed tracked\n").unwrap();
@@ -1147,7 +1445,7 @@ fn auto_index_uses_git_freshness_for_git_worktrees() {
     assert!(changed.status.success(), "{changed_stderr}");
     assert!(changed_stdout.contains("git changed tracked"));
     assert!(
-        changed_stderr.contains("eg index: git freshness snapshot"),
+        changed_stderr.contains("eg index: loaded daemon-proofed manifest snapshot"),
         "{changed_stderr}"
     );
 }
@@ -1159,7 +1457,7 @@ fn auto_index_drops_deleted_files_after_file_list_changes() {
     fs::write(fixture.path("kept.txt"), "kept indexed needle\n").unwrap();
 
     let first = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "deleted indexed needle",
         fixture.root.to_str().unwrap(),
     ]);
@@ -1186,7 +1484,7 @@ fn auto_index_finds_new_files_after_file_list_changes() {
     fs::write(fixture.path("old.txt"), "old indexed needle\n").unwrap();
 
     let first = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "old indexed needle",
         fixture.root.to_str().unwrap(),
     ]);
@@ -1220,7 +1518,7 @@ fn indexed_empty_files_do_not_fail_mmap_indexing() {
     fs::write(fixture.path("hit.txt"), "empty fixture needle\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "empty fixture needle",
         fixture.root.to_str().unwrap(),
     ]);
@@ -1240,7 +1538,7 @@ fn indexed_passthru_errors_with_help() {
     fs::write(fixture.path("sample.txt"), "alpha constrained needle\n").unwrap();
     let root = fixture.root.to_str().unwrap();
 
-    let output = eg(&["--index=require", "--passthru", "constrained needle", root]);
+    let output = eg(&["--index=auto", "--passthru", "constrained needle", root]);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert_eq!(Some(2), output.status.code());
@@ -1255,26 +1553,16 @@ fn indexed_transformed_input_modes_error_without_scan_fallback() {
     let root = fixture.root.to_str().unwrap();
 
     for args in [
+        vec!["--index=auto", "--engine=auto", "constrained needle", root],
+        vec!["--index=auto", "--engine=pcre2", "constrained needle", root],
         vec![
-            "--index=require",
-            "--engine=auto",
-            "constrained needle",
-            root,
-        ],
-        vec![
-            "--index=require",
-            "--engine=pcre2",
-            "constrained needle",
-            root,
-        ],
-        vec![
-            "--index=require",
+            "--index=auto",
             "--encoding=utf-16",
             "constrained needle",
             root,
         ],
-        vec!["--index=require", "--pre=cat", "constrained needle", root],
-        vec!["--index=require", "-z", "constrained needle", root],
+        vec!["--index=auto", "--pre=cat", "constrained needle", root],
+        vec!["--index=auto", "-z", "constrained needle", root],
     ] {
         let output = eg(&args);
         let stderr = String::from_utf8(output.stderr).unwrap();
@@ -1294,7 +1582,7 @@ fn indexed_null_data_errors_with_help() {
     fs::write(fixture.path("sample.txt"), b"alpha\0beta").unwrap();
     let root = fixture.root.to_str().unwrap();
 
-    let output = eg(&["--index=require", "--null-data", "alpha", root]);
+    let output = eg(&["--index=auto", "--null-data", "alpha", root]);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert_eq!(Some(2), output.status.code());
@@ -1406,7 +1694,7 @@ fn indexed_no_mmap_search_uses_read_path() {
     fs::write(fixture.path("sample.txt"), "read path indexed needle\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "--no-mmap",
         "read path indexed needle",
         fixture.root.to_str().unwrap(),
@@ -1441,7 +1729,7 @@ fn indexed_metadata_only_patterns_error_without_scan_fallback() {
     fs::write(fixture.path("sample.txt"), "alpha beta ab\n").unwrap();
 
     for pattern in [".", "[a-z]+", "ab"] {
-        let output = eg(&["--index=rebuild", pattern, fixture.root.to_str().unwrap()]);
+        let output = eg(&["--index=auto", pattern, fixture.root.to_str().unwrap()]);
         let stderr = String::from_utf8(output.stderr).unwrap();
 
         assert_eq!(Some(2), output.status.code(), "{stderr}");
@@ -1473,7 +1761,7 @@ fn indexed_common_literal_over_ceiling_errors_without_verify() {
 
 #[test]
 fn tantivy_common_literal_over_ceiling_errors_without_verify() {
-    assert_common_literal_over_ceiling(&["--index-backend=tantivy-ram"]);
+    assert_common_literal_over_ceiling(&["--index-backend=tantivy"]);
 }
 
 fn assert_common_literal_over_ceiling(backend_args: &[&str]) {
@@ -1486,7 +1774,7 @@ fn assert_common_literal_over_ceiling(backend_args: &[&str]) {
         .unwrap();
     }
 
-    let mut args = vec!["--debug", "--index=rebuild", "--files-with-matches"];
+    let mut args = vec!["--debug", "--index=auto", "--files-with-matches"];
     args.extend_from_slice(backend_args);
     args.extend_from_slice(&["static int", fixture.root.to_str().unwrap()]);
     let output = eg(&args);
@@ -1525,7 +1813,7 @@ fn postings_selectivity_ceiling_uses_text_entries_not_skipped_files() {
 
     let output = eg(&[
         "--debug",
-        "--index=rebuild",
+        "--index=auto",
         "--files-with-matches",
         "static int",
         fixture.root.to_str().unwrap(),
@@ -1553,7 +1841,7 @@ fn indexed_broad_numeric_class_over_ceiling_errors_without_verify() {
 
     let output = eg(&[
         "--debug",
-        "--index=rebuild",
+        "--index=auto",
         "--files-with-matches",
         r"0x[0-9a-fA-F]{8}",
         fixture.root.to_str().unwrap(),
@@ -1582,7 +1870,7 @@ fn forced_candidates_count_toward_selectivity_rejection() {
 
     let output = eg(&[
         "--debug",
-        "--index=rebuild",
+        "--index=auto",
         "--files-with-matches",
         "rare forced candidate needle",
         fixture.root.to_str().unwrap(),
@@ -1614,8 +1902,8 @@ fn tantivy_forced_candidates_count_toward_selectivity_rejection() {
 
     let output = eg(&[
         "--debug",
-        "--index=rebuild",
-        "--index-backend=tantivy-ram",
+        "--index=auto",
+        "--index-backend=tantivy",
         "--files-with-matches",
         "rare forced candidate needle",
         fixture.root.to_str().unwrap(),
@@ -1647,7 +1935,7 @@ fn indexed_search_skips_binary_files_instead_of_forcing_them() {
 
     let output = eg(&[
         "--debug",
-        "--index=rebuild",
+        "--index=auto",
         "--files-with-matches",
         "rare binary needle",
         fixture.root.to_str().unwrap(),
@@ -1678,7 +1966,7 @@ fn indexed_search_skips_late_nul_binary_files() {
 
     let output = eg(&[
         "--debug",
-        "--index=rebuild",
+        "--index=auto",
         "--files-with-matches",
         "late binary needle",
         fixture.root.to_str().unwrap(),
@@ -1702,7 +1990,7 @@ fn indexed_full_corpus_modes_do_not_synthesize_binary_no_matches() {
     fs::write(fixture.path("blob.bin"), b"binary miss\0tail\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "--files-without-match",
         "full corpus needle",
         fixture.root.to_str().unwrap(),
@@ -1749,7 +2037,7 @@ fn indexed_search_honors_reverse_path_sort() {
 
     let output = eg(&[
         "--debug",
-        "--index=rebuild",
+        "--index=auto",
         "--sortr",
         "path",
         "sort needle",
@@ -1775,7 +2063,7 @@ fn indexed_sparse_regex_uses_query_plan() {
     fs::write(fixture.path("miss.txt"), "alpha sparseXregex needle\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "sparse[-_]regex needle",
         fixture.root.to_str().unwrap(),
     ]);
@@ -1797,7 +2085,7 @@ fn indexed_case_insensitive_search_has_no_case_false_negative() {
     fs::write(fixture.path("sample.txt"), "Mixed Case Sparse Needle\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "-i",
         "mixed case sparse needle",
         fixture.root.to_str().unwrap(),
@@ -1818,7 +2106,7 @@ fn indexed_smart_case_lowercase_pattern_is_case_insensitive() {
     fs::write(fixture.path("sample.txt"), "Smart Case Sparse Needle\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "-S",
         "smart case sparse needle",
         fixture.root.to_str().unwrap(),
@@ -1839,7 +2127,7 @@ fn indexed_smart_case_uppercase_pattern_stays_case_sensitive() {
     fs::write(fixture.path("sample.txt"), "smart case sparse needle\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "-S",
         "Smart Case Sparse Needle",
         fixture.root.to_str().unwrap(),
@@ -1855,7 +2143,7 @@ fn indexed_inline_case_insensitive_regex_has_no_case_false_negative() {
     fs::write(fixture.path("sample.txt"), "Inline Case Sparse Needle\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "(?i:inline case sparse needle)",
         fixture.root.to_str().unwrap(),
     ]);
@@ -1877,7 +2165,7 @@ fn indexed_multiple_patterns_match_any_pattern() {
     fs::write(fixture.path("gamma.txt"), "gamma branch\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "-e",
         "alpha branch",
         "-e",
@@ -1907,7 +2195,7 @@ fn indexed_utf16_bom_file_is_not_searched_as_binary() {
 
     let output = eg(&[
         "--debug",
-        "--index=rebuild",
+        "--index=auto",
         "--files-with-matches",
         "unicode sparse needle",
         fixture.root.to_str().unwrap(),
@@ -1931,7 +2219,7 @@ fn indexed_fixed_string_treats_regex_syntax_literally() {
     fs::write(fixture.path("regexish.txt"), "call axb1 as regex bait\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "-F",
         "a.b[1]",
         fixture.root.to_str().unwrap(),
@@ -1963,7 +2251,7 @@ fn index_backend_enables_indexed_mode() {
     fs::write(fixture.path("sample.txt"), "alpha via ram\n").unwrap();
 
     let output = eg(&[
-        "--index-backend=tantivy-ram",
+        "--index-backend=tantivy",
         "alpha via ram",
         fixture.root.to_str().unwrap(),
     ]);
@@ -1986,7 +2274,7 @@ fn no_index_can_override_indexed_mode() {
     fs::write(fixture.path("sample.txt"), "alpha\n").unwrap();
 
     let output = eg(&[
-        "--index=rebuild",
+        "--index=auto",
         "--no-index",
         "alpha",
         fixture.path("sample.txt").to_str().unwrap(),

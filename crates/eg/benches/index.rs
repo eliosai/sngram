@@ -43,7 +43,7 @@ fn candidate_verification() {
 fn cold_build() {
     let corpus = Corpus::scratch("cold");
     corpus.populate(48);
-    let output = corpus.eg(["--index=rebuild", "rare_hot_needle", corpus.root_str()]);
+    let output = corpus.eg(["--bench", "rare_hot_needle", corpus.root_str()]);
     assert_success(&output);
 }
 
@@ -81,9 +81,8 @@ impl Corpus {
         SHARED.get_or_init(|| {
             let corpus = Self::scratch("shared");
             corpus.populate(150);
-            let output = corpus.eg(["--index=rebuild", "rare_hot_needle", corpus.root_str()]);
+            let output = corpus.eg(["--bench", "rare_hot_needle", corpus.root_str()]);
             assert_success(&output);
-            corpus.mark_daemon_ready();
             corpus
         })
     }
@@ -135,23 +134,9 @@ impl Corpus {
             Command::new(eg_binary())
                 .args(args)
                 .env("XDG_RUNTIME_DIR", &self.runtime)
-                .env("EG_INDEXD_DISABLE_AUTOSPAWN", "1")
                 .output(),
             "run eg benchmark command",
         )
-    }
-
-    fn mark_daemon_ready(&self) {
-        let runtime = self.root.join(".eg/runtime");
-        must(fs::create_dir_all(&runtime), "create state runtime");
-        must(
-            fs::write(runtime.join("watcher-ready"), "ready"),
-            "watcher marker",
-        );
-        must(
-            fs::write(runtime.join("journal-clean"), "clean"),
-            "clean marker",
-        );
     }
 }
 

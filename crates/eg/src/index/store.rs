@@ -16,13 +16,15 @@ use tantivy::{
 use crate::flags::HiArgs;
 
 use super::{
+    bench,
     document::IndexedDocument,
     executor::{self, PlanBackend},
     manifest::{
         CurrentFile, CurrentSnapshot, Manifest, ManifestBackend, changed_ordinals, manifest_for,
-        manifest_present, read_manifest, write_manifest,
+        manifest_present, read_manifest, write_manifest, write_path_table,
     },
-    summary::{self, DeltaSummaryMode, SummaryIndex},
+    progress::{BuildPhase, BuildProgress},
+    summary::{self, SummaryIndex},
 };
 
 const INDEX_DATA_DIR_NAME: &str = "tantivy";
@@ -39,51 +41,6 @@ pub struct TantivyIndex {
     summaries: SummaryIndex,
 }
 
-pub fn prepare_index(
-    args: &HiArgs,
-    table_fingerprint: u64,
-    table: &WeightTable,
-    schema: Schema,
-    fields: IndexFields,
-    index_home: &Path,
-    snapshot: &CurrentSnapshot,
-    loaded_manifest: Option<&Manifest>,
-) -> anyhow::Result<TantivyIndex> {
-    if matches!(
-        args.index().backend(),
-        super::config::IndexBackend::TantivyRam
-    ) {
-        return build_memory_index(args, table, schema, fields, &snapshot.files);
-    }
-    match args.index().mode() {
-        super::config::IndexMode::NoIndex => {
-            anyhow::bail!("internal error: indexed path used with --no-index")
-        },
-        super::config::IndexMode::Verify | super::config::IndexMode::Repair => {
-            anyhow::bail!("internal error: maintenance mode reached prepare_index")
-        },
-        super::config::IndexMode::Rebuild => rebuild_disk_index(
-            args,
-            table_fingerprint,
-            table,
-            schema,
-            fields,
-            index_home,
-            snapshot,
-        ),
-        super::config::IndexMode::Auto | super::config::IndexMode::Require => auto_disk_index(
-            args,
-            table_fingerprint,
-            table,
-            schema,
-            fields,
-            index_home,
-            snapshot,
-            loaded_manifest,
-        ),
-    }
-}
-
 pub fn refresh_index(
     args: &HiArgs,
     table_fingerprint: u64,
@@ -92,7 +49,8 @@ pub fn refresh_index(
     fields: IndexFields,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
-) -> anyhow::Result<()> {
+    progress: Option<&BuildProgress>,
+) -> anyhow::Result<bench::BuildTimings> {
     auto_disk_index(
         args,
         table_fingerprint,
@@ -102,29 +60,9 @@ pub fn refresh_index(
         index_home,
         snapshot,
         None,
+        progress,
     )
-    .map(|_| ())
-}
-
-pub fn rebuild(
-    args: &HiArgs,
-    table_fingerprint: u64,
-    table: &WeightTable,
-    schema: Schema,
-    fields: IndexFields,
-    index_home: &Path,
-    snapshot: &CurrentSnapshot,
-) -> anyhow::Result<()> {
-    rebuild_disk_index(
-        args,
-        table_fingerprint,
-        table,
-        schema,
-        fields,
-        index_home,
-        snapshot,
-    )
-    .map(|_| ())
+    .map(|(_, timings)| timings)
 }
 
 pub fn open_disk_index(
@@ -134,15 +72,13 @@ pub fn open_disk_index(
     let data_dir = index_home.join(INDEX_DATA_DIR_NAME);
     let index = Index::open_in_dir(&data_dir).with_context(|| {
         format!(
-            "failed to open existing tantivy index at {}; remove it or use --index=rebuild",
+            "failed to open daemon-owned tantivy index at {}",
             data_dir.display()
         )
     })?;
     let summaries = SummaryIndex::open(
         &index_home.join(summary::SUMMARY_FILE_NAME),
-        &index_home.join(summary::DELTA_SUMMARY_FILE_NAME),
-        snapshot.files.len(),
-        DeltaSummaryMode::Absent,
+        snapshot.file_count(),
     )?
     .with_context(|| format!("summary index missing at {}", index_home.display()))?;
     Ok(TantivyIndex { index, summaries })
@@ -152,6 +88,7 @@ pub fn query_index(
     index: &TantivyIndex,
     fields: IndexFields,
     index_plan: &super::planner::IndexPlan,
+    mut bench: Option<&mut bench::BenchReport>,
 ) -> anyhow::Result<Option<BTreeSet<usize>>> {
     let reader = index
         .index
@@ -168,7 +105,12 @@ pub fn query_index(
     };
     let mut plan = index_plan.plan.clone();
     let raw_grams = count_plan_grams(&plan);
+    let tune_started_at = std::time::Instant::now();
     plan.tune(&df, ceiling);
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_index_tune(tune_started_at);
+        report.set_tuned_query_grams(count_plan_grams(&plan));
+    }
     log::debug!(
         "eg index query: tantivy plan_grams={} tuned_plan_grams={}",
         raw_grams,
@@ -197,7 +139,11 @@ pub fn query_index(
             "eg index query: refining estimate {estimate} of {text_count} text docs with bounded sparse lookup"
         );
     }
+    let execute_started_at = std::time::Instant::now();
     let ords = executor::execute(&backend, &plan)?;
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_index_execute(execute_started_at);
+    }
     if ords.len() as u64 > ceiling {
         log::debug!(
             "eg index query: actual candidates {} of {text_count} text docs exceed {}%; rejecting indexed query without scan fallback",
@@ -325,7 +271,8 @@ fn auto_disk_index(
     index_home: &Path,
     snapshot: &CurrentSnapshot,
     loaded_manifest: Option<&Manifest>,
-) -> anyhow::Result<TantivyIndex> {
+    progress: Option<&BuildProgress>,
+) -> anyhow::Result<(TantivyIndex, bench::BuildTimings)> {
     let data_dir = index_home.join(INDEX_DATA_DIR_NAME);
     let manifest_path = index_home.join(MANIFEST_FILE_NAME);
     if !data_dir.exists() || !manifest_present(&manifest_path) {
@@ -337,6 +284,7 @@ fn auto_disk_index(
             fields,
             index_home,
             snapshot,
+            progress,
         );
     }
     let manifest_storage;
@@ -354,6 +302,7 @@ fn auto_disk_index(
                     fields,
                     index_home,
                     snapshot,
+                    progress,
                 );
             },
         };
@@ -369,22 +318,24 @@ fn auto_disk_index(
             fields,
             index_home,
             snapshot,
+            progress,
         );
     };
     let index = Index::open_in_dir(&data_dir).with_context(|| {
         format!(
-            "failed to open existing tantivy index at {}; remove it or use --index=rebuild",
+            "failed to open daemon-owned tantivy index at {}",
             data_dir.display()
         )
     })?;
     if changed_ordinals.is_empty() {
         if let Some(summaries) = SummaryIndex::open(
             &index_home.join(summary::SUMMARY_FILE_NAME),
-            &index_home.join(summary::DELTA_SUMMARY_FILE_NAME),
-            snapshot.files.len(),
-            DeltaSummaryMode::Absent,
+            snapshot.file_count(),
         )? {
-            return Ok(TantivyIndex { index, summaries });
+            return Ok((
+                TantivyIndex { index, summaries },
+                bench::BuildTimings::default(),
+            ));
         }
     }
     rebuild_disk_index(
@@ -395,6 +346,7 @@ fn auto_disk_index(
         fields,
         index_home,
         snapshot,
+        progress,
     )
 }
 
@@ -406,7 +358,9 @@ fn rebuild_disk_index(
     fields: IndexFields,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
-) -> anyhow::Result<TantivyIndex> {
+    progress: Option<&BuildProgress>,
+) -> anyhow::Result<(TantivyIndex, bench::BuildTimings)> {
+    let mut timings = bench::BuildTimings::default();
     if index_home.exists() {
         fs::remove_dir_all(index_home)
             .with_context(|| format!("failed to remove old index at {}", index_home.display()))?;
@@ -416,32 +370,43 @@ fn rebuild_disk_index(
         .with_context(|| format!("failed to create index directory {}", data_dir.display()))?;
     let index = Index::create_in_dir(&data_dir, schema)
         .with_context(|| format!("failed to create tantivy index at {}", data_dir.display()))?;
-    let summaries = add_all_documents(args, table, &index, fields, &snapshot.files)?;
+    let scan_started_at = std::time::Instant::now();
+    let summaries = add_all_documents(
+        args,
+        table,
+        &index,
+        fields,
+        snapshot.eager_files(),
+        progress,
+    )?;
+    timings.set_scan_documents(scan_started_at);
+    let summary_started_at = std::time::Instant::now();
+    if let Some(progress) = progress {
+        progress.phase(BuildPhase::WritingSummary);
+    }
     let mut records = summaries.clone();
     summary::write_records(&index_home.join(summary::SUMMARY_FILE_NAME), &mut records)?;
+    timings.set_write_summary(summary_started_at);
+    let manifest_started_at = std::time::Instant::now();
+    if let Some(progress) = progress {
+        progress.phase(BuildPhase::WritingManifest);
+    }
     write_manifest(
         &index_home.join(MANIFEST_FILE_NAME),
         &manifest_for(ManifestBackend::Tantivy, table_fingerprint, snapshot),
     )?;
-    Ok(TantivyIndex {
-        index,
-        summaries: SummaryIndex::from_records(summaries, snapshot.files.len())?,
-    })
-}
-
-fn build_memory_index(
-    args: &HiArgs,
-    table: &WeightTable,
-    schema: Schema,
-    fields: IndexFields,
-    files: &[CurrentFile],
-) -> anyhow::Result<TantivyIndex> {
-    let index = Index::create_in_ram(schema);
-    let summaries = add_all_documents(args, table, &index, fields, files)?;
-    Ok(TantivyIndex {
-        index,
-        summaries: SummaryIndex::from_records(summaries, files.len())?,
-    })
+    write_path_table(&index_home.join(MANIFEST_FILE_NAME), snapshot)?;
+    timings.set_write_manifest(manifest_started_at);
+    if let Some(progress) = progress {
+        progress.phase(BuildPhase::Publishing);
+    }
+    Ok((
+        TantivyIndex {
+            index,
+            summaries: SummaryIndex::from_records(summaries, snapshot.file_count())?,
+        },
+        timings,
+    ))
 }
 
 fn add_all_documents(
@@ -450,9 +415,10 @@ fn add_all_documents(
     index: &Index,
     fields: IndexFields,
     files: &[CurrentFile],
+    progress: Option<&BuildProgress>,
 ) -> anyhow::Result<Vec<summary::SummaryRecord>> {
     let writer = index_writer(args, index)?;
-    let (writer, summaries) = add_documents(args, table, writer, fields, files)?;
+    let (writer, summaries) = add_documents(args, table, writer, fields, files, progress)?;
     commit_writer(writer)?;
     Ok(summaries)
 }
@@ -482,6 +448,7 @@ fn add_documents(
     writer: tantivy::IndexWriter<TantivyDocument>,
     fields: IndexFields,
     files: &[CurrentFile],
+    progress: Option<&BuildProgress>,
 ) -> anyhow::Result<(
     tantivy::IndexWriter<TantivyDocument>,
     Vec<summary::SummaryRecord>,
@@ -490,10 +457,15 @@ fn add_documents(
     let (sender, receiver) = mpsc::sync_channel(args.threads().clamp(1, 128) * 2);
     let writer_thread = thread::spawn(move || add_received_documents(writer, receiver));
     let summaries = std::sync::Mutex::new(Vec::with_capacity(files.len()));
+    let scanned = std::sync::atomic::AtomicU64::new(0);
     let scan_result = files
         .par_iter()
         .try_for_each_with(sender.clone(), |sender, file| {
             let document = super::document::scan(table, file, use_mmap)?;
+            let done = scanned.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if let Some(progress) = progress {
+                progress.update_scan(files.len(), done, 0, 0);
+            }
             summaries
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

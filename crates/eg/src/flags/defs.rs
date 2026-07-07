@@ -22,7 +22,7 @@ use std::{path::PathBuf, sync::LazyLock};
 use {anyhow::Context as AnyhowContext, bstr::ByteVec};
 
 #[cfg(test)]
-use crate::flags::parse::parse_low_raw;
+use crate::flags::parse::test_support::parse_low_raw;
 use crate::flags::{
     Category, Flag, FlagValue,
     lowargs::{
@@ -33,6 +33,18 @@ use crate::flags::{
 };
 
 use super::CompletionType;
+
+#[cfg(test)]
+mod test_support {
+    use super::ContextMode;
+
+    pub(super) fn limited_context(mode: &ContextMode) -> (usize, usize) {
+        match *mode {
+            ContextMode::Passthru => unreachable!("context mode is passthru"),
+            ContextMode::Limited(ref limited) => limited.get(),
+        }
+    }
+}
 
 /// A list of all flags in ripgrep via implementations of `Flag`.
 ///
@@ -47,7 +59,6 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &AfterContext,
     &BeforeContext,
     &Bench,
-    &BenchSuite,
     &Binary,
     &BlockBuffered,
     &ByteOffset,
@@ -87,7 +98,6 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &Index,
     &IndexBackendFlag,
     &IndexDir,
-    &IndexFreshnessFlag,
     &InvertMatch,
     &JSON,
     &LineBuffered,
@@ -194,7 +204,6 @@ This overrides the \flag{passthru} flag and partially overrides the
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_after_context() {
     let mkctx = |lines| {
@@ -303,7 +312,6 @@ backreferences without explicitly needing to enable them.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_auto_hybrid_regex() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -372,7 +380,6 @@ This overrides the \flag{passthru} flag and partially overrides the
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_before_context() {
     let mkctx = |lines| {
@@ -486,7 +493,6 @@ This flag overrides the \flag{text} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_binary() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -554,7 +560,6 @@ This overrides the \flag{line-buffered} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_block_buffered() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -611,7 +616,6 @@ transformations on the data, such as decompression or a \flag{pre} filter.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_byte_offset() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -670,7 +674,6 @@ This flag overrides the \flag{ignore-case} and \flag{smart-case} flags.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_case_sensitive() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -770,7 +773,6 @@ the \flag{colors} flag to manually set all color styles to \fBnone\fP:
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_color() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -892,7 +894,6 @@ used alongside these extended color codes.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_colors() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -967,7 +968,6 @@ to the start of each match.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_column() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -1024,7 +1024,6 @@ the order. For example, \fB\-A2 \-C1\fP is equivalent to \fB\-A2 \-B1\fP.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_context() {
     let mkctx = |lines| {
@@ -1080,14 +1079,14 @@ fn test_context() {
     mode.set_after(1);
     mode.set_both(5);
     assert_eq!(mode, args.context);
-    assert_eq!((5, 1), args.context.get_limited());
+    assert_eq!((5, 1), test_support::limited_context(&args.context));
 
     let args = parse_low_raw(["-B1", "-C5"]).unwrap();
     let mut mode = ContextMode::default();
     mode.set_before(1);
     mode.set_both(5);
     assert_eq!(mode, args.context);
-    assert_eq!((1, 5), args.context.get_limited());
+    assert_eq!((1, 5), test_support::limited_context(&args.context));
 
     let args = parse_low_raw(["-A1", "-B2", "-C5"]).unwrap();
     let mut mode = ContextMode::default();
@@ -1095,7 +1094,7 @@ fn test_context() {
     mode.set_after(1);
     mode.set_both(5);
     assert_eq!(mode, args.context);
-    assert_eq!((2, 1), args.context.get_limited());
+    assert_eq!((2, 1), test_support::limited_context(&args.context));
 
     // These next three are like the ones above, but with -C before -A/-B. This
     // tests that -A and -B only partially override -C. That is, -C1 -A2 is
@@ -1105,14 +1104,14 @@ fn test_context() {
     mode.set_after(1);
     mode.set_both(5);
     assert_eq!(mode, args.context);
-    assert_eq!((5, 1), args.context.get_limited());
+    assert_eq!((5, 1), test_support::limited_context(&args.context));
 
     let args = parse_low_raw(["-C5", "-B1"]).unwrap();
     let mut mode = ContextMode::default();
     mode.set_before(1);
     mode.set_both(5);
     assert_eq!(mode, args.context);
-    assert_eq!((1, 5), args.context.get_limited());
+    assert_eq!((1, 5), test_support::limited_context(&args.context));
 
     let args = parse_low_raw(["-C5", "-A1", "-B2"]).unwrap();
     let mut mode = ContextMode::default();
@@ -1120,7 +1119,7 @@ fn test_context() {
     mode.set_after(1);
     mode.set_both(5);
     assert_eq!(mode, args.context);
-    assert_eq!((2, 1), args.context.get_limited());
+    assert_eq!((2, 1), test_support::limited_context(&args.context));
 }
 
 /// --context-separator
@@ -1173,7 +1172,6 @@ is still inserted. To completely disable context separators, use the
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_context_separator() {
     use bstr::BString;
@@ -1281,7 +1279,6 @@ is combined with \flag{only-matching}, then ripgrep behaves as if
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_count() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -1344,7 +1341,6 @@ given.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_count_matches() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -1407,7 +1403,6 @@ This flag overrides \flag{null-data}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_crlf() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -1471,7 +1466,6 @@ To get even more debug output, use the \flag{trace} flag, which implies
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_debug() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -1524,7 +1518,6 @@ provided the input is treated as bytes.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_dfa_size_limit() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -1629,7 +1622,6 @@ via the \flag-negate{encoding} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_encoding() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -1726,7 +1718,6 @@ flags.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_engine() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -1793,7 +1784,6 @@ The \fB-\fP character is the default value.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_field_context_separator() {
     use bstr::BString;
@@ -1907,7 +1897,6 @@ The \fB:\fP character is the default value.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_field_match_separator() {
     use bstr::BString;
@@ -2026,7 +2015,6 @@ arguments as files or directories to search.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_file() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2157,7 +2145,6 @@ This overrides \flag{type-list}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_files() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2213,7 +2200,6 @@ This overrides \flag{files-without-match}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_files_with_matches() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2262,7 +2248,6 @@ This overrides \flag{files-with-matches}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_files_without_match() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2315,7 +2300,6 @@ should not need be escaped.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_fixed_strings() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2373,7 +2357,6 @@ also report errors for broken links. To suppress error messages, use the
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_follow() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2461,7 +2444,6 @@ The output is written to \fBstdout\fP. The list above may expand over time.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_generate() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2553,7 +2535,6 @@ the glob \fIfoo\fP. Instead, you should use
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_glob() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2617,7 +2598,6 @@ This effectively treats \flag{glob} as \flag{iglob}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_glob_case_insensitive() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2673,7 +2653,6 @@ cat\fP.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_heading() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2733,7 +2712,6 @@ show only a single line for every flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_help() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2800,7 +2778,6 @@ file.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_hidden() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -2870,7 +2847,6 @@ ripgrep uses your system's hostname for producing hyperlinks.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_hostname_bin() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3036,7 +3012,6 @@ https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_hyperlink_format() {
     let parseformat = |format: &str| format.parse::<grep::printer::HyperlinkFormat>().unwrap();
@@ -3104,7 +3079,6 @@ matched case insensitively.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_iglob() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3165,7 +3139,6 @@ This flag overrides \flag{case-sensitive} and \flag{smart-case}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_ignore_case() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3230,7 +3203,6 @@ directly on the command line, then use \flag{glob} instead.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_ignore_file() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3280,7 +3252,6 @@ useful on case insensitive file systems (such as Windows).
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_ignore_file_case_insensitive() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3339,7 +3310,6 @@ grep.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_include_zero() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3367,53 +3337,21 @@ impl Flag for Bench {
         Category::SparseNgram
     }
     fn doc_short(&self) -> &'static str {
-        r"Emit indexed-search benchmark JSON."
+        r"Benchmark indexed search."
     }
     fn doc_long(&self) -> &'static str {
         r"
-Run the sparse n-gram indexed search path and emit one structured JSON object
-with timing, count, false-positive, byte, and status fields. Normal match output
-is suppressed. This flag is only valid when indexed search is enabled.
+With a pattern, run the sparse n-gram indexed search path and emit one
+structured JSON object with timing, count, false-positive, byte, and status
+fields. With no pattern, run the embedded false-positive query suite against
+the selected paths and print a per-query timing table. Normal match output is
+suppressed.
 "
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         if v.unwrap_switch() {
             args.index.enable_bench();
-        }
-        Ok(())
-    }
-}
-
-/// --bench-suite
-#[derive(Debug)]
-struct BenchSuite;
-
-impl Flag for BenchSuite {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "bench-suite"
-    }
-    fn doc_category(&self) -> Category {
-        Category::SparseNgram
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Benchmark the embedded sparse n-gram regex suite."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
-Run a statically embedded TSV of regexes against the selected paths. Each regex
-is executed once through indexed search and once through the regular unindexed
-search path. Output is a fixed-width table with per-regex timings, index
-statistics, false-positive counts and a summary line.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        if v.unwrap_switch() {
-            args.index.enable_bench_suite();
         }
         Ok(())
     }
@@ -3442,14 +3380,7 @@ impl Flag for Index {
     fn doc_long(&self) -> &'static str {
         r"
 Use eg's sparse n-gram index before ripgrep verifies matches. The supported
-modes are \fBauto\fP, which uses an existing compatible index, \fBrebuild\fP,
-which rebuilds the index before searching, and \fBrequire\fP, which behaves
-like \fBauto\fP for index preparation while preserving indexed-search errors.
-.sp
-Two maintenance modes do not search: \fBverify\fP checks the on-disk index for
-structural faults (section headers, sampled checksums, manifest cross-check,
-and orphaned files) and reports, and \fBrepair\fP runs the same checks and
-rebuilds the index when a fault is found. Both ignore any pattern argument.
+modes are \fBauto\fP, the default daemon-owned index path.
 .sp
 An unindexable query (for example a very short pattern, an inverted match, or
 a stdin pipe) errors with an explanation. Pass \fB--no-index\fP when you want
@@ -3457,7 +3388,7 @@ the copied ripgrep scan path instead.
 "
     }
     fn doc_choices(&self) -> &'static [&'static str] {
-        &["auto", "rebuild", "require", "verify", "repair"]
+        &["auto"]
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
@@ -3504,15 +3435,14 @@ eg automatically falls back to a per-corpus directory under the XDG cache home
     }
 }
 
-#[cfg(test)]
 #[test]
-fn test_index_mode_require() {
-    parse_low_raw(["--index", "require"]).unwrap();
-    parse_low_raw(["--index", "rebuild"]).unwrap();
+fn test_index_mode_only_accepts_auto() {
+    parse_low_raw(["--index", "auto"]).unwrap();
+    assert!(parse_low_raw(["--index", "require"]).is_err());
+    assert!(parse_low_raw(["--index", "rebuild"]).is_err());
     assert!(parse_low_raw(["--index", "nonsense"]).is_err());
 }
 
-#[cfg(test)]
 #[test]
 fn test_index_dir() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3525,77 +3455,11 @@ fn test_index_dir() {
     assert!(!args.index.is_no_index());
 }
 
-#[cfg(test)]
-#[test]
-fn test_index_mode_maintenance() {
-    parse_low_raw(["--index", "verify"]).unwrap();
-    parse_low_raw(["--index", "repair"]).unwrap();
-}
-
-#[cfg(test)]
 #[test]
 fn test_index_bench() {
     let args = parse_low_raw(["--bench"]).unwrap();
     assert!(args.index.bench());
     assert!(!args.index.is_no_index());
-}
-
-#[cfg(test)]
-mod bench_suite_flag_tests {
-    use super::parse_low_raw;
-
-    #[test]
-    fn bench_suite_enables_index() {
-        let args = parse_low_raw(["--bench-suite"]).unwrap();
-        assert!(args.index.bench_suite());
-        assert!(!args.index.is_no_index());
-    }
-}
-
-/// --index-freshness
-#[derive(Debug)]
-struct IndexFreshnessFlag;
-
-impl Flag for IndexFreshnessFlag {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "index-freshness"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("MODE")
-    }
-    fn doc_category(&self) -> Category {
-        Category::SparseNgram
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Select how the index detects changed files."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
-Select how eg's sparse n-gram index decides a file changed since it was
-indexed. \fBstat\fP (the default) compares modification time, change time, and
-length. \fBhash\fP compares a fast content hash over the file's head and tail
-windows and its length, closing the silent-false-negative window where a
-mutation preserves all three stat fields. Hash mode reads a small slice of
-each candidate file during the freshness check, so it is slower than stat.
-"
-    }
-    fn doc_choices(&self) -> &'static [&'static str] {
-        &["stat", "hash"]
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.index.set_freshness(convert::str(&v.unwrap_value())?)
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn test_index_freshness() {
-    parse_low_raw(["--index-freshness", "hash"]).unwrap();
-    assert!(parse_low_raw(["--index-freshness", "nonsense"]).is_err());
 }
 
 /// --index-backend
@@ -3622,17 +3486,14 @@ impl Flag for IndexBackendFlag {
         r"
 Select the backend used by eg's sparse n-gram index. \fBpostings\fP (the
 default) uses \fBeg\fP's compact mmap-backed postings index. \fBtantivy\fP uses
-Tantivy's mmap-backed on-disk directory. \fBtantivy-ram\fP uses Tantivy's
-in-memory directory for benchmark isolation.
+Tantivy's mmap-backed on-disk directory.
 .sp
-The \fBtantivy\fP and \fBtantivy-ram\fP backends are \fBexperimental\fP: they
-have no dedicated test coverage, diverge from the postings backend's delta
-semantics, and are excluded from eg's default and maintenance paths. Prefer
-\fBpostings\fP for production use.
+The \fBtantivy\fP backend is \fBexperimental\fP. Prefer \fBpostings\fP for
+production use.
 "
     }
     fn doc_choices(&self) -> &'static [&'static str] {
-        &["postings", "tantivy", "tantivy-ram"]
+        &["postings", "tantivy"]
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
@@ -3682,7 +3543,6 @@ matching lines.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_invert_match() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3780,7 +3640,6 @@ A more complete description of the JSON format used can be found here:
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_json() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3846,7 +3705,6 @@ This overrides the \flag{block-buffered} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_line_buffered() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3899,7 +3757,6 @@ This flag can be disabled by \flag{no-line-number}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_line_number() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -3955,7 +3812,6 @@ Line numbers can be forcefully turned on by \flag{line-number}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_line_number() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4009,7 +3865,6 @@ This overrides the \flag{word-regexp} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_line_regexp() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4061,7 +3916,6 @@ When this flag is omitted or is set to \fB0\fP, then it has no effect.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_max_columns() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4120,7 +3974,6 @@ If the \flag{max-columns} flag is not set, then this has no effect.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_max_columns_preview() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4179,7 +4032,6 @@ ripgrep won't search anything.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_max_count() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4243,7 +4095,6 @@ An alternative spelling for this flag is \fB\-\-maxdepth\fP.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_max_depth() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4304,7 +4155,6 @@ Examples: \fB\-\-max-filesize 50K\fP or \fB\-\-max\-filesize 80M\fP.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_max_filesize() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4365,7 +4215,6 @@ possibility by disabling memory maps.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_mmap() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4456,7 +4305,6 @@ This overrides the \flag{stop-on-nonmatch} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_multiline() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4520,7 +4368,6 @@ regardless of whether "dot all" mode is enabled or not.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_multiline_dotall() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4568,7 +4415,6 @@ pre-defined locations, then this flag will also disable that behavior as well.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_config() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4625,7 +4471,6 @@ behavior to this flag and can be considered an alias. However, subsequent
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_ignore() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4686,7 +4531,6 @@ does not impact whether filter rules from \fB.gitignore\fP files are respected.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_ignore_dot() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4732,7 +4576,6 @@ For example, this includes \fBgit\fP's \fB.git/info/exclude\fP.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_ignore_exclude() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4778,7 +4621,6 @@ are ignored.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_ignore_files() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4825,7 +4667,6 @@ defaults to \fB$HOME/.config/git/ignore\fP).
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_ignore_global() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4905,7 +4746,6 @@ noise produced by the messages.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_ignore_messages() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -4953,7 +4793,6 @@ files that should be applied. In some cases this may not be desirable.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_ignore_parent() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5009,7 +4848,6 @@ well.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_ignore_vcs() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5056,7 +4894,6 @@ of the pattern are still shown.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_messages() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5103,7 +4940,6 @@ Note that Unicode mode is enabled by default.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_pcre2_unicode() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5157,7 +4993,6 @@ where the repository state is absent.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_require_git() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5230,7 +5065,6 @@ interpretation is needed.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_no_unicode() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5285,7 +5119,6 @@ option is useful for use with \fBxargs\fP.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_null() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5341,7 +5174,6 @@ Using this flag implies \flag{text}. It also overrides \flag{crlf}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_null_data() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5409,7 +5241,6 @@ This is similar to \fBfind\fP's \fB\-xdev\fP or \fB\-mount\fP flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_one_file_system() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5459,7 +5290,6 @@ part on a separate output line.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_only_matching() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5525,7 +5355,6 @@ is, the path separator is automatically chosen based on the environment.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_path_separator() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5603,7 +5432,6 @@ This overrides the \flag{context}, \flag{after-context} and
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_passthru() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5673,7 +5501,6 @@ engine).
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_pcre2() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5727,7 +5554,6 @@ elgrep will print an error message and exit with an error code.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_pcre2_version() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5837,7 +5663,6 @@ This overrides the \flag{search-zip} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_pre() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5914,7 +5739,6 @@ This flag has no effect if the \flag{pre} flag is not used.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_pre_glob() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -5965,7 +5789,6 @@ if you're piping ripgrep to another program or file. For example: \fBrg -p
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_pretty() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6022,7 +5845,6 @@ first file that does not match any ignore rules.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_quiet() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6094,7 +5916,6 @@ provided the input is treated as bytes.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_regex_size_limit() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6183,7 +6004,6 @@ arguments as files or directories to search.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_regexp() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6343,7 +6163,6 @@ This flag can be used with the \flag{only-matching} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_replace() {
     use bstr::BString;
@@ -6418,7 +6237,6 @@ This overrides the \flag{pre} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_search_zip() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6493,7 +6311,6 @@ This overrides the \flag{case-sensitive} and \flag{ignore-case} flags.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_smart_case() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6563,7 +6380,6 @@ This flag overrides \flag{sort} and \flag{sortr}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_sort_files() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6703,7 +6519,6 @@ parallelism and run in a single thread.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_sort() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6814,7 +6629,6 @@ parallelism and run in a single thread.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_sortr() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6911,7 +6725,6 @@ counted. Run with \flag{no-index} for corpus-wide figures.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_stats() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6960,7 +6773,6 @@ This overrides the \flag{multiline} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_stop_on_nonmatch() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7034,7 +6846,6 @@ This flag overrides the \flag{binary} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_text() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7100,7 +6911,6 @@ heuristics.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_threads() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7154,7 +6964,6 @@ information you're looking for.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_trace() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7200,7 +7009,6 @@ removed.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_trim() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7265,7 +7073,6 @@ To see the list of available file types, use the \flag{type-list} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_type() {
     let select = |name: &str| TypeChange::Select {
@@ -7357,7 +7164,6 @@ Punctuation characters are not allowed.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_type_add() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7424,7 +7230,6 @@ not persisted. See \fBCONFIGURATION FILES\fP for a workaround.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_type_clear() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7501,7 +7306,6 @@ To see the list of available file types, use the \flag{type-list} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_type_not() {
     let select = |name: &str| TypeChange::Select {
@@ -7569,7 +7373,6 @@ of globs for that type on the same line.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_type_list() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7636,7 +7439,6 @@ text files via the \flag{text} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_unrestricted() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7700,7 +7502,6 @@ revision copied into this build.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_version() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7765,7 +7566,6 @@ use.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_vimgrep() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7814,7 +7614,6 @@ This flag overrides \flag{no-filename}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_with_filename() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7867,7 +7666,6 @@ This flag overrides \flag{with-filename}.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_with_filename_no() {
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -7927,7 +7725,6 @@ This overrides the \flag{line-regexp} flag.
     }
 }
 
-#[cfg(test)]
 #[test]
 fn test_word_regexp() {
     let args = parse_low_raw(None::<&str>).unwrap();

@@ -77,17 +77,16 @@ fn ordered_candidates(
     snapshot: &manifest::CurrentSnapshot,
     candidates: &BTreeSet<usize>,
 ) -> Vec<usize> {
-    snapshot
-        .files
+    candidates
         .iter()
-        .enumerate()
-        .filter_map(|(ord, _)| candidates.contains(&ord).then_some(ord))
+        .copied()
+        .filter(|&ord| ord < snapshot.file_count())
         .collect()
 }
 
 /// Every document ordinal in the manifest's requested output order.
 fn all_ordered(snapshot: &manifest::CurrentSnapshot) -> Vec<usize> {
-    (0..snapshot.files.len()).collect()
+    snapshot.ordinals().collect()
 }
 
 /// Smallest candidate set that a multi-threaded verify is worth spawning for.
@@ -126,12 +125,12 @@ fn verify_for_bench(
     let mut searcher =
         args.search_worker(args.matcher()?, args.searcher()?, args.printer(mode, sink))?;
     for ord in ordered {
-        let Some(file) = snapshot.files.get(ord) else {
+        let Some(file) = snapshot.file(ord) else {
             continue;
         };
         let in_candidates = candidates.contains(&ord);
         let Some(search_result) =
-            bench_search(args, mode, in_candidates, &mut facts, &mut searcher, file)?
+            bench_search(args, mode, in_candidates, &mut facts, &mut searcher, &file)?
         else {
             continue;
         };
@@ -142,7 +141,7 @@ fn verify_for_bench(
         facts.matched_files,
         facts.bytes_verified,
     );
-    report.timing_mut().set_verify_candidates(started_at);
+    report.timing_mut().set_verify_haystacks(started_at);
     Ok(facts.matched_any)
 }
 
@@ -219,7 +218,7 @@ fn verify_full_corpus(
         args.printer(mode, args.stdout()),
     )?;
     for &ord in &ordered {
-        let Some(file) = snapshot.files.get(ord) else {
+        let Some(file) = snapshot.file(ord) else {
             continue;
         };
         let haystack = Haystack::from_index_path(file.path.clone(), file.is_explicit());
@@ -381,9 +380,9 @@ fn verify_worker(
         let Some(&ord) = ctx.ordered.get(pos) else {
             return Ok(());
         };
-        let buffer = match ctx.snapshot.files.get(ord) {
+        let buffer = match ctx.snapshot.file(ord) {
             Some(file) => {
-                verify_one(ctx, &mut searcher, file)?;
+                verify_one(ctx, &mut searcher, &file)?;
                 mem::replace(searcher.printer().get_mut(), ctx.bufwtr.buffer())
             },
             None => ctx.bufwtr.buffer(),

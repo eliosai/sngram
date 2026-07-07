@@ -7,7 +7,7 @@ use std::{
     time::Instant,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::flags::HiArgs;
 
@@ -83,6 +83,10 @@ impl BenchReport {
         self.counts.query_grams = grams as u64;
     }
 
+    pub fn set_tuned_query_grams(&mut self, grams: usize) {
+        self.counts.tuned_query_grams = grams as u64;
+    }
+
     pub fn set_snapshot_counts(&mut self, total: usize, binary_skipped: usize) {
         self.counts.total_manifest_files = total as u64;
         self.counts.binary_skipped_files = binary_skipped as u64;
@@ -100,10 +104,6 @@ impl BenchReport {
 
     pub fn set_forced_candidate_files(&mut self, forced: u64) {
         self.counts.forced_candidate_files = forced;
-    }
-
-    pub fn set_dirty_forced_candidates(&mut self, dirty: u64) {
-        self.counts.dirty_forced_candidates = dirty;
     }
 
     pub fn set_verification(&mut self, verified: usize, matched: usize, bytes_verified: u64) {
@@ -128,8 +128,8 @@ impl BenchReport {
             .bytes
             .index_table_bytes
             .saturating_add(self.bytes.index_postings_bytes)
-            .saturating_add(file_len(index_home.join("delta-table.bin")))
-            .saturating_add(file_len(index_home.join("delta-postings.bin")));
+            .saturating_add(self.bytes.summary_bytes)
+            .saturating_add(self.bytes.manifest_bytes);
     }
 
     pub fn reject_selectivity(&mut self) {
@@ -165,58 +165,193 @@ impl BenchReport {
 
 #[derive(Default, Serialize)]
 pub struct Timings {
+    request_validate: f64,
     parse_request: f64,
     plan_query: f64,
-    resolve_roots: f64,
-    catalog_open: f64,
-    generation_validate: f64,
-    initial_build: f64,
-    index_mmap: f64,
-    index_query: f64,
-    verify_candidates: f64,
+    resolve_root: f64,
+    catalog_probe: f64,
+    daemon_register: f64,
+    daemon_start: f64,
+    cold_build_total: f64,
+    daemon_ready: f64,
+    daemon_proof: f64,
+    manifest_open: f64,
+    walk_collect: f64,
+    snapshot_build: f64,
+    scan_documents: f64,
+    write_postings: f64,
+    write_summary: f64,
+    write_manifest: f64,
+    publish_generation: f64,
+    index_open: f64,
+    index_tune: f64,
+    index_execute: f64,
+    index_lookup: f64,
+    candidate_restrict: f64,
+    verify_haystacks: f64,
     total: f64,
 }
 
 impl Timings {
     pub fn set_parse_request(&mut self, started: Instant) {
-        self.parse_request = elapsed_ms(started);
+        let elapsed = elapsed_ms(started);
+        self.request_validate = elapsed;
+        self.parse_request = elapsed;
     }
 
     pub fn set_plan_query(&mut self, started: Instant) {
         self.plan_query = elapsed_ms(started);
     }
 
-    pub fn set_resolve_roots(&mut self, started: Instant) {
-        self.resolve_roots = elapsed_ms(started);
+    pub fn set_resolve_root(&mut self, started: Instant) {
+        self.resolve_root = elapsed_ms(started);
     }
 
-    pub fn set_catalog_open(&mut self, started: Instant) {
-        self.catalog_open = elapsed_ms(started);
+    pub fn set_catalog_probe(&mut self, started: Instant) {
+        self.catalog_probe = elapsed_ms(started);
     }
 
-    pub fn set_generation_validate(&mut self, started: Instant) {
-        self.generation_validate = elapsed_ms(started);
+    pub fn set_daemon_register(&mut self, started: Instant) {
+        self.daemon_register = elapsed_ms(started);
     }
 
-    pub fn set_initial_build(&mut self, started: Instant) {
-        self.initial_build = elapsed_ms(started);
+    pub fn set_daemon_start(&mut self, started: Instant) {
+        self.daemon_start = elapsed_ms(started);
     }
 
-    pub fn set_index_mmap(&mut self, started: Instant) {
-        self.index_mmap = elapsed_ms(started);
+    pub fn set_cold_build_total(&mut self, started: Instant) {
+        self.cold_build_total = elapsed_ms(started);
     }
 
-    pub fn set_index_query(&mut self, started: Instant) {
-        self.index_query = elapsed_ms(started);
+    pub fn set_daemon_ready(&mut self, started: Instant) {
+        self.daemon_ready = elapsed_ms(started);
     }
 
-    pub fn set_verify_candidates(&mut self, started: Instant) {
-        self.verify_candidates = elapsed_ms(started);
+    pub fn set_daemon_proof(&mut self, started: Instant) {
+        self.daemon_proof = elapsed_ms(started);
+    }
+
+    pub fn set_manifest_open(&mut self, started: Instant) {
+        self.manifest_open = elapsed_ms(started);
+    }
+
+    pub fn set_index_open(&mut self, started: Instant) {
+        self.index_open = elapsed_ms(started);
+    }
+
+    pub fn set_index_tune(&mut self, started: Instant) {
+        self.index_tune = elapsed_ms(started);
+    }
+
+    pub fn set_index_execute(&mut self, started: Instant) {
+        self.index_execute = elapsed_ms(started);
+    }
+
+    pub fn set_index_lookup(&mut self, started: Instant) {
+        self.index_lookup = elapsed_ms(started);
+    }
+
+    pub fn set_candidate_restrict(&mut self, started: Instant) {
+        self.candidate_restrict = elapsed_ms(started);
+    }
+
+    pub fn set_verify_haystacks(&mut self, started: Instant) {
+        self.verify_haystacks = elapsed_ms(started);
     }
 
     pub fn set_total(&mut self, started: Instant) {
         self.total = elapsed_ms(started);
     }
+
+    pub fn merge_build(&mut self, build: &BuildTimings) {
+        self.walk_collect = build.walk_collect;
+        self.snapshot_build = build.snapshot_build;
+        self.scan_documents = build.scan_documents;
+        self.write_postings = build.write_postings;
+        self.write_summary = build.write_summary;
+        self.write_manifest = build.write_manifest;
+        self.publish_generation = build.publish_generation;
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+pub struct BuildTimings {
+    walk_collect: f64,
+    snapshot_build: f64,
+    scan_documents: f64,
+    write_postings: f64,
+    write_summary: f64,
+    write_manifest: f64,
+    publish_generation: f64,
+}
+
+impl BuildTimings {
+    pub fn set_walk_collect(&mut self, started: Instant) {
+        self.walk_collect = elapsed_ms(started);
+    }
+
+    pub fn set_snapshot_build(&mut self, started: Instant) {
+        self.snapshot_build = elapsed_ms(started);
+    }
+
+    pub fn set_scan_documents(&mut self, started: Instant) {
+        self.scan_documents = elapsed_ms(started);
+    }
+
+    pub fn set_write_postings(&mut self, started: Instant) {
+        self.write_postings = elapsed_ms(started);
+    }
+
+    pub fn set_write_summary(&mut self, started: Instant) {
+        self.write_summary = elapsed_ms(started);
+    }
+
+    pub fn set_write_manifest(&mut self, started: Instant) {
+        self.write_manifest = elapsed_ms(started);
+    }
+
+    pub fn set_publish_generation(&mut self, started: Instant) {
+        self.publish_generation = elapsed_ms(started);
+    }
+
+    pub fn absorb_backend(&mut self, backend: BuildTimings) {
+        self.scan_documents = backend.scan_documents;
+        self.write_postings = backend.write_postings;
+        self.write_summary = backend.write_summary;
+        self.write_manifest = backend.write_manifest;
+        self.publish_generation = backend.publish_generation;
+    }
+}
+
+pub fn clear_build_timings(state_root: &Path) {
+    let _ = fs::remove_file(build_timings_path(state_root));
+}
+
+pub fn write_build_timings(state_root: &Path, timings: &BuildTimings) -> anyhow::Result<()> {
+    let path = build_timings_path(state_root);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("build timing path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let mut file = fs::File::create(&path)?;
+    serde_json::to_writer(&mut file, timings)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(())
+}
+
+pub fn read_build_timings(state_root: &Path) -> anyhow::Result<Option<BuildTimings>> {
+    let path = build_timings_path(state_root);
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(Some(serde_json::from_reader(file)?))
+}
+
+fn build_timings_path(state_root: &Path) -> PathBuf {
+    state_root.join("runtime").join("build-bench.json")
 }
 
 #[derive(Default, Serialize)]
@@ -225,12 +360,12 @@ struct Counts {
     text_files: u64,
     binary_skipped_files: u64,
     query_grams: u64,
+    tuned_query_grams: u64,
     candidate_files: u64,
     verified_files: u64,
     matched_files: u64,
     forced_candidate_files: u64,
     parent_restricted_candidates: u64,
-    dirty_forced_candidates: u64,
 }
 
 #[derive(Default, Serialize)]

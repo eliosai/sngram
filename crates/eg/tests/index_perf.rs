@@ -1,8 +1,8 @@
 //! Ignored local performance smoke tests for indexed search.
 //!
 //! These are not the official Divan/CodSpeed benchmarks. They exist to make
-//! rebuild, unchanged-auto, and small-change-auto timings easy to inspect while
-//! developing the CLI indexer.
+//! cold daemon build, hot daemon reuse, and small-change refresh timings easy
+//! to inspect while developing the CLI indexer.
 #![allow(
     missing_docs,
     clippy::format_push_string,
@@ -74,11 +74,11 @@ fn auto_reuse_and_one_file_refresh_timing_smoke() {
     .unwrap();
 
     let root = fixture.root.to_str().unwrap();
-    let (rebuild, rebuild_elapsed) = eg(&["--index=rebuild", "initial perf needle", root]);
+    let (cold_build, cold_build_elapsed) = eg(&["--index=auto", "initial perf needle", root]);
     assert!(
-        rebuild.status.success(),
+        cold_build.status.success(),
         "{}",
-        String::from_utf8(rebuild.stderr).unwrap()
+        String::from_utf8(cold_build.stderr).unwrap()
     );
 
     let (reuse, reuse_elapsed) = eg(&["--index=auto", "initial perf needle", root]);
@@ -102,6 +102,6 @@ fn auto_reuse_and_one_file_refresh_timing_smoke() {
     );
 
     eprintln!(
-        "eg index perf smoke: files=301 rebuild={rebuild_elapsed:?} auto_unchanged={reuse_elapsed:?} auto_one_file_changed={refresh_elapsed:?}"
+        "eg index perf smoke: files=301 cold_build={cold_build_elapsed:?} hot_reuse={reuse_elapsed:?} one_file_changed={refresh_elapsed:?}"
     );
 }

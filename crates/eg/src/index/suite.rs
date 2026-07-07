@@ -1,9 +1,10 @@
 //! Embedded indexed-vs-unindexed regex benchmark suite.
 
 use std::{
+    env,
     ffi::OsString,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     time::Instant,
 };
@@ -13,23 +14,22 @@ use serde::Deserialize;
 
 use crate::flags::{HiArgs, Mode};
 
-const SUITE_TSV: &str = include_str!("bench_suite.tsv");
+const SUITE_TSV: &str = include_str!("data/fp-queries.tsv");
 
 pub fn run(args: &HiArgs) -> anyhow::Result<bool> {
     let Mode::Search(_) = args.mode() else {
-        anyhow::bail!("--bench-suite only supports search paths");
+        anyhow::bail!("--bench only supports search paths");
     };
     anyhow::ensure!(
         args.search_paths()
             .iter()
             .all(|path| path != Path::new("-")),
-        "--bench-suite benchmarks files and directories, not stdin"
+        "--bench benchmarks files and directories, not stdin"
     );
 
     let suite = BenchSuite::embedded()?;
-    let exe = std::env::current_exe().context("failed to locate eg executable")?;
-    let rows = suite.run(args, &exe)?;
-    BenchTable::new(rows).print()?;
+    let exe = env::current_exe().context("failed to locate eg executable")?;
+    BenchTable::new(suite.run(args, &exe)?).print()?;
     Ok(true)
 }
 
@@ -42,17 +42,33 @@ impl BenchSuite {
         parse_suite(SUITE_TSV)
     }
 
-    fn run(&self, args: &HiArgs, exe: &Path) -> anyhow::Result<Vec<BenchRow>> {
-        self.cases
+    fn run(&self, args: &HiArgs, exe: &Path) -> anyhow::Result<BenchRun> {
+        let warm = self.warm(args, exe)?;
+        let rows = self
+            .cases
             .iter()
             .map(|case| CaseRunner::new(args, exe, case).run())
-            .collect()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(BenchRun { warm, rows })
     }
+
+    fn warm(&self, args: &HiArgs, exe: &Path) -> anyhow::Result<Option<IndexedMeasurement>> {
+        let Some(case) = self.cases.first() else {
+            return Ok(None);
+        };
+        CaseRunner::new(args, exe, case).indexed().map(Some)
+    }
+}
+
+struct BenchRun {
+    warm: Option<IndexedMeasurement>,
+    rows: Vec<BenchRow>,
 }
 
 struct BenchCase {
     id: String,
     pattern: String,
+    flags: Vec<String>,
 }
 
 struct CaseRunner<'a> {
@@ -69,10 +85,11 @@ impl<'a> CaseRunner<'a> {
     fn run(&self) -> anyhow::Result<BenchRow> {
         let indexed = self.indexed()?;
         let unindexed = self.unindexed()?;
-        Ok(BenchRow::new(self.case, indexed, unindexed))
+        let rg = self.rg()?;
+        Ok(BenchRow::new(self.case, indexed, unindexed, rg))
     }
 
-    fn indexed(&self) -> anyhow::Result<IndexedStats> {
+    fn indexed(&self) -> anyhow::Result<IndexedMeasurement> {
         let mut args = vec![
             OsString::from("--bench"),
             OsString::from("--index=auto"),
@@ -85,21 +102,37 @@ impl<'a> CaseRunner<'a> {
             args.push(OsString::from("--index-dir"));
             args.push(dir.as_os_str().to_os_string());
         }
+        args.extend(self.case.flags.iter().map(OsString::from));
         args.push(OsString::from("--"));
         args.push(OsString::from(&self.case.pattern));
         args.extend(search_paths(self.args));
-        Ok(IndexedStats::from_run(run_child(self.exe, args)?))
+        measure_command(self.exe, args).map(IndexedMeasurement::from_run)
     }
 
-    fn unindexed(&self) -> anyhow::Result<UnindexedStats> {
+    fn unindexed(&self) -> anyhow::Result<UnindexedMeasurement> {
         let mut args = vec![
             OsString::from("--no-index"),
             OsString::from("--files-with-matches"),
-            OsString::from("--"),
-            OsString::from(&self.case.pattern),
         ];
+        args.extend(self.case.flags.iter().map(OsString::from));
+        args.push(OsString::from("--"));
+        args.push(OsString::from(&self.case.pattern));
         args.extend(search_paths(self.args));
-        Ok(UnindexedStats::from_run(run_child(self.exe, args)?))
+        measure_command(self.exe, args).map(UnindexedMeasurement::from_run)
+    }
+
+    fn rg(&self) -> anyhow::Result<Option<UnindexedMeasurement>> {
+        let Some(rg) = binary_in_path("rg") else {
+            return Ok(None);
+        };
+        let mut args = vec![OsString::from("--files-with-matches")];
+        args.extend(self.case.flags.iter().map(OsString::from));
+        args.push(OsString::from("--"));
+        args.push(OsString::from(&self.case.pattern));
+        args.extend(search_paths(self.args));
+        measure_command(&rg, args)
+            .map(UnindexedMeasurement::from_run)
+            .map(Some)
     }
 }
 
@@ -109,29 +142,37 @@ fn search_paths(args: &HiArgs) -> impl Iterator<Item = OsString> + '_ {
         .map(|path| path.as_os_str().to_os_string())
 }
 
-struct ChildRun {
+struct MeasuredCommand {
     code: Option<i32>,
     stdout: String,
     wall_ms: f64,
 }
 
-fn run_child(exe: &Path, args: Vec<OsString>) -> anyhow::Result<ChildRun> {
+fn measure_command(exe: &Path, args: Vec<OsString>) -> anyhow::Result<MeasuredCommand> {
     let started = Instant::now();
     let output = Command::new(exe).args(args).output()?;
-    Ok(ChildRun {
+    Ok(MeasuredCommand {
         code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         wall_ms: started.elapsed().as_secs_f64() * 1000.0,
     })
 }
 
-struct IndexedStats {
-    run: ChildRun,
+fn binary_in_path(name: &str) -> Option<PathBuf> {
+    env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths)
+            .map(|path| path.join(name))
+            .find(|path| path.is_file())
+    })
+}
+
+struct IndexedMeasurement {
+    run: MeasuredCommand,
     report: Option<BenchJson>,
 }
 
-impl IndexedStats {
-    fn from_run(run: ChildRun) -> Self {
+impl IndexedMeasurement {
+    fn from_run(run: MeasuredCommand) -> Self {
         let report = parse_report(&run.stdout);
         Self { run, report }
     }
@@ -157,13 +198,13 @@ impl IndexedStats {
     }
 }
 
-struct UnindexedStats {
-    run: ChildRun,
+struct UnindexedMeasurement {
+    run: MeasuredCommand,
     matched_files: u64,
 }
 
-impl UnindexedStats {
-    fn from_run(run: ChildRun) -> Self {
+impl UnindexedMeasurement {
+    fn from_run(run: MeasuredCommand) -> Self {
         let matched_files = if matches!(run.code, Some(0)) {
             run.stdout.lines().count() as u64
         } else {
@@ -180,23 +221,36 @@ impl UnindexedStats {
 struct BenchRow {
     id: String,
     pattern: String,
-    indexed: IndexedStats,
-    unindexed: UnindexedStats,
+    indexed: IndexedMeasurement,
+    unindexed: UnindexedMeasurement,
+    rg: Option<UnindexedMeasurement>,
 }
 
 impl BenchRow {
-    fn new(case: &BenchCase, indexed: IndexedStats, unindexed: UnindexedStats) -> Self {
+    fn new(
+        case: &BenchCase,
+        indexed: IndexedMeasurement,
+        unindexed: UnindexedMeasurement,
+        rg: Option<UnindexedMeasurement>,
+    ) -> Self {
         Self {
             id: case.id.clone(),
             pattern: case.pattern.clone(),
             indexed,
             unindexed,
+            rg,
         }
     }
 
-    fn speedup(&self) -> Option<f64> {
+    fn scan_speedup(&self) -> Option<f64> {
         (self.indexed.ok() && self.unindexed.ok() && self.indexed.run.wall_ms > 0.0)
             .then_some(self.unindexed.run.wall_ms / self.indexed.run.wall_ms)
+    }
+
+    fn rg_speedup(&self) -> Option<f64> {
+        let rg = self.rg.as_ref()?;
+        (self.indexed.ok() && rg.ok() && self.indexed.run.wall_ms > 0.0)
+            .then_some(rg.run.wall_ms / self.indexed.run.wall_ms)
     }
 }
 
@@ -221,13 +275,13 @@ struct TimingsJson {
     #[serde(default)]
     total: f64,
     #[serde(default)]
-    initial_build: f64,
+    cold_build_total: f64,
     #[serde(default)]
-    index_mmap: f64,
+    index_open: f64,
     #[serde(default)]
-    index_query: f64,
+    index_lookup: f64,
     #[serde(default)]
-    verify_candidates: f64,
+    verify_haystacks: f64,
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -253,12 +307,16 @@ fn parse_report(stdout: &str) -> Option<BenchJson> {
 }
 
 struct BenchTable {
+    warm: Option<IndexedMeasurement>,
     rows: Vec<BenchRow>,
 }
 
 impl BenchTable {
-    fn new(rows: Vec<BenchRow>) -> Self {
-        Self { rows }
+    fn new(run: BenchRun) -> Self {
+        Self {
+            warm: run.warm,
+            rows: run.rows,
+        }
     }
 
     fn print(&self) -> anyhow::Result<()> {
@@ -275,21 +333,24 @@ impl BenchTable {
     fn write_header(&self, out: &mut impl Write) -> io::Result<()> {
         writeln!(
             out,
-            "{:<18} {:<28} {:>9} {:>9} {:>9} {:>7} {:>8} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>7} {:>6} status",
+            "{:<18} {:<28} {:>9} {:>9} {:>9} {:>9} {:>7} {:>7} {:>8} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6} status",
             "regex",
             "pattern",
             "idx_wall",
             "idx_total",
+            "scan_wall",
             "rg_wall",
-            "speed",
-            "build",
-            "mmap",
-            "query",
+            "scan_x",
+            "rg_x",
+            "cold",
+            "open",
+            "lookup",
             "verify",
             "cand",
             "ver",
             "hit",
             "fp_pct",
+            "scan_hit",
             "rg_hit",
         )
     }
@@ -299,24 +360,29 @@ impl BenchTable {
         let timings = report.map_or_else(TimingsJson::default, |report| report.timings_ms);
         let counts = report.map_or_else(CountsJson::default, |report| report.counts);
         let fps = report.map_or_else(FalsePositiveJson::default, |report| report.false_positives);
+        let rg_wall = row.rg.as_ref().map_or(0.0, |rg| rg.run.wall_ms);
+        let rg_hits = row.rg.as_ref().map_or(0, |rg| rg.matched_files);
         writeln!(
             out,
-            "{:<18} {:<28} {:>9.2} {:>9.2} {:>9.2} {:>7} {:>8.2} {:>7.2} {:>7.2} {:>7.2} {:>6} {:>6} {:>6} {:>7.2} {:>6} {}",
+            "{:<18} {:<28} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>7} {:>7} {:>8.2} {:>7.2} {:>7.2} {:>7.2} {:>6} {:>6} {:>6} {:>7.2} {:>6} {:>6} {}",
             cell(&row.id, 18),
             cell(&row.pattern, 28),
             row.indexed.run.wall_ms,
             timings.total,
             row.unindexed.run.wall_ms,
-            Speed(row.speedup()),
-            timings.initial_build,
-            timings.index_mmap,
-            timings.index_query,
-            timings.verify_candidates,
+            rg_wall,
+            Speed(row.scan_speedup()),
+            Speed(row.rg_speedup()),
+            timings.cold_build_total,
+            timings.index_open,
+            timings.index_lookup,
+            timings.verify_haystacks,
             counts.candidate_files,
             counts.verified_files,
             counts.matched_files,
             fps.false_positive_pct,
             row.unindexed.matched_files,
+            rg_hits,
             row.indexed.status(),
         )
     }
@@ -325,14 +391,18 @@ impl BenchTable {
         let summary = Summary::from_rows(&self.rows);
         writeln!(
             out,
-            "summary regexes={} indexed_ok={} unsupported={} rg_ok={} idx_wall_ms={:.2} rg_wall_ms={:.2} speedup={} candidates={} verified={} matches={} false_positives={} false_positive_pct={:.2}",
+            "summary regexes={} indexed_ok={} unsupported={} scan_ok={} rg_ok={} warm_wall_ms={:.2} idx_wall_ms={:.2} scan_wall_ms={:.2} rg_wall_ms={:.2} speedup_scan={} speedup_rg={} candidates={} verified={} matches={} false_positives={} false_positive_pct={:.2}",
             summary.regexes,
             summary.indexed_ok,
             summary.unsupported,
+            summary.scan_ok,
             summary.rg_ok,
+            self.warm.as_ref().map_or(0.0, |warm| warm.run.wall_ms),
             summary.indexed_wall_ms,
+            summary.scan_wall_ms,
             summary.rg_wall_ms,
-            Speed(summary.speedup()),
+            Speed(summary.scan_speedup()),
+            Speed(summary.rg_speedup()),
             summary.candidates,
             summary.verified,
             summary.matches,
@@ -347,8 +417,10 @@ struct Summary {
     regexes: usize,
     indexed_ok: usize,
     unsupported: usize,
+    scan_ok: usize,
     rg_ok: usize,
     indexed_wall_ms: f64,
+    scan_wall_ms: f64,
     rg_wall_ms: f64,
     candidates: u64,
     verified: u64,
@@ -370,9 +442,13 @@ impl Summary {
 
     fn add(&mut self, row: &BenchRow) {
         self.indexed_wall_ms += row.indexed.run.wall_ms;
-        self.rg_wall_ms += row.unindexed.run.wall_ms;
+        self.scan_wall_ms += row.unindexed.run.wall_ms;
         self.indexed_ok += usize::from(row.indexed.ok());
-        self.rg_ok += usize::from(row.unindexed.ok());
+        self.scan_ok += usize::from(row.unindexed.ok());
+        if let Some(rg) = row.rg.as_ref() {
+            self.rg_wall_ms += rg.run.wall_ms;
+            self.rg_ok += usize::from(rg.ok());
+        }
         self.unsupported += usize::from(!row.indexed.ok());
         self.add_report(row.indexed.report.as_ref());
     }
@@ -387,8 +463,13 @@ impl Summary {
         self.false_positives += report.false_positives.false_positive_files;
     }
 
-    fn speedup(&self) -> Option<f64> {
-        (self.indexed_wall_ms > 0.0).then_some(self.rg_wall_ms / self.indexed_wall_ms)
+    fn scan_speedup(&self) -> Option<f64> {
+        (self.indexed_wall_ms > 0.0).then_some(self.scan_wall_ms / self.indexed_wall_ms)
+    }
+
+    fn rg_speedup(&self) -> Option<f64> {
+        (self.indexed_wall_ms > 0.0 && self.rg_ok > 0)
+            .then_some(self.rg_wall_ms / self.indexed_wall_ms)
     }
 
     fn false_positive_pct(&self) -> f64 {
@@ -421,6 +502,9 @@ fn parse_suite(tsv: &str) -> anyhow::Result<BenchSuite> {
         if line.trim().is_empty() {
             continue;
         }
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
         cases.push(parse_case(line_number, line)?);
     }
     anyhow::ensure!(!cases.is_empty(), "benchmark suite is empty");
@@ -428,9 +512,13 @@ fn parse_suite(tsv: &str) -> anyhow::Result<BenchSuite> {
 }
 
 fn parse_case(line_number: usize, line: &str) -> anyhow::Result<BenchCase> {
-    let Some((id, pattern)) = line.split_once('\t') else {
-        anyhow::bail!("invalid benchmark TSV line {line_number}: missing tab");
-    };
+    let columns = line.split('\t').collect::<Vec<_>>();
+    anyhow::ensure!(
+        (2..=3).contains(&columns.len()),
+        "invalid benchmark TSV line {line_number}: expected two or three columns"
+    );
+    let id = columns[0];
+    let pattern = columns[1];
     anyhow::ensure!(
         !id.is_empty(),
         "invalid benchmark TSV line {line_number}: empty id"
@@ -442,7 +530,14 @@ fn parse_case(line_number: usize, line: &str) -> anyhow::Result<BenchCase> {
     Ok(BenchCase {
         id: id.to_string(),
         pattern: pattern.to_string(),
+        flags: columns
+            .get(2)
+            .map_or_else(Vec::new, |flags| parse_flags(flags)),
     })
+}
+
+fn parse_flags(flags: &str) -> Vec<String> {
+    flags.split_whitespace().map(ToString::to_string).collect()
 }
 
 fn cell(value: &str, width: usize) -> String {
@@ -457,34 +552,45 @@ fn cell(value: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchTable, Summary, cell, parse_suite};
+    use super::{BenchRun, BenchTable, Summary, cell, parse_suite};
 
     #[test]
     fn embedded_suite_has_many_regexes() {
         let suite = parse_suite(super::SUITE_TSV).expect("suite parses");
-        assert!(suite.cases.len() >= 12);
-        assert_eq!("literal_main", suite.cases[0].id);
-        assert_eq!("fn main", suite.cases[0].pattern);
+        assert!(suite.cases.len() >= 240);
+        assert_eq!("lit_rare", suite.cases[0].id);
+        assert_eq!("sched_clock", suite.cases[0].pattern);
+    }
+
+    #[test]
+    fn suite_flags_are_preserved() {
+        let suite = parse_suite("fixed\tkfree(skb)\t-F\nword\tkfree\t-i -w").expect("suite parses");
+
+        assert_eq!(vec!["-F"], suite.cases[0].flags);
+        assert_eq!(vec!["-i", "-w"], suite.cases[1].flags);
     }
 
     #[test]
     fn invalid_suite_line_is_rejected() {
-        let err = match parse_suite("id\tpattern\nmissing-tab") {
-            Ok(_) => panic!("invalid suite should fail"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("missing tab"));
+        let err = parse_suite("id\tpattern\nmissing")
+            .err()
+            .expect("invalid suite should fail");
+        assert!(err.to_string().contains("expected two or three columns"));
     }
 
     #[test]
     fn table_summary_formats_zero_rows() {
         let mut out = Vec::new();
-        BenchTable::new(Vec::new())
-            .write_summary(&mut out)
-            .expect("summary");
+        BenchTable::new(BenchRun {
+            warm: None,
+            rows: Vec::new(),
+        })
+        .write_summary(&mut out)
+        .expect("summary");
         let text = String::from_utf8(out).expect("utf8");
         assert!(text.contains("summary regexes=0"));
-        assert!(text.contains("speedup=n/a"));
+        assert!(text.contains("speedup_scan=n/a"));
+        assert!(text.contains("speedup_rg=n/a"));
     }
 
     #[test]

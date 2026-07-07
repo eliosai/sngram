@@ -56,29 +56,13 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
 > #[non_exhaustive] on QueryPlan/PlanOptions —
 > eg constructs/matches them exhaustively; that migration belongs to eg.
 
-> **2026-07-03 eg wave 2 (landed, all eg-CLI items).** Second completion wave
-> over the `eg` CLI: `cargo check`/`clippy`/`fmt -p eg --all-targets` clean.
-> Landed: delta fold-into-base at 25 % of the base file count plus a
-> MAX_DELTA_FILES cliff line under `--debug`; `--index-freshness=stat|hash`
-> closing the same-stat silent-false-negative window (FNV over head+tail windows
-> and length, stored in the manifest, stat fallback when absent); tantivy marked
-> experimental (flag help + `--debug` notice, excluded from maintenance paths);
-> indexed output parity — a single verify path buffers per file and releases in
-> path order so `--` context separators appear in every thread config, and
-> `--stats` documents its verified-candidate scope; unbanned
-> `--files-without-match`, `--count --include-zero` (an empty-reader search
-> synthesizes the zero line for ruled-out files), and `--json`; a first-time
-> large-implicit-build stderr guardrail plus a `--debug` build-progress line
-> every 20k files; `--index=verify` and `--index=repair` (section, checksum,
-> manifest, and orphan checks, rebuild on fault); per-phase build progress and a
-> documented single-threaded-merge rationale; binary-primary manifest with JSON
-> gated behind `--debug`/`EG_INDEX_JSON_MANIFEST`; table.bin format v3 in
-> `postings-v4` dropping the offset column (offset is the prefix sum
-> reconstructed at open, ~50 % off table.bin); flags-only TSV rows in the fp/fn
-> harness scripts; workspace-level indexing policy with invariant tests on the
-> proven merge-join loops. Deliberately narrowed:
-> merge stays single-threaded (documented), delta+varint postings deferred, and
-> per-subtree/tombstone delta for deletions and renames is unchanged.
+> **2026-07-06 daemon-owned index reset.** Foreground control modes were
+> removed from the production model. A usable index is now one that a live
+> daemon owns and proves with lock owner, watcher-ready, journal-clean, and live
+> lease markers. Foreground search reads a proofed manifest/backend, queries
+> candidates, and verifies haystacks; daemon refresh owns walking, rebuilding,
+> watching, publishing, and deletion. Historical foreground rebuild/repair
+> mechanics in earlier notes are superseded by this model.
 
 ## P0 — ship blockers (all verified)
 
@@ -98,26 +82,24 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
   `eg a`, `eg .`, `eg '\w+'`, `eg ''`, `-v`, stdin pipes, `--pre`, `-z`,
   `--encoding`, PCRE2 — all exit 2 with "use --no-index". ripgrep runs all of
   them. Default should be transparent fallback to the scan path (stderr note
-  under `--debug`), with `--index=require` for strict mode. Includes
-  **stdin**: `echo foo | eg foo` must work. *(M)*
-- [ ] **Read-only corpora cannot be searched at all** — eg always writes
-  `<corpus>/.eg` and dies on permission-denied (verified). Add an index-location
-  override flag plus an XDG cache fallback (`~/.cache/eg/<corpus-hash>/`). *(M)*
-- [ ] **No durability or mutual exclusion in the index layer** (all reproduced):
-  - Zero fsync anywhere; the manifest (commit point) can survive power loss over
-    torn `table.bin`/`postings.bin`. fsync data → then manifest → then dir. *(S)*
-  - No lock file: concurrent runs race — 2 of 60 concurrent queries died with
-    ENOTEMPTY during a rebuild; two parallel `--index=rebuild` → one exits 2.
-    Advisory build lock + read snapshots. *(M)*
-  - Rebuild is destroy-then-build-in-place (`remove_dir_all` first): a crash
-    mid-rebuild permanently loses the old index, and there is a multi-second
-    (4.7 s at 50k files) window with no index at all. Build to temp dir, swap
-    via rename / generation dirs. *(M)*
-  - No checksums/magic/version header on `table.bin`/`postings.bin`: injected
-    corruption returned results **silently** — a silent-false-negative vector.
-    Add file headers (magic, version, count, checksum). *(S)*
-  - Corrupt index bricks search (hard error, no self-heal) until manual
-    `--index=rebuild`; auto-rebuild on structural/checksum failure. *(S)*
+  under `--debug`) or a clear indexed-path error plus `--no-index` guidance.
+  Includes **stdin**: `echo foo | eg foo` must work. *(M)*
+- [x] **Read-only corpus fallback** — local `.eg` is used when writable; otherwise
+  index state falls back to XDG cache (`~/.cache/eg/<corpus-hash>/` by default),
+  with `--index-dir` remaining an explicit state-root override. *(M)*
+- [ ] **Index corruption hardening remains incomplete.**
+  - [x] Daemon ownership now supplies mutual exclusion: a single live daemon
+    owner lock controls refresh, and foreground search rejects indexes without a
+    matching live owner, watcher-ready marker, journal-clean marker, and live
+    lease.
+  - [x] Postings publish builds in a staging directory, fsyncs data/manifest,
+    swaps by rename, and removes interrupted staging work on the next daemon
+    build.
+  - [x] Postings table/postings sections carry magic, version, record count, and
+    sampled body checksums; corrupt sections are rejected on open.
+  - [ ] Remaining hardening: extend equivalent corruption policy across every
+    backend/summary artifact and ensure rejected generations always route back
+    through daemon-owned rebuild on the next cold path. *(S)*
 - [x] (lib side) **A ≥4 GiB file panics the whole index build** — fixed by the
   `BufRead` scan API; eg wiring in the P0 CLI wave. Oversized files should be
   streamed, skipped, or forced as candidates according to `--max-filesize`.
@@ -192,37 +174,28 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
 
 (P0 durability/locking/checksum items listed above.)
 
-- [ ] **P1 Delta/incremental gaps**:
-  - Full-rebuild cliff at `MAX_DELTA_FILES=4096` (99 ms → 883 ms measured);
-    deletions and renames always force full rebuilds. Per-subtree manifests or
-    tombstones + ord stability. *(M–L)* — cliff now surfaced in `--debug` when
-    hit; per-subtree/tombstone work is unchanged.
-  - [x] Delta base never compacts — FIXED 2026-07-03: `delta_should_fold` folds
-    the delta into a fresh base once it exceeds 25 % of the base file count
-    (`DELTA_FOLD_PCT`), before stale postings dominate as FP candidates. *(M)*
-  - [x] Orphan `runs/` and torn delta files — swept on open (`sweep_orphans`).
-- [x] **P1 Freshness is mtime+ctime+len only** — FIXED 2026-07-03:
-  `--index-freshness=hash` (default `stat`) hashes the length plus head and tail
-  windows, stored per file in the manifest, closing the same-stat
-  silent-false-negative window; stat comparison is the fallback when a hash is
-  absent. *(M)*
+- [ ] **P1 Daemon refresh latency gaps**:
+  - Foreground hot search trusts the daemon clean marker; watcher invalidation
+    must clear that marker promptly after file changes.
+  - Daemon refresh currently republishes complete backend generations. Future
+    incremental work must preserve ordinal stability and proof semantics.
+- [x] **P1 Foreground freshness walk removed from hot path** — foreground search
+  accepts only daemon-proofed generations and does not hash or stat-scan the
+  searched tree.
 - [ ] **P1 Binary/high-entropy files bloat the index ~38×** (400 KB random →
   15.5 MB table) and are search-skipped by ripgrep anyway. Apply binary
   detection (or unique-gram-ratio cap) at index time. *(M)* — landed in the P0
   wave (`classify::is_binary`/`is_high_entropy`), forced-candidate not gram-indexed.
-- [x] **P1 Tantivy backend: gate or invest** — GATED 2026-07-03: marked
-  experimental in the `--index-backend` help, warned under `--debug` when
-  selected, and excluded from the maintenance (`--index=verify`/`repair`) paths.
-  No parity tests by decision. *(M)*
+- [x] **P1 Tantivy backend: gate or invest** — disk Tantivy remains
+  experimental in the `--index-backend` help. In-memory Tantivy is removed from
+  the public daemon-owned model. *(M)*
 - [ ] **P1 `.eg` placement and hygiene**: index dir depends on cwd for
   multi-path invocations (different cwd → different index); no auto
   `.eg/.gitignore` (repos become dirty; a multi-hundred-MB index can get
   committed). Stable index home + self-ignoring dir + docs. *(S)*
-- [x] **P2 `--index=verify` / `--index=repair` commands** — LANDED 2026-07-03:
-  verify checks manifest presence and table compatibility, base and delta
-  section headers and sampled checksums, delta completeness, and leftover
-  run/staging artifacts, reporting per-check and exiting 0/1; repair rebuilds on
-  any fault. Postings backend only (tantivy is experimental). *(S)*
+- [x] **P2 manual index control removed** — foreground verify/repair/rebuild
+  commands are not part of the production API. Daemon ownership, proof failure,
+  startup sweep, and graceful shutdown cleanup replace manual control. *(S)*
 - [x] **P2 Build observability** — LANDED 2026-07-03: a `--debug` progress line
   every 20k files scanned plus a per-phase (scan-done, merging-N-runs) marker.
   Merge stays single-threaded by design: it streams one monotonic key sequence
@@ -232,8 +205,8 @@ ceiling); warm lookup median 7.6 ms. What remains is below.
 - [x] **P2 Manifest scalability**: binary-primary — LANDED 2026-07-03: the
   compact binary manifest is the commit point and the JSON manifest is only
   written under `--debug` or `EG_INDEX_JSON_MANIFEST`, avoiding the full-corpus
-  JSON rewrite every build; reads accept either form. Per-query stat-all-files
-  freshness (incremental) is unchanged. *(M)*
+  JSON rewrite every build; reads accept either form. Foreground hot queries no
+  longer stat-scan the corpus; daemon proof owns freshness. *(M)*
 - [ ] **P2 Index size (currently 5–6× content)** — cheap wins first:
   - [x] Drop the redundant `offset` column from `table.bin` — LANDED 2026-07-03:
     section/table format v3 in `postings-v4`, records are `hash`+`len` (12 B,

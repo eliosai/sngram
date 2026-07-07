@@ -9,6 +9,7 @@ use super::{
     location::{self, IndexLocation},
     manifest::{self, ManifestBackend},
     roots::{IndexRoot, SearchRoots},
+    runtime,
 };
 
 /// Disk-first resolver for index roots and currently published generations.
@@ -37,10 +38,11 @@ impl<'a> GenerationCatalog<'a> {
             let Some(manifest_path) = self.manifest_path(&state_root) else {
                 continue;
             };
-            let Some(manifest) = manifest::read_manifest(&manifest_path)? else {
+            if !self.manifest_is_compatible(&manifest_path)? {
                 continue;
-            };
-            if !self.manifest_is_compatible(&manifest) {
+            }
+            runtime::Lease::new(index_root.path(), &state_root).keep_alive_best_effort();
+            if !runtime::daemon_freshness_proof(&state_root) {
                 continue;
             }
             return Ok(ReadyGeneration {
@@ -57,11 +59,27 @@ impl<'a> GenerationCatalog<'a> {
 
     fn exact_generation(&self, roots: &SearchRoots) -> anyhow::Result<ReadyGeneration> {
         let location = location::resolve(self.args, roots.build_root().path())?;
+        let source = self.exact_generation_source(&location)?;
         Ok(ReadyGeneration {
             location,
             used_parent_index: false,
-            source: "cold_build",
+            source,
         })
+    }
+
+    fn exact_generation_source(&self, location: &IndexLocation) -> anyhow::Result<&'static str> {
+        let Some(manifest_path) = self.manifest_path(&location.state_root) else {
+            return Ok("missing");
+        };
+        if !self.manifest_is_compatible(&manifest_path)? {
+            return Ok("missing");
+        }
+        runtime::Lease::new(&location.corpus_root, &location.state_root).keep_alive_best_effort();
+        if runtime::daemon_freshness_proof(&location.state_root) {
+            Ok("hot")
+        } else {
+            Ok("missing")
+        }
     }
 
     fn manifest_path(&self, state_root: &Path) -> Option<PathBuf> {
@@ -69,17 +87,20 @@ impl<'a> GenerationCatalog<'a> {
         match self.args.index().backend() {
             IndexBackend::Postings => Some(index_dir.join("postings-v5/manifest.json")),
             IndexBackend::Tantivy => Some(index_dir.join("tantivy-v2/manifest.json")),
-            IndexBackend::TantivyRam => None,
         }
     }
 
-    fn manifest_is_compatible(&self, manifest: &manifest::Manifest) -> bool {
+    fn manifest_is_compatible(&self, manifest_path: &Path) -> anyhow::Result<bool> {
         let backend = match self.args.index().backend() {
             IndexBackend::Postings => ManifestBackend::Postings,
             IndexBackend::Tantivy => ManifestBackend::Tantivy,
-            IndexBackend::TantivyRam => return false,
         };
-        manifest::is_filter_compatible(manifest, self.args, backend, self.table_fingerprint)
+        manifest::manifest_path_is_filter_compatible(
+            manifest_path,
+            self.args,
+            backend,
+            self.table_fingerprint,
+        )
     }
 }
 

@@ -1,10 +1,11 @@
 //! Compact mmap-backed sparse n-gram postings index.
 
 use std::{
+    cell::RefCell,
     cmp::Ordering,
-    collections::{BTreeSet, BinaryHeap},
-    fs::{self, File, TryLockError},
-    io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    collections::{BTreeSet, BinaryHeap, HashMap},
+    fs::{self, File},
+    io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     mem,
     path::{Path, PathBuf},
     sync::{
@@ -18,25 +19,23 @@ use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 
-use sngram_types::{DfStats, GramKey, QueryPlan, WeightTable};
+use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed, WeightTable};
 
 use crate::flags::HiArgs;
 
 use super::manifest::{
-    CurrentFile, CurrentSnapshot, Manifest, ManifestBackend, changed_ordinals, is_compatible,
-    manifest_for, manifest_present, read_manifest, remove_manifest, write_manifest,
+    CurrentFile, CurrentSnapshot, ManifestBackend, manifest_for, write_manifest, write_path_table,
 };
+use super::progress::{BuildPhase, BuildProgress};
 use super::{
+    bench,
     executor::{self, PlanBackend},
-    summary::{self, DeltaSummaryMode, SummaryIndex, SummaryRecord},
+    summary::{self, SummaryIndex, SummaryRecord},
 };
 
 const MANIFEST_FILE_NAME: &str = "manifest.json";
-const DELTA_MANIFEST_FILE_NAME: &str = "delta-manifest.json";
 const TABLE_FILE_NAME: &str = "table.bin";
 const POSTINGS_FILE_NAME: &str = "postings.bin";
-const DELTA_TABLE_FILE_NAME: &str = "delta-table.bin";
-const DELTA_POSTINGS_FILE_NAME: &str = "delta-postings.bin";
 const RUNS_DIR_NAME: &str = "runs";
 const LOCK_SUFFIX: &str = ".lock";
 const TEMP_SUFFIX: &str = ".rebuilding";
@@ -51,45 +50,19 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const TABLE_RECORD_SIZE: usize = 20;
 const POSTING_SIZE: usize = 4;
 const RUN_PAIR_SIZE: usize = 12;
-const FILES_PER_RAYON_TASK: usize = 128;
+const FILES_PER_RAYON_TASK: usize = 1024;
 const INDEX_RAM_CAP_BYTES: usize = 512 * 1024 * 1024;
 const MIN_PAIRS_PER_RUN: usize = 128 * 1024;
-const MAX_PAIRS_PER_RUN: usize = 2_000_000;
-const MAX_DELTA_FILES: usize = 4096;
+const MAX_PAIRS_PER_RUN: usize = 4_000_000;
+const RUN_READER_BUFFER_BYTES: usize = 64 * 1024;
+const SECTION_WRITER_BUFFER_BYTES: usize = 1024 * 1024;
+const POSTING_WRITE_BUFFER_BYTES: usize = 16 * 1024;
 const FORCED_CANDIDATE_HASH: u64 = u64::MAX;
 /// Files scanned between index-build progress lines under `--debug`.
 const BUILD_PROGRESS_EVERY: usize = 20_000;
+const POSTINGS_MERGE_PROGRESS_EVERY: u64 = 1_000_000;
 /// Allow one exact sparse lookup pass for mildly pessimistic estimates.
 const SELECTIVITY_REFINE_MULTIPLIER: u64 = 2;
-
-pub fn prepare_index(
-    args: &HiArgs,
-    table_fingerprint: u64,
-    table: &WeightTable,
-    index_home: &Path,
-    snapshot: &CurrentSnapshot,
-    loaded_manifest: Option<&Manifest>,
-) -> anyhow::Result<PostingsIndex> {
-    match args.index().mode() {
-        super::config::IndexMode::NoIndex => {
-            anyhow::bail!("internal error: indexed path used with --no-index")
-        },
-        super::config::IndexMode::Verify | super::config::IndexMode::Repair => {
-            anyhow::bail!("internal error: maintenance mode reached prepare_index")
-        },
-        super::config::IndexMode::Rebuild => {
-            rebuild_index(args, table_fingerprint, table, index_home, snapshot)
-        },
-        super::config::IndexMode::Auto | super::config::IndexMode::Require => auto_index(
-            args,
-            table_fingerprint,
-            table,
-            index_home,
-            snapshot,
-            loaded_manifest,
-        ),
-    }
-}
 
 pub fn refresh_index(
     args: &HiArgs,
@@ -97,8 +70,17 @@ pub fn refresh_index(
     table: &WeightTable,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
-) -> anyhow::Result<()> {
-    rebuild_index(args, table_fingerprint, table, index_home, snapshot).map(|_| ())
+    progress: Option<&BuildProgress>,
+) -> anyhow::Result<bench::BuildTimings> {
+    rebuild_index(
+        args,
+        table_fingerprint,
+        table,
+        index_home,
+        snapshot,
+        progress,
+    )
+    .map(|(_, timings)| timings)
 }
 
 /// Corpus fraction a plan may select before the index stops paying: above
@@ -111,15 +93,21 @@ const MIN_SELECTIVITY_CEILING: u64 = 32;
 pub fn query_index(
     index: &PostingsIndex,
     index_plan: &super::planner::IndexPlan,
+    mut bench: Option<&mut bench::BenchReport>,
 ) -> anyhow::Result<Option<BTreeSet<usize>>> {
     let started_at = Instant::now();
-    let df = PostingsDf { index };
+    let df = PostingsDf::new(index);
     let text_count = index.summaries.text_count() as u64;
     let ceiling = selectivity_ceiling(text_count);
     let can_refine_estimate = index_plan.has_root_gram_constraints();
     let mut plan = index_plan.plan.clone();
     let raw_grams = count_plan_grams(&plan);
+    let tune_started_at = Instant::now();
     plan.tune(&df, ceiling);
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_index_tune(tune_started_at);
+        report.set_tuned_query_grams(count_plan_grams(&plan));
+    }
     log::debug!(
         "eg index query: postings plan_grams={} tuned_plan_grams={}",
         raw_grams,
@@ -148,7 +136,10 @@ pub fn query_index(
         );
     }
     let lookup_started_at = Instant::now();
-    let candidates = executor::execute(index, &plan)?;
+    let candidates = execute_plan(index, &plan)?;
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_index_execute(lookup_started_at);
+    }
     if candidates.len() as u64 > ceiling {
         log::debug!(
             "eg index query: actual candidates {} of {} docs exceeds {SCAN_FALLBACK_PCT}%; rejecting indexed query without scan fallback",
@@ -168,6 +159,14 @@ pub fn query_index(
         .map(Ok)
         .collect::<anyhow::Result<BTreeSet<usize>>>()
         .map(Some)
+}
+
+fn execute_plan(index: &PostingsIndex, plan: &QueryPlan) -> anyhow::Result<Vec<usize>> {
+    if let Some(candidates) = FastAllOf::try_execute(index, plan)? {
+        let forced = executor::forced_candidates(index, plan)?;
+        return Ok(executor::union_sorted(candidates, forced));
+    }
+    executor::execute(index, plan)
 }
 
 pub fn forced_candidate_ordinals(
@@ -211,11 +210,18 @@ fn estimate_with_forced(
 /// Posting-list lengths as document-frequency priors.
 struct PostingsDf<'a> {
     index: &'a PostingsIndex,
+    cache: RefCell<HashMap<u64, u64>>,
 }
 
 impl DfStats for PostingsDf<'_> {
     fn entry_count(&self, key: GramKey) -> u64 {
-        self.index.posting_len(key.value()).unwrap_or(0) as u64
+        let hash = key.value();
+        if let Some(count) = self.cache.borrow().get(&hash).copied() {
+            return count;
+        }
+        let count = self.index.posting_len(hash).unwrap_or(0) as u64;
+        self.cache.borrow_mut().insert(hash, count);
+        count
     }
 
     fn total_entries(&self) -> u64 {
@@ -223,144 +229,13 @@ impl DfStats for PostingsDf<'_> {
     }
 }
 
-fn auto_index(
-    args: &HiArgs,
-    table_fingerprint: u64,
-    table: &WeightTable,
-    index_home: &Path,
-    snapshot: &CurrentSnapshot,
-    loaded_manifest: Option<&Manifest>,
-) -> anyhow::Result<PostingsIndex> {
-    sweep_orphans(index_home)?;
-    let manifest_path = index_home.join(MANIFEST_FILE_NAME);
-    if !index_home.join(TABLE_FILE_NAME).exists()
-        || !index_home.join(POSTINGS_FILE_NAME).exists()
-        || !manifest_present(&manifest_path)
-    {
-        return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
+impl<'a> PostingsDf<'a> {
+    fn new(index: &'a PostingsIndex) -> Self {
+        Self {
+            index,
+            cache: RefCell::new(HashMap::new()),
+        }
     }
-    let base_manifest_storage;
-    let base_manifest = if let Some(manifest) = loaded_manifest {
-        manifest
-    } else {
-        base_manifest_storage = match read_manifest(&manifest_path)? {
-            Some(manifest) => manifest,
-            None => return rebuild_index(args, table_fingerprint, table, index_home, snapshot),
-        };
-        &base_manifest_storage
-    };
-    let expected = manifest_for(ManifestBackend::Postings, table_fingerprint, snapshot);
-    let Some(changed) = changed_ordinals(base_manifest, &expected) else {
-        return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
-    };
-    if changed.is_empty() {
-        remove_delta(index_home)?;
-        return open_or_rebuild(args, table_fingerprint, table, index_home, snapshot, None);
-    }
-    if changed.len() > MAX_DELTA_FILES {
-        log::debug!(
-            "eg index: {} changed files hit the MAX_DELTA_FILES={MAX_DELTA_FILES} cliff; full rebuild",
-            changed.len()
-        );
-        return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
-    }
-    if delta_should_fold(changed.len(), base_manifest.file_count()) {
-        log::debug!(
-            "eg index: delta {} of {} base files exceeds {DELTA_FOLD_PCT}%; folding into base",
-            changed.len(),
-            base_manifest.file_count()
-        );
-        return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
-    }
-    build_delta_if_stale(args, table, index_home, snapshot, &changed, &expected)?;
-    open_or_rebuild(
-        args,
-        table_fingerprint,
-        table,
-        index_home,
-        snapshot,
-        Some(&changed),
-    )
-}
-
-/// Fraction of the base file count a delta may reach before it is folded into
-/// a fresh base: past this, stale base postings dominate as false candidates
-/// and a full rebuild is cheaper than an ever-growing delta.
-const DELTA_FOLD_PCT: usize = 25;
-/// Do not fold tiny deltas solely because a tiny corpus makes their percentage
-/// look large; the rebuild avoidance matters more than stale-posting noise at
-/// this scale.
-const MIN_DELTA_FOLD_FILES: usize = 64;
-
-/// Return true when the delta has grown past the fold-into-base threshold.
-fn delta_should_fold(changed: usize, base_files: usize) -> bool {
-    changed >= MIN_DELTA_FOLD_FILES
-        && base_files > 0
-        && changed.saturating_mul(100) > base_files.saturating_mul(DELTA_FOLD_PCT)
-}
-
-/// Build the delta segment unless a matching one is already committed.
-fn build_delta_if_stale(
-    args: &HiArgs,
-    table: &WeightTable,
-    index_home: &Path,
-    snapshot: &CurrentSnapshot,
-    changed: &[usize],
-    expected: &Manifest,
-) -> anyhow::Result<()> {
-    let delta_manifest_path = index_home.join(DELTA_MANIFEST_FILE_NAME);
-    let delta_ready = index_home.join(DELTA_TABLE_FILE_NAME).exists()
-        && index_home.join(DELTA_POSTINGS_FILE_NAME).exists()
-        && index_home.join(summary::DELTA_SUMMARY_FILE_NAME).exists()
-        && summary::verify_ordinals(&index_home.join(summary::DELTA_SUMMARY_FILE_NAME), changed)?
-        && read_manifest(&delta_manifest_path)?
-            .as_ref()
-            .is_some_and(|manifest| changed_ordinals(manifest, expected) == Some(Vec::new()));
-    if delta_ready {
-        return Ok(());
-    }
-    let _lock = acquire_build_lock(index_home)?;
-    let changed_files = changed
-        .iter()
-        .map(|&ord| {
-            snapshot
-                .files
-                .get(ord)
-                .with_context(|| format!("manifest changed file ordinal {ord} is out of range"))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    build_files(
-        args,
-        table,
-        index_home,
-        &changed_files,
-        DELTA_TABLE_FILE_NAME,
-        DELTA_POSTINGS_FILE_NAME,
-        summary::DELTA_SUMMARY_FILE_NAME,
-    )?;
-    write_manifest(&delta_manifest_path, expected)?;
-    fsync_dir(index_home)?;
-    Ok(())
-}
-
-/// Open the index, rebuilding it when a segment is missing or corrupt.
-fn open_or_rebuild(
-    args: &HiArgs,
-    table_fingerprint: u64,
-    table: &WeightTable,
-    index_home: &Path,
-    snapshot: &CurrentSnapshot,
-    changed_ordinals: Option<&[usize]>,
-) -> anyhow::Result<PostingsIndex> {
-    let Some(index) = PostingsIndex::open(index_home, snapshot.files.len(), changed_ordinals)?
-    else {
-        log::debug!(
-            "eg index: corrupt index at {}, rebuilding",
-            index_home.display()
-        );
-        return rebuild_index(args, table_fingerprint, table, index_home, snapshot);
-    };
-    Ok(index)
 }
 
 fn rebuild_index(
@@ -369,15 +244,16 @@ fn rebuild_index(
     table: &WeightTable,
     index_home: &Path,
     snapshot: &CurrentSnapshot,
-) -> anyhow::Result<PostingsIndex> {
+    progress: Option<&BuildProgress>,
+) -> anyhow::Result<(PostingsIndex, bench::BuildTimings)> {
     let _lock = acquire_build_lock(index_home)?;
     recover_interrupted_rebuild(index_home)?;
     let staging = suffixed_path(index_home, TEMP_SUFFIX);
     remove_dir_all_if_exists(&staging)?;
     fs::create_dir_all(&staging)
         .with_context(|| format!("failed to create index directory {}", staging.display()))?;
-    let file_refs = snapshot.files.iter().collect::<Vec<_>>();
-    build_files(
+    let file_refs = snapshot.eager_files().iter().collect::<Vec<_>>();
+    let mut timings = build_files(
         args,
         table,
         &staging,
@@ -385,141 +261,37 @@ fn rebuild_index(
         TABLE_FILE_NAME,
         POSTINGS_FILE_NAME,
         summary::SUMMARY_FILE_NAME,
+        progress,
     )?;
+    let manifest_started_at = Instant::now();
+    if let Some(progress) = progress {
+        progress.phase(BuildPhase::WritingManifest);
+    }
     write_manifest(
         &staging.join(MANIFEST_FILE_NAME),
         &manifest_for(ManifestBackend::Postings, table_fingerprint, snapshot),
     )?;
+    write_path_table(&staging.join(MANIFEST_FILE_NAME), snapshot)?;
+    timings.set_write_manifest(manifest_started_at);
+    let publish_started_at = Instant::now();
+    if let Some(progress) = progress {
+        progress.phase(BuildPhase::Publishing);
+    }
     fsync_dir(&staging)?;
     swap_in(&staging, index_home)?;
-    PostingsIndex::open(index_home, snapshot.files.len(), None)?
-        .with_context(|| format!("index at {} corrupt after rebuild", index_home.display()))
-}
-
-/// Rebuild the postings index in place, for `--index=repair`.
-pub fn rebuild(
-    args: &HiArgs,
-    table_fingerprint: u64,
-    table: &WeightTable,
-    index_home: &Path,
-    snapshot: &CurrentSnapshot,
-) -> anyhow::Result<()> {
-    rebuild_index(args, table_fingerprint, table, index_home, snapshot).map(|_| ())
+    timings.set_publish_generation(publish_started_at);
+    let index = PostingsIndex::open(index_home, snapshot.file_count())?
+        .with_context(|| format!("index at {} corrupt after publish", index_home.display()))?;
+    Ok((index, timings))
 }
 
 pub fn open_index(index_home: &Path, snapshot: &CurrentSnapshot) -> anyhow::Result<PostingsIndex> {
-    PostingsIndex::open(index_home, snapshot.files.len(), None)?
-        .with_context(|| format!("index at {} missing after rebuild", index_home.display()))
-}
-
-/// Result of an index integrity check: one pass/fail line per check.
-pub struct VerifyReport {
-    checks: Vec<(String, bool)>,
-}
-
-impl VerifyReport {
-    /// True when every check passed.
-    pub fn healthy(&self) -> bool {
-        self.checks.iter().all(|(_, ok)| *ok)
-    }
-
-    /// One human-readable line per check.
-    pub fn lines(&self) -> Vec<String> {
-        self.checks
-            .iter()
-            .map(|(desc, ok)| format!("  [{}] {desc}", if *ok { "ok" } else { "FAIL" }))
-            .collect()
-    }
-}
-
-/// Check the postings index for structural faults without searching: manifest
-/// presence and compatibility, section headers and sampled checksums, delta
-/// completeness, and leftover build artifacts.
-pub fn verify_index(index_home: &Path, table_fingerprint: u64) -> anyhow::Result<VerifyReport> {
-    let mut checks = Vec::new();
-    let mut manifest_file_count = None;
-    let base_manifest = read_manifest(&index_home.join(MANIFEST_FILE_NAME))?;
-    match &base_manifest {
-        Some(manifest) => {
-            manifest_file_count = Some(manifest.file_count());
-            checks.push(("manifest present and parses".to_owned(), true));
-            checks.push((
-                "manifest matches the selected weight table".to_owned(),
-                is_compatible(&manifest, ManifestBackend::Postings, table_fingerprint),
-            ));
-        },
-        None => checks.push(("manifest present and parses".to_owned(), false)),
-    }
-    let base_ok = Segment::open(
-        &index_home.join(TABLE_FILE_NAME),
-        &index_home.join(POSTINGS_FILE_NAME),
-    )?
-    .is_some();
-    checks.push((
-        "base sections verify (magic, version, checksum, layout)".to_owned(),
-        base_ok,
-    ));
-    checks.push((
-        "base summaries verify".to_owned(),
-        summary::verify(
-            &index_home.join(summary::SUMMARY_FILE_NAME),
-            manifest_file_count,
-        )?,
-    ));
-    verify_delta(index_home, base_manifest.as_ref(), &mut checks)?;
-    checks.push((
-        "no orphaned run directory".to_owned(),
-        !index_home.join(RUNS_DIR_NAME).exists(),
-    ));
-    checks.push((
-        "no interrupted rebuild staging".to_owned(),
-        !suffixed_path(index_home, TEMP_SUFFIX).exists(),
-    ));
-    Ok(VerifyReport { checks })
-}
-
-/// Add delta-segment checks: complete when all four files are present and the
-/// sections verify, absent when none are, torn otherwise.
-fn verify_delta(
-    index_home: &Path,
-    base_manifest: Option<&Manifest>,
-    checks: &mut Vec<(String, bool)>,
-) -> anyhow::Result<()> {
-    let manifest = manifest_present(&index_home.join(DELTA_MANIFEST_FILE_NAME));
-    let table = index_home.join(DELTA_TABLE_FILE_NAME).exists();
-    let postings = index_home.join(DELTA_POSTINGS_FILE_NAME).exists();
-    let summaries = index_home.join(summary::DELTA_SUMMARY_FILE_NAME).exists();
-    if !manifest && !table && !postings && !summaries {
-        return Ok(());
-    }
-    if !(manifest && table && postings && summaries) {
-        checks.push(("delta segment is complete".to_owned(), false));
-        return Ok(());
-    }
-    let delta_manifest = read_manifest(&index_home.join(DELTA_MANIFEST_FILE_NAME))?;
-    checks.push((
-        "delta manifest present and parses".to_owned(),
-        delta_manifest.is_some(),
-    ));
-    let changed = base_manifest
-        .zip(delta_manifest.as_ref())
-        .and_then(|(base, delta)| changed_ordinals(base, delta));
-    checks.push((
-        "delta manifest is compatible with base manifest".to_owned(),
-        changed.is_some(),
-    ));
-    let delta_ok = Segment::open(
-        &index_home.join(DELTA_TABLE_FILE_NAME),
-        &index_home.join(DELTA_POSTINGS_FILE_NAME),
-    )?
-    .is_some();
-    checks.push(("delta sections verify".to_owned(), delta_ok));
-    let changed = changed.unwrap_or_default();
-    checks.push((
-        "delta summaries cover changed ordinals".to_owned(),
-        summary::verify_ordinals(&index_home.join(summary::DELTA_SUMMARY_FILE_NAME), &changed)?,
-    ));
-    Ok(())
+    PostingsIndex::open_trusted(index_home, snapshot.file_count())?.with_context(|| {
+        format!(
+            "index at {} missing from daemon-owned generation",
+            index_home.display()
+        )
+    })
 }
 
 /// Advisory exclusive lock so concurrent builds serialize; freed on drop.
@@ -533,17 +305,6 @@ fn acquire_build_lock(index_home: &Path) -> anyhow::Result<BuildLock> {
     file.lock()
         .with_context(|| format!("failed to lock index build for {}", index_home.display()))?;
     Ok(BuildLock { _file: file })
-}
-
-/// Acquire the build lock without blocking, returning `None` if it is held.
-fn try_build_lock(index_home: &Path) -> anyhow::Result<Option<BuildLock>> {
-    let file = open_lock_file(index_home)?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(BuildLock { _file: file })),
-        Err(TryLockError::WouldBlock) => Ok(None),
-        Err(TryLockError::Error(err)) => Err(err)
-            .with_context(|| format!("failed to lock index build for {}", index_home.display())),
-    }
 }
 
 fn open_lock_file(index_home: &Path) -> anyhow::Result<File> {
@@ -593,24 +354,6 @@ fn swap_in(staging: &Path, index_home: &Path) -> anyhow::Result<()> {
     remove_dir_all_if_exists(&old)
 }
 
-/// Remove orphaned run and temp directories and torn delta files on open.
-fn sweep_orphans(index_home: &Path) -> anyhow::Result<()> {
-    let Some(_lock) = try_build_lock(index_home)? else {
-        return Ok(());
-    };
-    recover_interrupted_rebuild(index_home)?;
-    remove_dir_all_if_exists(&index_home.join(RUNS_DIR_NAME))?;
-    let present = u8::from(manifest_present(&index_home.join(DELTA_MANIFEST_FILE_NAME)))
-        + u8::from(index_home.join(DELTA_TABLE_FILE_NAME).exists())
-        + u8::from(index_home.join(DELTA_POSTINGS_FILE_NAME).exists())
-        + u8::from(index_home.join(summary::DELTA_SUMMARY_FILE_NAME).exists());
-    if present != 0 && present != 4 {
-        log::debug!("eg index: sweeping torn delta in {}", index_home.display());
-        remove_delta(index_home)?;
-    }
-    Ok(())
-}
-
 /// Return a sibling path formed by appending a suffix to the index directory.
 fn suffixed_path(index_home: &Path, suffix: &str) -> PathBuf {
     let name = index_home.file_name().map_or_else(
@@ -649,8 +392,10 @@ fn build_files(
     table_name: &str,
     postings_name: &str,
     summary_name: &str,
-) -> anyhow::Result<()> {
+    progress: Option<&BuildProgress>,
+) -> anyhow::Result<bench::BuildTimings> {
     let started_at = Instant::now();
+    let mut timings = bench::BuildTimings::default();
     let pair_budget = pairs_per_run(args.threads());
     log::debug!(
         "eg index build: postings files={} ram_cap={}MiB pair_budget_per_worker={} mmap={} table={} postings={}",
@@ -683,21 +428,36 @@ fn build_files(
                 &next_run,
                 &stats,
                 pair_budget,
+                progress,
+                files.len(),
             )
         })?;
     let scan_elapsed = scan_started_at.elapsed();
+    timings.set_scan_documents(scan_started_at);
     let run_count = next_run.load(AtomicOrdering::Relaxed);
     let mut summaries = stats.take_summaries();
+    let summary_started_at = Instant::now();
+    if let Some(progress) = progress {
+        progress.phase(BuildPhase::WritingSummary);
+    }
     summary::write_records(&index_home.join(summary_name), &mut summaries)?;
+    timings.set_write_summary(summary_started_at);
     log::debug!("eg index build: scan phase done in {scan_elapsed:?}; merging {run_count} runs",);
     let merge_started_at = Instant::now();
+    let pairs_total = stats.run_bytes.load(AtomicOrdering::Relaxed) as u64 / RUN_PAIR_SIZE as u64;
+    if let Some(progress) = progress {
+        progress.start_postings(run_count, pairs_total);
+    }
     merge_runs(
         &runs_dir,
         run_count,
         &index_home.join(table_name),
         &index_home.join(postings_name),
+        progress,
+        pairs_total,
     )?;
     let merge_elapsed = merge_started_at.elapsed();
+    timings.set_write_postings(merge_started_at);
     fs::remove_dir_all(&runs_dir)
         .with_context(|| format!("failed to remove run directory {}", runs_dir.display()))?;
     let table_bytes = file_len(&index_home.join(table_name))?;
@@ -717,7 +477,7 @@ fn build_files(
         merge_elapsed,
         started_at.elapsed()
     );
-    Ok(())
+    Ok(timings)
 }
 
 fn write_chunk_runs(
@@ -728,10 +488,20 @@ fn write_chunk_runs(
     next_run: &AtomicUsize,
     stats: &BuildStats,
     pair_budget: usize,
+    progress: Option<&BuildProgress>,
+    total_files: usize,
 ) -> anyhow::Result<()> {
     let mut pairs = Vec::with_capacity(pair_budget.min(64 * 1024));
     for file in files {
-        scan_file_pairs(table, file, args.index_mmap(), &mut pairs, stats)?;
+        scan_file_pairs(
+            table,
+            file,
+            args.index_mmap(),
+            &mut pairs,
+            stats,
+            progress,
+            total_files,
+        )?;
         if pairs.len() >= pair_budget {
             write_run(runs_dir, next_run, &mut pairs, stats)?;
         }
@@ -748,6 +518,8 @@ fn scan_file_pairs(
     use_mmap: bool,
     pairs: &mut Vec<Pair>,
     stats: &BuildStats,
+    progress: Option<&BuildProgress>,
+    total_files: usize,
 ) -> anyhow::Result<()> {
     let metadata = fs::metadata(&file.path)
         .with_context(|| format!("failed to stat {} for indexing", file.path.display()))?;
@@ -759,6 +531,14 @@ fn scan_file_pairs(
     stats
         .bytes
         .fetch_add(usize_len(len), AtomicOrdering::Relaxed);
+    if let Some(progress) = progress {
+        progress.update_scan(
+            total_files,
+            scanned as u64,
+            stats.bytes.load(AtomicOrdering::Relaxed) as u64,
+            stats.runs.load(AtomicOrdering::Relaxed) as u64,
+        );
+    }
     let document = super::document::scan(table, file, use_mmap)?;
     stats.push_summary(document.summary);
     if document.is_skipped() {
@@ -842,9 +622,12 @@ fn merge_runs(
     run_count: usize,
     table_path: &Path,
     postings_path: &Path,
+    progress: Option<&BuildProgress>,
+    pairs_total: u64,
 ) -> anyhow::Result<()> {
     let mut table_writer = SectionWriter::create(table_path, TABLE_MAGIC)?;
     let mut postings_writer = SectionWriter::create(postings_path, POSTINGS_MAGIC)?;
+    let mut merge_progress = MergeProgress::new(progress, run_count, pairs_total);
     let mut readers = Vec::with_capacity(run_count);
     let mut heap = BinaryHeap::new();
     for run_id in 0..run_count {
@@ -869,6 +652,7 @@ fn merge_runs(
         if docs.last().copied() != Some(item.pair.ord) {
             docs.push(item.pair.ord);
         }
+        merge_progress.pair_done();
         let reader = readers
             .get_mut(item.run_id)
             .context("merge run index out of range")?;
@@ -877,6 +661,8 @@ fn merge_runs(
                 pair,
                 run_id: item.run_id,
             });
+        } else {
+            merge_progress.run_done();
         }
     }
     if let Some(hash) = current_hash {
@@ -884,7 +670,60 @@ fn merge_runs(
     }
     table_writer.finalize(TABLE_RECORD_SIZE as u64)?;
     postings_writer.finalize(POSTING_SIZE as u64)?;
+    merge_progress.finish();
     Ok(())
+}
+
+struct MergeProgress<'a> {
+    progress: Option<&'a BuildProgress>,
+    runs_total: usize,
+    pairs_total: u64,
+    runs_done: u64,
+    pairs_done: u64,
+    next_pair_update: u64,
+}
+
+impl<'a> MergeProgress<'a> {
+    fn new(progress: Option<&'a BuildProgress>, runs_total: usize, pairs_total: u64) -> Self {
+        Self {
+            progress,
+            runs_total,
+            pairs_total,
+            runs_done: 0,
+            pairs_done: 0,
+            next_pair_update: POSTINGS_MERGE_PROGRESS_EVERY,
+        }
+    }
+
+    fn pair_done(&mut self) {
+        self.pairs_done += 1;
+        if self.pairs_done < self.next_pair_update && self.pairs_done < self.pairs_total {
+            return;
+        }
+        self.emit();
+        self.next_pair_update = self.pairs_done + POSTINGS_MERGE_PROGRESS_EVERY;
+    }
+
+    fn run_done(&mut self) {
+        self.runs_done += 1;
+    }
+
+    fn finish(&mut self) {
+        self.pairs_done = self.pairs_total;
+        self.runs_done = self.runs_total as u64;
+        self.emit();
+    }
+
+    fn emit(&self) {
+        if let Some(progress) = self.progress {
+            progress.update_postings(
+                self.runs_total,
+                self.runs_done,
+                self.pairs_total,
+                self.pairs_done,
+            );
+        }
+    }
 }
 
 fn flush_posting(
@@ -896,10 +735,7 @@ fn flush_posting(
     let len = u32::try_from(docs.len()).context("posting list length does not fit in u32")?;
     let offset = postings_writer.body_len;
     write_table_record(table_writer, hash, offset, len)?;
-    for &doc in docs {
-        postings_writer.write_all(&doc.to_le_bytes())?;
-    }
-    Ok(())
+    write_posting_ordinals(postings_writer, docs)
 }
 
 fn run_path(runs_dir: &Path, id: usize) -> PathBuf {
@@ -918,107 +754,70 @@ fn file_len(path: &Path) -> anyhow::Result<u64> {
         .with_context(|| format!("failed to stat {}", path.display()))
 }
 
-fn remove_delta(index_home: &Path) -> anyhow::Result<()> {
-    remove_manifest(&index_home.join(DELTA_MANIFEST_FILE_NAME))?;
-    for name in [
-        DELTA_TABLE_FILE_NAME,
-        DELTA_POSTINGS_FILE_NAME,
-        summary::DELTA_SUMMARY_FILE_NAME,
-    ] {
-        let path = index_home.join(name);
-        match fs::remove_file(&path) {
-            Ok(()) => {},
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {},
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("failed to remove delta file {}", path.display()));
-            },
-        }
-    }
-    Ok(())
-}
-
 fn count_plan_grams(plan: &QueryPlan) -> usize {
     plan.gram_count()
 }
 
 pub struct PostingsIndex {
     base: Segment,
-    delta: Option<Segment>,
     summaries: SummaryIndex,
-    changed_ordinals: Vec<usize>,
 }
 
 impl PostingsIndex {
     /// Open the index, returning `None` when a segment is missing or corrupt.
-    fn open(
+    fn open(index_home: &Path, doc_count: usize) -> anyhow::Result<Option<Self>> {
+        Self::open_with(index_home, doc_count, IndexOpen::Strict)
+    }
+
+    fn open_trusted(index_home: &Path, doc_count: usize) -> anyhow::Result<Option<Self>> {
+        Self::open_with(index_home, doc_count, IndexOpen::Trusted)
+    }
+
+    fn open_with(
         index_home: &Path,
         doc_count: usize,
-        changed_ordinals: Option<&[usize]>,
+        mode: IndexOpen,
     ) -> anyhow::Result<Option<Self>> {
         let Some(base) = Segment::open(
             &index_home.join(TABLE_FILE_NAME),
             &index_home.join(POSTINGS_FILE_NAME),
+            mode,
         )?
         else {
             return Ok(None);
         };
-        let delta = if changed_ordinals.is_some() {
-            match Segment::open(
-                &index_home.join(DELTA_TABLE_FILE_NAME),
-                &index_home.join(DELTA_POSTINGS_FILE_NAME),
-            )? {
-                Some(segment) => Some(segment),
-                None => return Ok(None),
-            }
-        } else {
-            None
+        let summaries = match mode {
+            IndexOpen::Strict => {
+                SummaryIndex::open(&index_home.join(summary::SUMMARY_FILE_NAME), doc_count)?
+            },
+            IndexOpen::Trusted => {
+                SummaryIndex::open_trusted(&index_home.join(summary::SUMMARY_FILE_NAME), doc_count)?
+            },
         };
-        let delta_mode = changed_ordinals.map_or(DeltaSummaryMode::Absent, |ordinals| {
-            DeltaSummaryMode::ChangedOrdinals(ordinals)
-        });
-        let Some(summaries) = SummaryIndex::open(
-            &index_home.join(summary::SUMMARY_FILE_NAME),
-            &index_home.join(summary::DELTA_SUMMARY_FILE_NAME),
-            doc_count,
-            delta_mode,
-        )?
-        else {
+        let Some(summaries) = summaries else {
             return Ok(None);
         };
-        Ok(Some(Self {
-            base,
-            delta,
-            summaries,
-            changed_ordinals: changed_ordinals.unwrap_or_default().to_vec(),
-        }))
+        Ok(Some(Self { base, summaries }))
     }
 
     fn lookup(&self, hash: u64) -> anyhow::Result<Vec<usize>> {
-        let mut out = self.live_base_lookup(hash)?;
-        if let Some(delta) = &self.delta {
-            out = executor::union_sorted(out, delta.lookup(hash)?);
-        }
-        Ok(out)
+        self.base.lookup(hash)
+    }
+
+    fn posting_list(&self, hash: u64) -> anyhow::Result<PostingList<'_>> {
+        self.base.posting_list(hash)
     }
 
     /// Posting-list length without decoding: the df prior for the cost model.
     fn posting_len(&self, hash: u64) -> anyhow::Result<usize> {
-        Ok(self.lookup(hash)?.len())
-    }
-
-    fn live_base_lookup(&self, hash: u64) -> anyhow::Result<Vec<usize>> {
-        let mut out = self.base.lookup(hash)?;
-        remove_changed_ordinals(&mut out, &self.changed_ordinals);
-        Ok(out)
+        self.base.posting_len(hash)
     }
 }
 
-fn remove_changed_ordinals(ordinals: &mut Vec<usize>, changed_ordinals: &[usize]) {
-    if changed_ordinals.is_empty() {
-        return;
-    }
-    ordinals.retain(|ord| changed_ordinals.binary_search(ord).is_err());
+#[derive(Clone, Copy)]
+enum IndexOpen {
+    Strict,
+    Trusted,
 }
 
 impl PlanBackend for PostingsIndex {
@@ -1041,12 +840,18 @@ struct Segment {
 }
 
 impl Segment {
-    /// Open and verify both files, returning `None` on any structural fault.
-    fn open(table_path: &Path, postings_path: &Path) -> anyhow::Result<Option<Self>> {
-        let Some(table) = open_section(table_path, TABLE_MAGIC, TABLE_RECORD_SIZE)? else {
+    /// Open both files and validate their section headers and sampled checksums.
+    fn open(
+        table_path: &Path,
+        postings_path: &Path,
+        mode: IndexOpen,
+    ) -> anyhow::Result<Option<Self>> {
+        let strict = matches!(mode, IndexOpen::Strict);
+        let Some(table) = open_section(table_path, TABLE_MAGIC, TABLE_RECORD_SIZE, strict)? else {
             return Ok(None);
         };
-        let Some(postings) = open_section(postings_path, POSTINGS_MAGIC, POSTING_SIZE)? else {
+        let Some(postings) = open_section(postings_path, POSTINGS_MAGIC, POSTING_SIZE, strict)?
+        else {
             return Ok(None);
         };
         Ok(Some(Self { table, postings }))
@@ -1061,10 +866,12 @@ impl Segment {
     }
 
     fn lookup(&self, hash: u64) -> anyhow::Result<Vec<usize>> {
-        let table = self.table_body();
-        let postings = self.postings_body();
-        let Some((offset, len)) = find_record(table, hash)? else {
-            return Ok(Vec::new());
+        self.posting_list(hash).map(|list| list.ordinals())
+    }
+
+    fn posting_list(&self, hash: u64) -> anyhow::Result<PostingList<'_>> {
+        let Some((offset, len)) = find_record(self.table_body(), hash)? else {
+            return Ok(PostingList::empty());
         };
         let len = usize::try_from(len).context("posting length does not fit in usize")?;
         let offset = usize::try_from(offset).context("posting offset does not fit in usize")?;
@@ -1074,23 +881,177 @@ impl Segment {
         let end = offset
             .checked_add(byte_len)
             .context("posting byte range overflow")?;
+        let postings = self.postings_body();
         let Some(region) = postings.get(offset..end) else {
             anyhow::bail!("posting list points past postings file");
         };
-        let mut docs = Vec::with_capacity(len);
-        for chunk in region.chunks_exact(POSTING_SIZE) {
-            let bytes: [u8; POSTING_SIZE] = chunk
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("posting chunk is not {POSTING_SIZE} bytes"))?;
-            docs.push(u32::from_le_bytes(bytes) as usize);
-        }
-        Ok(docs)
+        Ok(PostingList { bytes: region })
+    }
+
+    fn posting_len(&self, hash: u64) -> anyhow::Result<usize> {
+        let table = self.table_body();
+        let Some((_, len)) = find_record(table, hash)? else {
+            return Ok(0);
+        };
+        usize::try_from(len).context("posting length does not fit in usize")
     }
 }
 
-/// Memory-map one section file and verify its header, magic, and checksum.
+#[derive(Clone, Copy)]
+struct PostingList<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> PostingList<'a> {
+    const fn empty() -> Self {
+        Self { bytes: &[] }
+    }
+
+    fn len(self) -> usize {
+        self.bytes.len() / POSTING_SIZE
+    }
+
+    fn ordinals(self) -> Vec<usize> {
+        self.bytes
+            .chunks_exact(POSTING_SIZE)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("four bytes")) as usize)
+            .collect()
+    }
+
+    fn contains(self, ord: usize) -> bool {
+        let Ok(ord) = u32::try_from(ord) else {
+            return false;
+        };
+        let mut lo = 0usize;
+        let mut hi = self.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match self.ord_at(mid).cmp(&ord) {
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
+                Ordering::Equal => return true,
+            }
+        }
+        false
+    }
+
+    fn ord_at(self, idx: usize) -> u32 {
+        let start = idx * POSTING_SIZE;
+        let bytes = self
+            .bytes
+            .get(start..start + POSTING_SIZE)
+            .expect("posting index in range");
+        u32::from_le_bytes(bytes.try_into().expect("four bytes"))
+    }
+}
+
+struct FastAllOf<'a> {
+    index: &'a PostingsIndex,
+    driver: FastNeedle<'a>,
+    filters: Vec<FastNeedle<'a>>,
+    needs: &'a [ScanNeed],
+}
+
+impl<'a> FastAllOf<'a> {
+    fn try_execute(
+        index: &'a PostingsIndex,
+        plan: &'a QueryPlan,
+    ) -> anyhow::Result<Option<Vec<usize>>> {
+        let Some(query) = Self::from_plan(index, plan)? else {
+            return Ok(None);
+        };
+        Ok(Some(query.execute()))
+    }
+
+    fn from_plan(index: &'a PostingsIndex, plan: &'a QueryPlan) -> anyhow::Result<Option<Self>> {
+        let PlanExpr::AllOf {
+            grams,
+            needs,
+            children,
+        } = plan.root()
+        else {
+            return Ok(None);
+        };
+        if grams.is_empty() || !children.is_empty() {
+            return Ok(None);
+        }
+        let mut needles = Self::needles(index, grams)?;
+        needles.sort_by_key(FastNeedle::len);
+        let driver = needles.remove(0);
+        Ok(Some(Self {
+            index,
+            driver,
+            filters: needles,
+            needs,
+        }))
+    }
+
+    fn needles(
+        index: &'a PostingsIndex,
+        grams: &'a [GramNeedle],
+    ) -> anyhow::Result<Vec<FastNeedle<'a>>> {
+        grams
+            .iter()
+            .map(|needle| FastNeedle::open(index, needle))
+            .collect()
+    }
+
+    fn execute(self) -> Vec<usize> {
+        let mut candidates = self.driver.ordinals();
+        candidates.retain(|&ord| self.keeps(ord));
+        candidates
+    }
+
+    fn keeps(&self, ord: usize) -> bool {
+        let status = self.index.summaries.status(ord);
+        status.is_text()
+            && self.filters.iter().all(|needle| needle.contains(ord))
+            && self.needs.iter().all(|need| status.satisfies(need))
+    }
+}
+
+struct FastNeedle<'a> {
+    lists: Vec<PostingList<'a>>,
+    len: usize,
+}
+
+impl<'a> FastNeedle<'a> {
+    fn open(index: &'a PostingsIndex, needle: &GramNeedle) -> anyhow::Result<Self> {
+        let lists = needle
+            .keys()
+            .map(|key| index.posting_list(key.value()))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let len = lists.iter().map(|list| list.len()).sum();
+        Ok(Self { lists, len })
+    }
+
+    const fn len(&self) -> usize {
+        self.len
+    }
+
+    fn ordinals(&self) -> Vec<usize> {
+        let mut ords = Vec::with_capacity(self.len);
+        for list in &self.lists {
+            ords.extend(list.ordinals());
+        }
+        ords.sort_unstable();
+        ords.dedup();
+        ords
+    }
+
+    fn contains(&self, ord: usize) -> bool {
+        self.lists.iter().any(|list| list.contains(ord))
+    }
+}
+
+/// Memory-map one section file and verify its header, magic, length, and optional sampled checksum.
 #[allow(unsafe_code)]
-fn open_section(path: &Path, magic: [u8; 8], record_size: usize) -> anyhow::Result<Option<Mmap>> {
+fn open_section(
+    path: &Path,
+    magic: [u8; 8],
+    record_size: usize,
+    verify_checksum: bool,
+) -> anyhow::Result<Option<Mmap>> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1111,15 +1072,19 @@ fn open_section(path: &Path, magic: [u8; 8], record_size: usize) -> anyhow::Resu
     }
     let mmap = unsafe { MmapOptions::new().map(&file) }
         .with_context(|| format!("failed to mmap {}", path.display()))?;
-    if let Err(reason) = verify_section(&mmap, magic, record_size) {
+    if let Err(reason) = verify_section_with_checksum(&mmap, magic, record_size, verify_checksum) {
         log::debug!("eg index: {} failed verification: {reason}", path.display());
         return Ok(None);
     }
     Ok(Some(mmap))
 }
 
-/// Verify a section's magic, version, length, and body checksum.
-fn verify_section(mmap: &[u8], magic: [u8; 8], record_size: usize) -> Result<(), String> {
+fn verify_section_with_checksum(
+    mmap: &[u8],
+    magic: [u8; 8],
+    record_size: usize,
+    verify_checksum: bool,
+) -> Result<(), String> {
     let header = mmap.get(..SECTION_HEADER_SIZE).ok_or("missing header")?;
     if header.get(..8) != Some(&magic[..]) {
         return Err("bad magic".to_owned());
@@ -1134,7 +1099,7 @@ fn verify_section(mmap: &[u8], magic: [u8; 8], record_size: usize) -> Result<(),
     if body.len() as u64 != count.saturating_mul(record_size as u64) {
         return Err("length does not match record count".to_owned());
     }
-    if sampled_checksum(body) != checksum {
+    if verify_checksum && sampled_checksum(body) != checksum {
         return Err("checksum mismatch".to_owned());
     }
     Ok(())
@@ -1239,6 +1204,23 @@ fn write_table_record(
     Ok(())
 }
 
+fn write_posting_ordinals(writer: &mut SectionWriter, docs: &[u32]) -> anyhow::Result<()> {
+    let mut buffer = [0u8; POSTING_WRITE_BUFFER_BYTES];
+    let mut len = 0usize;
+    for &doc in docs {
+        if len + POSTING_SIZE > buffer.len() {
+            writer.write_all(&buffer[..len])?;
+            len = 0;
+        }
+        buffer[len..len + POSTING_SIZE].copy_from_slice(&doc.to_le_bytes());
+        len += POSTING_SIZE;
+    }
+    if len > 0 {
+        writer.write_all(&buffer[..len])?;
+    }
+    Ok(())
+}
+
 /// Streams a section body under a placeholder header, then finalizes with a
 /// magic, record count, and body checksum before flushing to disk.
 struct SectionWriter {
@@ -1255,7 +1237,7 @@ impl SectionWriter {
         file.write_all(&[0u8; SECTION_HEADER_SIZE])
             .with_context(|| format!("failed to reserve header in {}", path.display()))?;
         Ok(Self {
-            writer: BufWriter::new(file),
+            writer: BufWriter::with_capacity(SECTION_WRITER_BUFFER_BYTES, file),
             body_len: 0,
             magic,
             path: path.to_path_buf(),
@@ -1312,28 +1294,22 @@ fn section_header(magic: [u8; 8], count: u64, checksum: u64) -> [u8; SECTION_HEA
 }
 
 fn write_pair(writer: &mut BufWriter<File>, pair: Pair) -> anyhow::Result<()> {
-    writer.write_all(&pair.hash.to_le_bytes())?;
-    writer.write_all(&pair.ord.to_le_bytes())?;
+    let mut bytes = [0u8; RUN_PAIR_SIZE];
+    bytes[..8].copy_from_slice(&pair.hash.to_le_bytes());
+    bytes[8..].copy_from_slice(&pair.ord.to_le_bytes());
+    writer.write_all(&bytes)?;
     Ok(())
 }
 
 fn read_pair(reader: &mut BufReader<File>) -> anyhow::Result<Option<Pair>> {
-    let mut first = [0u8; 1];
-    match reader.read(&mut first)? {
-        0 => return Ok(None),
-        1 => {},
-        _ => unreachable!(),
+    if reader.fill_buf()?.is_empty() {
+        return Ok(None);
     }
-    let mut rest = [0u8; 11];
-    reader.read_exact(&mut rest)?;
-    let mut hash = [0u8; 8];
-    hash[0] = first[0];
-    hash[1..].copy_from_slice(&rest[..7]);
-    let mut ord = [0u8; 4];
-    ord.copy_from_slice(&rest[7..]);
+    let mut bytes = [0u8; RUN_PAIR_SIZE];
+    reader.read_exact(&mut bytes)?;
     Ok(Some(Pair {
-        hash: u64::from_le_bytes(hash),
-        ord: u32::from_le_bytes(ord),
+        hash: u64::from_le_bytes(bytes[..8].try_into().expect("eight bytes")),
+        ord: u32::from_le_bytes(bytes[8..].try_into().expect("four bytes")),
     }))
 }
 
@@ -1360,7 +1336,8 @@ struct RunReader {
 impl RunReader {
     fn open(path: &Path) -> anyhow::Result<Self> {
         Ok(Self {
-            reader: BufReader::new(
+            reader: BufReader::with_capacity(
+                RUN_READER_BUFFER_BYTES,
                 File::open(path)
                     .with_context(|| format!("failed to open run {}", path.display()))?,
             ),
@@ -1444,11 +1421,18 @@ impl PartialOrd for HeapItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        FNV_OFFSET, POSTING_SIZE, POSTINGS_MAGIC, SECTION_HEADER_SIZE, TABLE_MAGIC,
-        TABLE_RECORD_SIZE, delta_should_fold, find_record, fnv1a_state, remove_changed_ordinals,
-        sampled_checksum, section_header, suffixed_path, verify_section,
+        FNV_OFFSET, IndexOpen, MAX_PAIRS_PER_RUN, MIN_PAIRS_PER_RUN, POSTING_SIZE,
+        POSTING_WRITE_BUFFER_BYTES, POSTINGS_MAGIC, Pair, PostingList, RUN_PAIR_SIZE,
+        SECTION_HEADER_SIZE, SectionWriter, Segment, TABLE_MAGIC, TABLE_RECORD_SIZE, find_record,
+        fnv1a_state, pairs_per_run, read_pair, sampled_checksum, section_header, suffixed_path,
+        verify_section_with_checksum, write_pair, write_posting_ordinals,
     };
-    use std::path::Path;
+    use std::{
+        fs,
+        fs::File,
+        io::{BufReader, BufWriter, Write},
+        path::{Path, PathBuf},
+    };
 
     fn table_body(records: &[(u64, u64, u32)]) -> Vec<u8> {
         let mut body = Vec::new();
@@ -1472,24 +1456,77 @@ mod tests {
     }
 
     #[test]
-    fn delta_fold_threshold() {
-        assert!(!delta_should_fold(0, 100));
-        assert!(!delta_should_fold(1, 1), "tiny deltas stay incremental");
-        assert!(
-            !delta_should_fold(63, 100),
-            "small deltas stay incremental even above the percentage threshold"
-        );
-        assert!(!delta_should_fold(64, 256), "exactly 25% does not fold");
-        assert!(delta_should_fold(65, 256));
-        assert!(!delta_should_fold(5, 0), "no base means no fold");
+    fn pair_budget_is_bounded_by_ram_cap_and_minimum() {
+        assert_eq!(pairs_per_run(1), MAX_PAIRS_PER_RUN);
+        assert_eq!(pairs_per_run(usize::MAX), MIN_PAIRS_PER_RUN);
+        assert!(pairs_per_run(16) > MIN_PAIRS_PER_RUN);
     }
 
     #[test]
-    fn changed_ordinals_are_removed_from_base_postings() {
-        let mut ords = vec![0, 1, 2, 3, 4, 5];
-        remove_changed_ordinals(&mut ords, &[1, 4]);
+    fn run_pair_io_round_trips_and_stops_at_eof() {
+        let dir = scratch("pair-io");
+        let path = dir.join("run.bin");
+        let pairs = [
+            Pair { hash: 3, ord: 1 },
+            Pair {
+                hash: u64::MAX - 1,
+                ord: u32::MAX,
+            },
+        ];
+        {
+            let mut writer = BufWriter::new(File::create(&path).unwrap());
+            for pair in pairs {
+                write_pair(&mut writer, pair).unwrap();
+            }
+            writer.flush().unwrap();
+        }
 
-        assert_eq!(ords, vec![0, 2, 3, 5]);
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            (2 * RUN_PAIR_SIZE) as u64
+        );
+        let mut reader = BufReader::new(File::open(path).unwrap());
+        assert_eq!(read_pair(&mut reader).unwrap(), Some(pairs[0]));
+        assert_eq!(read_pair(&mut reader).unwrap(), Some(pairs[1]));
+        assert_eq!(read_pair(&mut reader).unwrap(), None);
+    }
+
+    #[test]
+    fn posting_ordinal_writer_batches_across_buffer_boundary() {
+        let dir = scratch("posting-ordinals");
+        let path = dir.join("postings.bin");
+        let docs = (0..(POSTING_WRITE_BUFFER_BYTES / POSTING_SIZE + 3) as u32)
+            .map(|ord| ord.wrapping_mul(7))
+            .collect::<Vec<_>>();
+        let mut writer = SectionWriter::create(&path, POSTINGS_MAGIC).unwrap();
+
+        write_posting_ordinals(&mut writer, &docs).unwrap();
+        writer.finalize(POSTING_SIZE as u64).unwrap();
+
+        let bytes = fs::read(path).unwrap();
+        let body = &bytes[SECTION_HEADER_SIZE..];
+        assert_eq!(body.len(), docs.len() * POSTING_SIZE);
+        for (chunk, expected) in body.chunks_exact(POSTING_SIZE).zip(docs) {
+            assert_eq!(
+                u32::from_le_bytes(chunk.try_into().expect("four bytes")),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn posting_list_membership_uses_sorted_ordinals() {
+        let mut bytes = Vec::new();
+        for ord in [3u32, 8, 13, 21] {
+            bytes.extend_from_slice(&ord.to_le_bytes());
+        }
+        let postings = PostingList { bytes: &bytes };
+
+        assert!(postings.contains(3));
+        assert!(postings.contains(13));
+        assert!(postings.contains(21));
+        assert!(!postings.contains(2));
+        assert!(!postings.contains(22));
     }
 
     fn framed(magic: [u8; 8], record_size: usize, records: usize) -> Vec<u8> {
@@ -1502,9 +1539,9 @@ mod tests {
     #[test]
     fn section_roundtrip_verifies() {
         let file = framed(TABLE_MAGIC, TABLE_RECORD_SIZE, 3);
-        assert!(verify_section(&file, TABLE_MAGIC, TABLE_RECORD_SIZE).is_ok());
+        assert!(verify_section_with_checksum(&file, TABLE_MAGIC, TABLE_RECORD_SIZE, true).is_ok());
         let empty = framed(POSTINGS_MAGIC, POSTING_SIZE, 0);
-        assert!(verify_section(&empty, POSTINGS_MAGIC, POSTING_SIZE).is_ok());
+        assert!(verify_section_with_checksum(&empty, POSTINGS_MAGIC, POSTING_SIZE, true).is_ok());
     }
 
     #[test]
@@ -1513,18 +1550,44 @@ mod tests {
         if let Some(byte) = file.get_mut(SECTION_HEADER_SIZE + 1) {
             *byte ^= 0xFF;
         }
-        assert!(verify_section(&file, POSTINGS_MAGIC, POSTING_SIZE).is_err());
+        assert!(verify_section_with_checksum(&file, POSTINGS_MAGIC, POSTING_SIZE, true).is_err());
+    }
+
+    #[test]
+    fn actual_open_rejects_corrupted_section_body() {
+        let dir = scratch("corrupt-open");
+        let table = dir.join("table.bin");
+        let postings = dir.join("postings.bin");
+
+        write_section(
+            &table,
+            TABLE_MAGIC,
+            TABLE_RECORD_SIZE,
+            &table_body(&[(1, 0, 1)]),
+        );
+        write_section(&postings, POSTINGS_MAGIC, POSTING_SIZE, &1u32.to_le_bytes());
+        let mut corrupted = fs::read(&table).unwrap();
+        corrupted[SECTION_HEADER_SIZE + 1] ^= 0xFF;
+        fs::write(&table, corrupted).unwrap();
+
+        assert!(
+            Segment::open(&table, &postings, IndexOpen::Strict)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn section_detects_bad_magic_and_length() {
         let file = framed(TABLE_MAGIC, TABLE_RECORD_SIZE, 2);
-        assert!(verify_section(&file, POSTINGS_MAGIC, POSTING_SIZE).is_err());
+        assert!(verify_section_with_checksum(&file, POSTINGS_MAGIC, POSTING_SIZE, true).is_err());
 
         let body = vec![1u8; TABLE_RECORD_SIZE * 2];
         let mut lying = section_header(TABLE_MAGIC, 3, sampled_checksum(&body)).to_vec();
         lying.extend_from_slice(&body);
-        assert!(verify_section(&lying, TABLE_MAGIC, TABLE_RECORD_SIZE).is_err());
+        assert!(
+            verify_section_with_checksum(&lying, TABLE_MAGIC, TABLE_RECORD_SIZE, true).is_err()
+        );
     }
 
     #[test]
@@ -1560,5 +1623,26 @@ mod tests {
             suffixed_path(Path::new("/a/postings-v3"), ".lock"),
             Path::new("/a/postings-v3.lock")
         );
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("eg-postings-{name}-{stamp}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn write_section(path: &Path, magic: [u8; 8], record_size: usize, body: &[u8]) {
+        let mut file = section_header(
+            magic,
+            (body.len() / record_size) as u64,
+            sampled_checksum(body),
+        )
+        .to_vec();
+        file.extend_from_slice(body);
+        fs::write(path, file).unwrap();
     }
 }

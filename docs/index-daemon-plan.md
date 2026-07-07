@@ -7,8 +7,8 @@ maintainer, not a search server.
 
 The CLI-facing index API stays small:
 
-- `index::run(&HiArgs)` runs indexed search, maintenance, structured bench, and
-  internal daemon refresh.
+- `index::run(&HiArgs)` runs indexed search, structured bench, and the internal
+  daemon refresh entrypoint.
 - `index::IndexConfig` is the only index configuration type visible to flag
   parsing.
 - `index` keeps daemon spawning, runtime files, generation selection, refresh,
@@ -42,6 +42,7 @@ daemon questions and never blocks on daemon RPC. It only touches files:
 The request file carries:
 
 - `cwd`
+- `eg_binary`
 - `index_root`
 - `state_root`
 - replayable CLI argv
@@ -58,13 +59,16 @@ generation is daemon-maintained:
 1. The backend manifest exists.
 2. The manifest identity matches the requested backend, weights fingerprint,
    index format, scanner/query format, and walk/filter fingerprint.
-3. `runtime/watcher-ready` exists.
-4. `runtime/journal-clean` exists.
-5. `runtime/lease` is live.
+3. `$RUNTIME/eg/daemon.lock` is held by a live daemon.
+4. `runtime/daemon-owner` matches the live daemon lock owner.
+5. `$RUNTIME/eg/startup-ready` matches the live daemon lock owner.
+6. `runtime/watcher-ready` exists.
+7. `runtime/journal-clean` exists.
+8. no newer wake/dirty epoch invalidates the clean marker.
+9. `runtime/lease` is live.
 
-If any check fails, the CLI falls back to the normal manifest freshness path or
-a cold build. The daemon proof is file-based; there is no socket and no blocking
-daemon call.
+If any check fails, the CLI treats the index as absent. The daemon proof is
+file-based; there is no socket and no blocking daemon query.
 
 ## Daemon Responsibilities
 
@@ -75,6 +79,9 @@ The daemon:
 - refreshes requested generations by replaying `eg` in internal refresh mode
 - writes `journal-clean` only after refresh succeeds
 - removes child index directories covered by a live parent index
+- removes stale state roots before publishing startup readiness
+- deletes maintained indexes and owned request files as its final graceful
+  shutdown action
 - exits after all leases expire
 
 The current implementation uses Linux inotify for watcher-backed clean markers.
@@ -100,8 +107,9 @@ Cold miss:
 2. Choose the broadest compatible ready generation from disk, or the exact
    `IndexRoot` for a build.
 3. Touch lease/wake/request files.
-4. Walk and build synchronously in the CLI when no usable generation exists.
-5. Query and verify.
+4. Start or wake the daemon.
+5. Block until the daemon publishes a proofed generation.
+6. Query and verify.
 
 Hot daemon path:
 
@@ -111,8 +119,8 @@ Hot daemon path:
 4. Snapshot from the manifest without a full freshness walk.
 5. Map/query/verify.
 
-Progress output belongs only to cold build, rebuild, repair, or explicit debug
-paths. Hot daemon search should be quiet unless `--bench` is active.
+Progress output belongs only to a cold daemon build or explicit debug paths. Hot
+daemon search should be quiet unless `--bench` is active.
 
 ## Bench Mode
 
@@ -126,9 +134,8 @@ bugs because comparison scripts need a stable schema.
 
 ## Remaining Work
 
-- Refactor `index::run` into `SearchRequest`, `QueryPlanner`, `Generation`,
-  `InitialBuild`, `Lease`, and `CandidateVerifier` so the top-level function is
-  the intended linear story.
+- Keep `index::run` as a linear story built from `SearchRequest`,
+  `QueryPlanner`, `Generation`, `Lease`, and `CandidateVerifier`.
 - Move from the legacy mutable backend directory to explicit immutable
   `Generation` directories with an atomic `current` pointer.
 - Add integration coverage for daemon refresh through the `eg-indexd` binary.

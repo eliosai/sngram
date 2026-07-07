@@ -1298,11 +1298,8 @@ impl Patterns {
         if !matches!(low.mode, Mode::Search(_)) {
             return Ok(Patterns { patterns: vec![] });
         }
-        if low.index.bench_suite() {
+        if low.index.bench() && low.patterns.is_empty() && low.positional.is_empty() {
             low.patterns.clear();
-            return Ok(Patterns { patterns: vec![] });
-        }
-        if low.index.is_maintenance() && low.patterns.is_empty() {
             return Ok(Patterns { patterns: vec![] });
         }
         // If we got nothing from -e/--regexp and -f/--file, then the first
@@ -1427,7 +1424,7 @@ impl Paths {
         // consequence of letting the user type 'rg foo' and "guessing" that
         // they meant to search the CWD.
         let is_readable_stdin = grep::cli::is_readable_stdin();
-        let use_cwd = low.index.bench_suite()
+        let use_cwd = (low.index.bench() && low.patterns.is_empty() && low.positional.is_empty())
             || !is_readable_stdin
             || state.stdin_consumed
             || !matches!(low.mode, Mode::Search(_));
@@ -1788,5 +1785,31 @@ binary detection is enabled and matching a NUL byte is impossible.",
         )
     } else {
         msg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HiArgs;
+    use crate::flags::parse::test_support::parse_low_raw;
+
+    #[test]
+    fn bare_bench_uses_the_embedded_suite() {
+        let low = parse_low_raw(["--bench"]).expect("low args");
+        let args = HiArgs::from_low_args(low).expect("hi args");
+
+        assert!(args.index().bench());
+        assert!(args.patterns().is_empty());
+        assert_eq!(args.search_paths(), &[std::path::PathBuf::from("./")]);
+    }
+
+    #[test]
+    fn bench_with_pattern_stays_single_query() {
+        let low = parse_low_raw(["--bench", "needle", "."]).expect("low args");
+        let args = HiArgs::from_low_args(low).expect("hi args");
+
+        assert!(args.index().bench());
+        assert_eq!(args.patterns(), &["needle".to_string()]);
+        assert_eq!(args.search_paths(), &[std::path::PathBuf::from(".")]);
     }
 }

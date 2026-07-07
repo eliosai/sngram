@@ -2,7 +2,6 @@
 
 mod backend;
 mod bench;
-mod bench_suite;
 mod catalog;
 mod classify;
 mod config;
@@ -10,17 +9,17 @@ mod daemon_refresh;
 mod document;
 mod executor;
 mod generation;
-mod initial;
 mod location;
-mod maintenance;
 mod manifest;
 mod planner;
 mod postings;
+mod progress;
 mod request;
 mod roots;
 mod runtime;
 mod snapshot;
 mod store;
+mod suite;
 mod summary;
 mod verify;
 mod walk;
@@ -28,14 +27,13 @@ mod walk;
 use std::{
     collections::BTreeSet,
     fmt::{self, Write as FmtWrite},
-    path::Path,
+    time::Duration,
     time::Instant,
 };
 
 use anyhow::bail;
 use catalog::GenerationCatalog;
 use generation::Generation;
-use initial::InitialBuild;
 use request::{SearchRequest, Unsupported, unsupported};
 use roots::{SearchRoots, absolute_path};
 use sngram_types::QueryPlan;
@@ -63,8 +61,11 @@ impl<'a> IndexedSearch<'a> {
             daemon_refresh::run(self.args)?;
             return Ok(true);
         }
-        if self.args.index().bench_suite() {
-            return bench_suite::run(self.args);
+        if self.args.index().bench()
+            && self.args.patterns().is_empty()
+            && matches!(self.args.mode(), crate::flags::Mode::Search(_))
+        {
+            return suite::run(self.args);
         }
         if self.args.index().bench() {
             return run_bench(self.args);
@@ -94,11 +95,7 @@ fn run_bench(args: &HiArgs) -> anyhow::Result<bool> {
 
 fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyhow::Result<bool> {
     let parse_started_at = Instant::now();
-    let request = if args.index().is_maintenance() {
-        return maintenance::run(args);
-    } else {
-        SearchRequest::from_args(args)
-    };
+    let request = SearchRequest::from_args(args);
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_parse_request(parse_started_at);
     }
@@ -110,8 +107,8 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     let mode = request.mode();
     let started_at = request.started_at();
     log::debug!(
-        "eg index: mode={:?} backend={:?} threads={}",
-        args.index().mode(),
+        "eg index: mode={} backend={:?} threads={}",
+        args.index().mode_name(),
         args.index().backend(),
         args.threads()
     );
@@ -143,89 +140,87 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     log::debug!("eg index: query plan: {}", debug_plan(&plan.plan));
     let roots_started_at = Instant::now();
     let roots = SearchRoots::from_request(&request)?;
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_resolve_root(roots_started_at);
+    }
     debug_assert!(roots.is_served_by(roots.build_root()));
     let catalog_started_at = Instant::now();
     let catalog = GenerationCatalog::open(args, table_fingerprint);
     let generation = Generation::from_ready(catalog.best_ready_generation(&roots)?);
     let index_dir = generation.index_dir();
     if let Some(report) = bench.as_deref_mut() {
-        report.timing_mut().set_resolve_roots(roots_started_at);
-        report.timing_mut().set_catalog_open(catalog_started_at);
+        report.timing_mut().set_catalog_probe(catalog_started_at);
         report.set_index_root(generation.index_root(), generation.used_parent_index());
     }
-    let cold_build = generation.is_cold_build(args, &index_dir);
+    let cold_build = generation.source() != "hot";
     if let Some(report) = bench.as_deref_mut() {
         report.set_cold_build(cold_build);
         report.set_generation(
             index_dir.display().to_string(),
-            generation.bench_source(args, cold_build),
+            if cold_build { "cold_build" } else { "hot" },
         );
     }
+    let lease = runtime::Lease::new(generation.index_root(), generation.state_root());
+    if !cold_build {
+        let register_started_at = Instant::now();
+        lease.keep_alive_best_effort();
+        if let Some(report) = bench.as_deref_mut() {
+            report.timing_mut().set_daemon_register(register_started_at);
+        }
+    }
+    if cold_build {
+        let register_started_at = Instant::now();
+        lease.request_refresh()?;
+        if let Some(report) = bench.as_deref_mut() {
+            report.timing_mut().set_daemon_register(register_started_at);
+            report.timing_mut().set_daemon_start(register_started_at);
+        }
+        let build_started_at = Instant::now();
+        ensure_daemon_index_ready(&generation, !args.index().bench())?;
+        if let Some(report) = bench.as_deref_mut() {
+            if let Some(build_timings) = bench::read_build_timings(generation.state_root())? {
+                report.timing_mut().merge_build(&build_timings);
+            }
+            report.timing_mut().set_cold_build_total(build_started_at);
+            report.timing_mut().set_daemon_ready(build_started_at);
+        }
+    }
+    let proof_started_at = Instant::now();
+    let _ = runtime::daemon_freshness_proof(generation.state_root());
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_daemon_proof(proof_started_at);
+    }
     let validate_started_at = Instant::now();
-    let (snapshot, loaded_manifest, freshness_proof) =
+    let (snapshot, freshness_proof) =
         snapshot::SnapshotLoader::new(args, table_fingerprint, generation.location(), &index_dir)
             .load()?
             .into_parts();
     if let Some(report) = bench.as_deref_mut() {
-        report
-            .timing_mut()
-            .set_generation_validate(validate_started_at);
-        let binary_skipped = snapshot
-            .files
-            .iter()
-            .filter(|file| file.is_skipped_binary())
-            .count();
-        report.set_generation(
-            index_dir.display().to_string(),
-            snapshot::generation_source(
-                args,
-                table_fingerprint,
-                &generation,
-                &snapshot,
-                loaded_manifest.as_ref(),
-                cold_build,
-            ),
-        );
-        report.set_snapshot_counts(snapshot.files.len(), binary_skipped);
+        report.timing_mut().set_manifest_open(validate_started_at);
+        report.set_snapshot_counts(snapshot.file_count(), snapshot.binary_skipped_count());
         report.set_freshness_proof(freshness_proof);
     }
-    if args.has_implicit_path() && snapshot.files.is_empty() {
+    if args.has_implicit_path() && snapshot.is_empty() {
         crate::eprint_nothing_searched();
     }
-    warn_large_implicit_build(args, generation.index_root(), &index_dir, &snapshot);
-    let prebuilt_disk_index = if cold_build {
-        let build_started_at = Instant::now();
-        let status =
-            InitialBuild::new(args, table_fingerprint, &table, &index_dir).run(&snapshot)?;
-        if let Some(report) = bench.as_deref_mut() {
-            report.timing_mut().set_initial_build(build_started_at);
-        }
-        status.prebuilt_disk_index()
-    } else {
-        false
-    };
-    runtime::Lease::new(generation.index_root(), generation.state_root()).refresh_best_effort();
     let query_started_at = Instant::now();
-    let Some(mut candidates) = generation.query(
-        args,
-        table_fingerprint,
-        &table,
-        &snapshot,
-        loaded_manifest.as_ref(),
-        &plan,
-        prebuilt_disk_index,
-        bench.as_deref_mut(),
-    )?
+    let Some(mut candidates) = generation.query(args, &snapshot, &plan, bench.as_deref_mut())?
     else {
         if let Some(report) = bench.as_deref_mut() {
             report.reject_selectivity();
         }
         return unsupported(Unsupported::TooManyCandidates);
     };
+    if let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_index_lookup(query_started_at);
+    }
+    let restrict_started_at = Instant::now();
     let unrestricted_candidates = candidates.len();
     restrict_candidates(args, &roots, &snapshot, &mut candidates);
     if let Some(report) = bench.as_deref_mut() {
-        report.timing_mut().set_index_query(query_started_at);
+        report
+            .timing_mut()
+            .set_candidate_restrict(restrict_started_at);
         report.set_candidates(candidates.len());
         report.set_parent_restricted_candidates(unrestricted_candidates - candidates.len());
     }
@@ -235,38 +230,48 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     Ok(matched)
 }
 
-/// File count above which a first-time implicit build gets a warning.
-const GUARDRAIL_FILES: usize = 100_000;
+const COLD_BUILD_WAIT: Duration = Duration::from_secs(60 * 60);
+const COLD_PROGRESS_POLL: Duration = Duration::from_millis(100);
 
-/// Warn once, before a first-time index build over an implicit, very large
-/// tree or the home directory, since that silently indexes everything.
-fn warn_large_implicit_build(
-    args: &HiArgs,
-    corpus_root: &Path,
-    index_dir: &Path,
-    snapshot: &manifest::CurrentSnapshot,
-) {
-    if !args.has_implicit_path() || generation::index_present(args, index_dir) {
-        return;
+fn ensure_daemon_index_ready(generation: &Generation, show_progress: bool) -> anyhow::Result<()> {
+    if !runtime::daemon_watch_supported() {
+        bail!("indexed daemon search requires Linux filesystem watch support; use --no-index");
     }
-    if snapshot.files.len() <= GUARDRAIL_FILES && !is_home_dir(corpus_root) {
-        return;
+    let started = Instant::now();
+    let lease = runtime::Lease::new(generation.index_root(), generation.state_root());
+    let mut progress = progress::BuildProgressRenderer::new(show_progress);
+    loop {
+        progress.tick(generation.state_root());
+        if runtime::daemon_autospawn_disabled() && !runtime::daemon_running() {
+            bail!("indexed search needs eg-indexd when daemon autospawn is disabled");
+        }
+        let remaining = COLD_BUILD_WAIT.saturating_sub(started.elapsed());
+        let poll = remaining.min(COLD_PROGRESS_POLL);
+        match runtime::wait_for_freshness_proof(generation.state_root(), poll) {
+            runtime::ProofWait::Ready => {
+                progress.finish();
+                return Ok(());
+            },
+            runtime::ProofWait::DaemonStopped if !runtime::daemon_autospawn_disabled() => {
+                if started.elapsed() < COLD_BUILD_WAIT {
+                    lease.request_refresh()?;
+                    continue;
+                }
+            },
+            runtime::ProofWait::DaemonStopped => {
+                bail!(
+                    "eg-indexd stopped before publishing {}",
+                    generation.index_dir().display()
+                );
+            },
+            runtime::ProofWait::TimedOut if started.elapsed() < COLD_BUILD_WAIT => continue,
+            runtime::ProofWait::TimedOut => {},
+        }
+        bail!(
+            "timed out waiting for daemon-owned index at {}",
+            generation.index_dir().display()
+        );
     }
-    message!(
-        "indexing {} files under {} on first use; pass --no-index to skip the index \
-         or --index-dir DIR to store it elsewhere",
-        snapshot.files.len(),
-        corpus_root.display()
-    );
-}
-
-/// Return true when the path resolves to the user's home directory.
-fn is_home_dir(path: &Path) -> bool {
-    let Some(home) = std::env::var_os("HOME") else {
-        return false;
-    };
-    let canon = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    canon(path) == canon(&std::path::PathBuf::from(home))
 }
 
 const DEBUG_PLAN_PREVIEW_BYTES: usize = 4096;
@@ -330,8 +335,7 @@ fn restrict_candidates(
 ) {
     candidates.retain(|ord| {
         snapshot
-            .files
-            .get(*ord)
+            .file(*ord)
             .is_some_and(|file| roots.contains(args.cwd(), &file.path))
     });
 }

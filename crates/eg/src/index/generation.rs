@@ -8,8 +8,8 @@ use std::{
 use crate::flags::HiArgs;
 
 use super::{
-    backend::CandidateQuery, bench, catalog::ReadyGeneration, config, location::IndexLocation,
-    manifest, planner,
+    backend::CandidateQuery, bench, catalog::ReadyGeneration, location::IndexLocation, manifest,
+    planner,
 };
 
 pub struct Generation {
@@ -47,53 +47,17 @@ impl Generation {
         self.used_parent_index
     }
 
-    pub fn is_cold_build(&self, args: &HiArgs, index_dir: &Path) -> bool {
-        matches!(args.index().mode(), config::IndexMode::Rebuild)
-            || self.source == "cold_build"
-            || !index_present(args, index_dir)
-    }
-
-    pub fn bench_source(&self, args: &HiArgs, cold_build: bool) -> &'static str {
-        if matches!(args.index().mode(), config::IndexMode::Rebuild) {
-            "rebuild"
-        } else if cold_build {
-            "cold_build"
-        } else {
-            self.source
-        }
+    pub const fn source(&self) -> &'static str {
+        self.source
     }
 
     pub fn query(
         &self,
         args: &HiArgs,
-        table_fingerprint: u64,
-        table: &sngram_types::WeightTable,
         snapshot: &manifest::CurrentSnapshot,
-        loaded_manifest: Option<&manifest::Manifest>,
         plan: &planner::IndexPlan,
-        prebuilt_disk_index: bool,
         bench: Option<&mut bench::BenchReport>,
     ) -> anyhow::Result<Option<BTreeSet<usize>>> {
-        CandidateQuery::new(
-            args,
-            table_fingerprint,
-            table,
-            &self.index_dir(),
-            snapshot,
-            loaded_manifest,
-            plan,
-            prebuilt_disk_index,
-            bench,
-        )
-        .run()
+        CandidateQuery::new(args, &self.index_dir(), snapshot, plan, bench).run()
     }
-}
-
-pub fn index_present(args: &HiArgs, index_dir: &Path) -> bool {
-    let manifest = match args.index().backend() {
-        config::IndexBackend::Postings => index_dir.join("postings-v5/manifest.json"),
-        config::IndexBackend::Tantivy => index_dir.join("tantivy-v2/manifest.json"),
-        config::IndexBackend::TantivyRam => return false,
-    };
-    manifest::manifest_present(&manifest)
 }

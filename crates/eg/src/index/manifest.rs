@@ -1,16 +1,17 @@
 //! Index manifest and freshness checks.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, bail};
-use rayon::prelude::*;
+use memmap2::{Mmap, MmapOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::{flags::HiArgs, haystack::Haystack};
@@ -24,10 +25,13 @@ const TANTIVY_COMPAT_VERSION: &str = "0.26.1";
 const MANIFEST_BINARY_MAGIC: &[u8; 8] = b"EGMANI4\0";
 const MANIFEST_BINARY_VERSION: u32 = 4;
 const MANIFEST_BINARY_EXTENSION: &str = "bin";
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-/// Bytes hashed from each end of a file by the content-hash freshness mode.
-const CONTENT_HASH_WINDOW: usize = 8 * 1024;
+const MANIFEST_HEADER_READ_CAP: usize = 4096;
+const PATH_TABLE_FILE_NAME: &str = "paths-v1.bin";
+const PATH_TABLE_MAGIC: &[u8; 8] = b"EGPATH1\0";
+const PATH_TABLE_VERSION: u32 = 1;
+const PATH_TABLE_HEADER_SIZE: usize = 24;
+const PATH_FLAG_EXPLICIT: u8 = 1 << 0;
+const PATH_FLAG_SKIPPED_BINARY: u8 = 1 << 1;
 /// Environment variable forcing the JSON manifest to be written alongside the
 /// binary one, for tooling that reads the human-readable form.
 const JSON_MANIFEST_ENV: &str = "EG_INDEX_JSON_MANIFEST";
@@ -66,11 +70,11 @@ pub fn current_snapshot(
     index_root: &Path,
     haystacks: &[Haystack],
     dir_paths: &[PathBuf],
+    progress: Option<&super::progress::BuildProgress>,
 ) -> anyhow::Result<CurrentSnapshot> {
     let mut hashes = HashSet::with_capacity(haystacks.len());
     let mut files = Vec::with_capacity(haystacks.len());
     let mut dirs = BTreeMap::new();
-    let freshness = args.index().freshness();
     let git_untracked = git_untracked_paths(args, index_root)?;
     for dir in dir_paths {
         insert_dir(
@@ -101,7 +105,7 @@ pub fn current_snapshot(
                 len: metadata.len(),
                 modified_ns: modified_ns(&metadata),
                 changed_ns: changed_ns(&metadata),
-                content_hash: content_freshness_hash(freshness, &absolute, metadata.len()),
+                content_hash: None,
                 explicit: haystack.is_explicit(),
                 git_untracked: is_git_untracked,
                 skipped_binary: super::classify::is_binary_path(&absolute).with_context(|| {
@@ -112,12 +116,15 @@ pub fn current_snapshot(
         if let Some(parent) = absolute.parent() {
             insert_dir(index_root, parent, &mut dirs)?;
         }
+        if let Some(progress) = progress {
+            progress.update_snapshot(haystacks.len(), (ord + 1) as u64);
+        }
     }
     insert_dir(index_root, index_root, &mut dirs)?;
     Ok(CurrentSnapshot {
         walk_fingerprint: args.index_walk_fingerprint(),
         git_freshness: git_untracked.is_some(),
-        files,
+        files: SnapshotFiles::Eager(files),
         dirs: dirs
             .into_values()
             .map(|manifest| CurrentDir { manifest })
@@ -125,72 +132,59 @@ pub fn current_snapshot(
     })
 }
 
-pub fn fast_snapshot(
-    args: &HiArgs,
-    index_root: &Path,
-    manifest: &Manifest,
-) -> anyhow::Result<Option<CurrentSnapshot>> {
-    if manifest.walk_fingerprint != args.index_walk_fingerprint() {
-        return Ok(None);
-    }
-    if manifest.dirs.is_empty() {
-        return Ok(None);
-    }
-    if let Some(snapshot) = git_fast_snapshot(args, index_root, manifest)? {
-        return Ok(Some(snapshot));
-    }
+pub fn snapshot_from_manifest_owned(index_root: &Path, manifest: Manifest) -> CurrentSnapshot {
     let dirs = manifest
         .dirs
-        .par_iter()
-        .map(|dir| current_dir(index_root, dir))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    if dirs
-        .iter()
-        .zip(&manifest.dirs)
-        .any(|(new, old)| new.manifest != *old)
-    {
-        return Ok(None);
-    }
-    let file_pairs = manifest
-        .files
-        .par_iter()
-        .enumerate()
-        .map(|(ord, file)| current_file_from_manifest(args, index_root, ord, file))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    if file_pairs.iter().any(Option::is_none) {
-        return Ok(None);
-    }
-    let mut files = Vec::with_capacity(file_pairs.len());
-    for pair in file_pairs.into_iter().flatten() {
-        files.push(pair);
-    }
-    Ok(Some(CurrentSnapshot {
-        walk_fingerprint: manifest.walk_fingerprint,
-        git_freshness: manifest.git_freshness,
-        files,
-        dirs,
-    }))
-}
-
-pub fn snapshot_from_manifest(index_root: &Path, manifest: &Manifest) -> CurrentSnapshot {
-    let dirs = manifest
-        .dirs
-        .iter()
-        .cloned()
+        .into_iter()
         .map(|manifest| CurrentDir { manifest })
         .collect();
     let files = manifest
         .files
-        .iter()
+        .into_iter()
         .enumerate()
-        .map(|(ord, file)| current_file_from_clean_manifest(ord, index_root, file))
+        .map(|(ord, file)| current_file_from_clean_manifest_owned(ord, index_root, file))
         .collect();
     CurrentSnapshot {
         walk_fingerprint: manifest.walk_fingerprint,
         git_freshness: manifest.git_freshness,
-        files,
+        files: SnapshotFiles::Eager(files),
         dirs,
     }
+}
+
+pub fn read_current_snapshot(
+    path: &Path,
+    index_root: &Path,
+    args: &HiArgs,
+    backend: ManifestBackend,
+    table_fingerprint: u64,
+) -> anyhow::Result<Option<CurrentSnapshot>> {
+    let binary_path = binary_manifest_path(path);
+    let json_exists = path.exists();
+    let binary_exists = binary_path.exists();
+    if binary_exists && (!json_exists || binary_is_fresh(&binary_path, path)) {
+        match read_binary_snapshot(
+            path,
+            &binary_path,
+            index_root,
+            args,
+            backend,
+            table_fingerprint,
+        ) {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(err) => log::debug!(
+                "eg index: binary manifest {} unreadable ({err:#}); falling back to JSON",
+                binary_path.display()
+            ),
+        }
+    }
+    let Some(manifest) = read_manifest(path)? else {
+        return Ok(None);
+    };
+    if !is_filter_compatible(&manifest, args, backend, table_fingerprint) {
+        return Ok(None);
+    }
+    Ok(Some(snapshot_from_manifest_owned(index_root, manifest)))
 }
 
 pub fn manifest_for(
@@ -212,7 +206,7 @@ pub fn manifest_for(
             .map(|dir| dir.manifest.clone())
             .collect(),
         files: snapshot
-            .files
+            .eager_files()
             .iter()
             .map(|file| file.manifest.clone())
             .collect(),
@@ -268,24 +262,154 @@ fn read_binary_manifest(binary_path: &Path) -> anyhow::Result<Manifest> {
     })
 }
 
+fn read_binary_manifest_header(binary_path: &Path) -> anyhow::Result<Option<ManifestHeader>> {
+    let mut file = match fs::File::open(binary_path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let mut bytes = vec![0; MANIFEST_HEADER_READ_CAP];
+    let len = file.read(&mut bytes).with_context(|| {
+        format!(
+            "failed to read binary index manifest {}",
+            binary_path.display()
+        )
+    })?;
+    bytes.truncate(len);
+    ManifestHeader::decode(&bytes).map(Some).with_context(|| {
+        format!(
+            "failed to parse binary index manifest header {}",
+            binary_path.display()
+        )
+    })
+}
+
+fn read_binary_snapshot(
+    manifest_path: &Path,
+    binary_path: &Path,
+    index_root: &Path,
+    args: &HiArgs,
+    backend: ManifestBackend,
+    table_fingerprint: u64,
+) -> anyhow::Result<Option<CurrentSnapshot>> {
+    let Some(header) = read_binary_manifest_header(binary_path)? else {
+        return Ok(None);
+    };
+    if !header.is_filter_compatible(args, backend, table_fingerprint) {
+        return Ok(None);
+    }
+    if let Some(files) = LazyPathFiles::open(&path_table_path(manifest_path), header.file_count)? {
+        return Ok(Some(CurrentSnapshot {
+            walk_fingerprint: header.walk_fingerprint,
+            git_freshness: header.git_freshness,
+            files: SnapshotFiles::PathTable(files),
+            dirs: Vec::new(),
+        }));
+    }
+
+    let bytes = fs::read(binary_path).with_context(|| {
+        format!(
+            "failed to read binary index manifest {}",
+            binary_path.display()
+        )
+    })?;
+    let (header, offsets, skipped) = {
+        let mut reader = BinaryManifestReader {
+            bytes: &bytes,
+            pos: 0,
+        };
+        let header = ManifestHeader::read_from(&mut reader)?;
+        for _ in 0..header.dir_count {
+            reader.skip_string()?;
+            reader.read_option_u64()?;
+            reader.read_option_u64()?;
+        }
+        let mut offsets = Vec::with_capacity(header.file_count);
+        let mut skipped = Vec::with_capacity(header.file_count);
+        for _ in 0..header.file_count {
+            offsets.push(reader.pos);
+            skipped.push(reader.skip_current_file()?);
+        }
+        reader.finish()?;
+        (header, offsets, skipped)
+    };
+    Ok(Some(CurrentSnapshot {
+        walk_fingerprint: header.walk_fingerprint,
+        git_freshness: header.git_freshness,
+        files: SnapshotFiles::Lazy(LazyManifestFiles::new(
+            index_root.to_path_buf(),
+            bytes,
+            offsets,
+            skipped,
+        )),
+        dirs: Vec::new(),
+    }))
+}
+
+struct ManifestHeader {
+    version: u32,
+    schema_version: u32,
+    backend: String,
+    engine_version: String,
+    table_fingerprint: u64,
+    walk_fingerprint: u64,
+    git_freshness: bool,
+    dir_count: usize,
+    file_count: usize,
+}
+
+impl ManifestHeader {
+    fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        let mut reader = BinaryManifestReader { bytes, pos: 0 };
+        Self::read_from(&mut reader)
+    }
+
+    fn read_from(reader: &mut BinaryManifestReader<'_>) -> anyhow::Result<Self> {
+        reader.read_magic()?;
+        let binary_version = reader.read_u32()?;
+        if binary_version != MANIFEST_BINARY_VERSION {
+            bail!("unsupported binary manifest version {binary_version}");
+        }
+        let version = reader.read_u32()?;
+        let schema_version = reader.read_u32()?;
+        let backend = reader.read_string()?;
+        let engine_version = reader.read_string()?;
+        let table_fingerprint = reader.read_u64()?;
+        let walk_fingerprint = reader.read_u64()?;
+        let git_freshness = reader.read_bool()?;
+        let dir_count = reader.read_usize()?;
+        let file_count = reader.read_usize()?;
+        Ok(Self {
+            version,
+            schema_version,
+            backend,
+            engine_version,
+            table_fingerprint,
+            walk_fingerprint,
+            git_freshness,
+            dir_count,
+            file_count,
+        })
+    }
+
+    fn is_filter_compatible(
+        &self,
+        args: &HiArgs,
+        backend: ManifestBackend,
+        table_fingerprint: u64,
+    ) -> bool {
+        self.version == MANIFEST_VERSION
+            && self.schema_version == backend.schema_version()
+            && self.backend == backend.id()
+            && self.engine_version == backend.engine_version()
+            && self.table_fingerprint == table_fingerprint
+            && self.walk_fingerprint == args.index_walk_fingerprint()
+    }
+}
+
 /// Return true when a manifest exists in either the binary or JSON form.
 pub fn manifest_present(path: &Path) -> bool {
     path.exists() || binary_manifest_path(path).exists()
-}
-
-/// Remove both manifest forms, ignoring files that are already gone.
-pub fn remove_manifest(path: &Path) -> anyhow::Result<()> {
-    for candidate in [path.to_path_buf(), binary_manifest_path(path)] {
-        match fs::remove_file(&candidate) {
-            Ok(()) => {},
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("failed to remove manifest {}", candidate.display()));
-            },
-        }
-    }
-    Ok(())
 }
 
 pub fn is_compatible(
@@ -310,6 +434,38 @@ pub fn is_filter_compatible(
         && manifest.walk_fingerprint == args.index_walk_fingerprint()
 }
 
+pub fn manifest_path_is_filter_compatible(
+    path: &Path,
+    args: &HiArgs,
+    backend: ManifestBackend,
+    table_fingerprint: u64,
+) -> anyhow::Result<bool> {
+    let binary_path = binary_manifest_path(path);
+    let json_exists = path.exists();
+    let binary_exists = binary_path.exists();
+    if binary_exists && (!json_exists || binary_is_fresh(&binary_path, path)) {
+        match read_binary_manifest_header(&binary_path) {
+            Ok(Some(header)) => {
+                return Ok(header.is_filter_compatible(args, backend, table_fingerprint));
+            },
+            Ok(None) => return Ok(false),
+            Err(err) => log::debug!(
+                "eg index: binary manifest header {} unreadable ({err:#}); falling back to JSON",
+                binary_path.display()
+            ),
+        }
+    }
+    let Some(manifest) = read_manifest(path)? else {
+        return Ok(false);
+    };
+    Ok(is_filter_compatible(
+        &manifest,
+        args,
+        backend,
+        table_fingerprint,
+    ))
+}
+
 /// Write the manifest, always as binary and, when enabled, also as JSON.
 ///
 /// The full-corpus JSON encode is megabytes on a large corpus and is rewritten
@@ -323,6 +479,52 @@ pub fn write_manifest(path: &Path, manifest: &Manifest) -> anyhow::Result<()> {
             .with_context(|| format!("failed to write index manifest {}", path.display()))?;
     }
     write_binary_manifest(&binary_manifest_path(path), manifest)
+}
+
+pub fn write_path_table(manifest_path: &Path, snapshot: &CurrentSnapshot) -> anyhow::Result<()> {
+    let files = snapshot.eager_files();
+    let mut path_bytes = Vec::new();
+    let mut offsets = Vec::with_capacity(files.len() + 1);
+    let mut flags = Vec::with_capacity(files.len());
+    for file in files {
+        offsets.push(path_bytes.len());
+        let path = file.path.to_string_lossy();
+        path_bytes.extend_from_slice(path.as_bytes());
+        let mut flag = 0u8;
+        if file.is_explicit() {
+            flag |= PATH_FLAG_EXPLICIT;
+        }
+        if file.is_skipped_binary() {
+            flag |= PATH_FLAG_SKIPPED_BINARY;
+        }
+        flags.push(flag);
+    }
+    offsets.push(path_bytes.len());
+
+    let mut bytes = Vec::with_capacity(
+        PATH_TABLE_HEADER_SIZE + offsets.len() * 8 + flags.len() + path_bytes.len(),
+    );
+    bytes.extend_from_slice(PATH_TABLE_MAGIC);
+    write_u32(&mut bytes, PATH_TABLE_VERSION);
+    write_u32(&mut bytes, len_u32(files.len())?);
+    write_u64(
+        &mut bytes,
+        u64::try_from(path_bytes.len()).context("path table too large")?,
+    );
+    for offset in offsets {
+        write_u64(
+            &mut bytes,
+            u64::try_from(offset).context("path table offset too large")?,
+        );
+    }
+    bytes.extend_from_slice(&flags);
+    bytes.extend_from_slice(&path_bytes);
+    write_synced(&path_table_path(manifest_path), &bytes).with_context(|| {
+        format!(
+            "failed to write path table {}",
+            path_table_path(manifest_path).display()
+        )
+    })
 }
 
 /// Return true when the human-readable JSON manifest should also be written.
@@ -382,6 +584,10 @@ fn file_content_changed(old: &ManifestFile, new: &ManifestFile) -> bool {
 
 fn binary_manifest_path(path: &Path) -> PathBuf {
     path.with_extension(MANIFEST_BINARY_EXTENSION)
+}
+
+fn path_table_path(manifest_path: &Path) -> PathBuf {
+    manifest_path.with_file_name(PATH_TABLE_FILE_NAME)
 }
 
 fn binary_is_fresh(binary_path: &Path, json_path: &Path) -> bool {
@@ -452,30 +658,17 @@ fn binary_manifest_capacity(manifest: &Manifest) -> usize {
 
 fn decode_binary_manifest(bytes: &[u8]) -> anyhow::Result<Manifest> {
     let mut reader = BinaryManifestReader { bytes, pos: 0 };
-    reader.read_magic()?;
-    let binary_version = reader.read_u32()?;
-    if binary_version != MANIFEST_BINARY_VERSION {
-        bail!("unsupported binary manifest version {binary_version}");
-    }
-    let version = reader.read_u32()?;
-    let schema_version = reader.read_u32()?;
-    let backend = reader.read_string()?;
-    let engine_version = reader.read_string()?;
-    let table_fingerprint = reader.read_u64()?;
-    let walk_fingerprint = reader.read_u64()?;
-    let git_freshness = reader.read_bool()?;
-    let dir_count = reader.read_usize()?;
-    let file_count = reader.read_usize()?;
-    let mut dirs = Vec::with_capacity(dir_count);
-    for _ in 0..dir_count {
+    let header = ManifestHeader::read_from(&mut reader)?;
+    let mut dirs = Vec::with_capacity(header.dir_count);
+    for _ in 0..header.dir_count {
         dirs.push(ManifestDir {
             path: reader.read_string()?,
             modified_ns: reader.read_option_u64()?,
             changed_ns: reader.read_option_u64()?,
         });
     }
-    let mut files = Vec::with_capacity(file_count);
-    for _ in 0..file_count {
+    let mut files = Vec::with_capacity(header.file_count);
+    for _ in 0..header.file_count {
         files.push(ManifestFile {
             path: reader.read_string()?,
             display_path: reader.read_string()?,
@@ -491,13 +684,13 @@ fn decode_binary_manifest(bytes: &[u8]) -> anyhow::Result<Manifest> {
     }
     reader.finish()?;
     Ok(Manifest {
-        version,
-        schema_version,
-        backend,
-        engine_version,
-        table_fingerprint,
-        walk_fingerprint,
-        git_freshness,
+        version: header.version,
+        schema_version: header.schema_version,
+        backend: header.backend,
+        engine_version: header.engine_version,
+        table_fingerprint: header.table_fingerprint,
+        walk_fingerprint: header.walk_fingerprint,
+        git_freshness: header.git_freshness,
         dirs,
         files,
     })
@@ -535,6 +728,24 @@ fn write_u64(bytes: &mut Vec<u8>, value: u64) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
+#[allow(unsafe_code)]
+fn mmap_file(file: &fs::File, path: &Path) -> anyhow::Result<Mmap> {
+    unsafe { MmapOptions::new().map(file) }
+        .with_context(|| format!("failed to mmap {}", path.display()))
+}
+
+fn read_u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+fn read_u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(
+        bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?,
+    ))
+}
+
 struct BinaryManifestReader<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -557,6 +768,51 @@ impl BinaryManifestReader<'_> {
         let len = self.read_usize()?;
         let bytes = self.read_exact(len)?;
         String::from_utf8(bytes.to_owned()).context("binary manifest string is not valid UTF-8")
+    }
+
+    fn skip_string(&mut self) -> anyhow::Result<()> {
+        let len = self.read_usize()?;
+        self.read_exact(len)?;
+        Ok(())
+    }
+
+    fn read_current_file(&mut self, ord: usize, root: &Path) -> anyhow::Result<CurrentFile> {
+        let mut manifest = ManifestFile {
+            path: self.read_string()?,
+            display_path: self.read_string()?,
+            path_hash: self.read_u64()?,
+            len: self.read_u64()?,
+            modified_ns: self.read_option_u64()?,
+            changed_ns: self.read_option_u64()?,
+            content_hash: self.read_option_u64()?,
+            explicit: self.read_bool()?,
+            git_untracked: self.read_bool()?,
+            skipped_binary: self.read_bool()?,
+        };
+        let display_path = std::mem::take(&mut manifest.display_path);
+        let path = if display_path.is_empty() {
+            root.join(&manifest.path)
+        } else {
+            PathBuf::from(display_path)
+        };
+        Ok(CurrentFile {
+            ord,
+            path,
+            manifest,
+        })
+    }
+
+    fn skip_current_file(&mut self) -> anyhow::Result<bool> {
+        self.skip_string()?;
+        self.skip_string()?;
+        self.read_u64()?;
+        self.read_u64()?;
+        self.read_option_u64()?;
+        self.read_option_u64()?;
+        self.read_option_u64()?;
+        self.read_bool()?;
+        self.read_bool()?;
+        self.read_bool()
     }
 
     fn read_option_u64(&mut self) -> anyhow::Result<Option<u64>> {
@@ -639,182 +895,22 @@ fn insert_dir(
     Ok(())
 }
 
-fn current_dir(root: &Path, old: &ManifestDir) -> anyhow::Result<CurrentDir> {
-    let absolute = root.join(&old.path);
-    let metadata = fs::metadata(&absolute)
-        .with_context(|| format!("failed to stat {} for index freshness", absolute.display()))?;
-    if !metadata.is_dir() {
-        bail!(
-            "indexed directory is no longer a directory: {}",
-            absolute.display()
-        );
-    }
-    Ok(CurrentDir {
-        manifest: ManifestDir {
-            path: old.path.clone(),
-            modified_ns: modified_ns(&metadata),
-            changed_ns: changed_ns(&metadata),
-        },
-    })
-}
-
-fn current_file_from_manifest(
-    args: &HiArgs,
-    root: &Path,
+fn current_file_from_clean_manifest_owned(
     ord: usize,
-    old: &ManifestFile,
-) -> anyhow::Result<Option<CurrentFile>> {
-    let absolute = root.join(&old.path);
-    let metadata = match fs::metadata(&absolute) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!("failed to stat {} for index freshness", absolute.display())
-            });
-        },
-    };
-    if !metadata.is_file() {
-        return Ok(None);
-    }
-    let content_hash = content_freshness_hash(args.index().freshness(), &absolute, metadata.len());
-    let skipped_binary = super::classify::is_binary_path(&absolute).with_context(|| {
-        format!(
-            "failed to classify {} for index freshness",
-            absolute.display()
-        )
-    })?;
-    let path = if old.display_path.is_empty() {
-        absolute
+    root: &Path,
+    mut manifest: ManifestFile,
+) -> CurrentFile {
+    let display_path = std::mem::take(&mut manifest.display_path);
+    let path = if display_path.is_empty() {
+        root.join(&manifest.path)
     } else {
-        PathBuf::from(&old.display_path)
-    };
-    Ok(Some(CurrentFile {
-        ord,
-        path,
-        manifest: ManifestFile {
-            path: old.path.clone(),
-            display_path: old.display_path.clone(),
-            path_hash: old.path_hash,
-            len: metadata.len(),
-            modified_ns: modified_ns(&metadata),
-            changed_ns: changed_ns(&metadata),
-            content_hash,
-            explicit: old.explicit,
-            git_untracked: old.git_untracked,
-            skipped_binary,
-        },
-    }))
-}
-
-fn current_file_from_clean_manifest(ord: usize, root: &Path, old: &ManifestFile) -> CurrentFile {
-    let absolute = root.join(&old.path);
-    let path = if old.display_path.is_empty() {
-        absolute
-    } else {
-        PathBuf::from(&old.display_path)
+        PathBuf::from(display_path)
     };
     CurrentFile {
         ord,
         path,
-        manifest: old.clone(),
+        manifest,
     }
-}
-
-fn git_fast_snapshot(
-    args: &HiArgs,
-    index_root: &Path,
-    manifest: &Manifest,
-) -> anyhow::Result<Option<CurrentSnapshot>> {
-    if !args.index_git_freshness_safe() {
-        return Ok(None);
-    }
-    if !manifest.git_freshness {
-        return Ok(None);
-    }
-    let Some(git_root) = git_root(index_root)? else {
-        return Ok(None);
-    };
-    let manifest_paths = manifest
-        .files
-        .iter()
-        .enumerate()
-        .map(|(ord, file)| (file.path.as_str(), ord))
-        .collect::<HashMap<_, _>>();
-    let manifest_untracked = manifest
-        .files
-        .iter()
-        .filter(|file| file.git_untracked)
-        .map(|file| file.path.clone())
-        .collect::<HashSet<_>>();
-    let dirty = git_status_paths(&git_root)?;
-    let mut dirty_manifest_paths = HashSet::new();
-    let mut current_untracked = HashSet::new();
-    for path in dirty {
-        let Some(relative) = git_relative_to_index_relative(&git_root, index_root, &path) else {
-            continue;
-        };
-        if is_eg_state_path(&relative) {
-            continue;
-        }
-        let Some(&ord) = manifest_paths.get(relative.as_str()) else {
-            return Ok(None);
-        };
-        if is_ignore_control_path(&relative) {
-            return Ok(None);
-        }
-        if manifest
-            .files
-            .get(ord)
-            .is_some_and(|file| file.git_untracked)
-        {
-            current_untracked.insert(relative.clone());
-        }
-        dirty_manifest_paths.insert(relative);
-    }
-    if current_untracked != manifest_untracked {
-        return Ok(None);
-    }
-
-    let mut changed = HashMap::with_capacity(dirty_manifest_paths.len());
-    for path in &dirty_manifest_paths {
-        let Some(&ord) = manifest_paths.get(path.as_str()) else {
-            return Ok(None);
-        };
-        let Some(old) = manifest.files.get(ord) else {
-            return Ok(None);
-        };
-        let Some(file) = current_file_from_manifest(args, index_root, ord, old)? else {
-            return Ok(None);
-        };
-        changed.insert(ord, file);
-    }
-
-    let dirs = manifest
-        .dirs
-        .iter()
-        .cloned()
-        .map(|manifest| CurrentDir { manifest })
-        .collect();
-    let mut files = Vec::with_capacity(manifest.files.len());
-    for (ord, old) in manifest.files.iter().enumerate() {
-        files.push(
-            changed
-                .remove(&ord)
-                .unwrap_or_else(|| current_file_from_clean_manifest(ord, index_root, old)),
-        );
-    }
-    log::debug!(
-        "eg index: git freshness snapshot dirty={} untracked={}",
-        dirty_manifest_paths.len(),
-        manifest_untracked.len()
-    );
-    Ok(Some(CurrentSnapshot {
-        walk_fingerprint: manifest.walk_fingerprint,
-        git_freshness: manifest.git_freshness,
-        files,
-        dirs,
-    }))
 }
 
 fn git_untracked_paths(
@@ -883,32 +979,6 @@ fn git_paths(git_root: &Path, args: &[&str]) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-fn git_status_paths(git_root: &Path) -> anyhow::Result<Vec<String>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(git_root)
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .output()
-        .context("failed to run git status for index freshness")?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    let mut paths = Vec::new();
-    let mut fields = output.stdout.split(|byte| *byte == 0).peekable();
-    while let Some(field) = fields.next() {
-        let (Some(status), Some(path)) = (field.get(..2), field.get(3..)) else {
-            continue;
-        };
-        if !path.is_empty() {
-            paths.push(String::from_utf8_lossy(path).into_owned());
-        }
-        if matches!(status, b"R " | b" R" | b"RR" | b"C " | b" C") {
-            let _ = fields.next();
-        }
-    }
-    Ok(paths)
-}
-
 fn git_relative_to_index_relative(
     git_root: &Path,
     index_root: &Path,
@@ -918,13 +988,6 @@ fn git_relative_to_index_relative(
     absolute
         .starts_with(index_root)
         .then(|| relative_path(index_root, &absolute))
-}
-
-fn is_ignore_control_path(relative: &str) -> bool {
-    relative
-        .rsplit('/')
-        .next()
-        .is_some_and(|name| matches!(name, ".gitignore" | ".ignore" | ".rgignore"))
 }
 
 fn is_eg_state_path(relative: &str) -> bool {
@@ -946,52 +1009,6 @@ fn path_hash(path: &str) -> u64 {
         })
 }
 
-fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
-    for &byte in bytes {
-        hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
-/// Content hash for hash freshness, or `None` for stat freshness.
-fn content_freshness_hash(
-    freshness: super::config::IndexFreshness,
-    path: &Path,
-    len: u64,
-) -> Option<u64> {
-    if freshness.is_hash() {
-        content_hash(path, len)
-    } else {
-        None
-    }
-}
-
-/// Fast content hash over the length plus the file's head and tail windows.
-///
-/// This catches same-stat mutations that touch either end of the file; a
-/// change confined to the interior of a file larger than both windows is not
-/// detected, matching the documented first/last-window trade-off. A read
-/// failure yields `None`, which falls back to stat comparison.
-fn content_hash(path: &Path, len: u64) -> Option<u64> {
-    let mut file = fs::File::open(path).ok()?;
-    let hash = fnv1a(FNV_OFFSET, &len.to_le_bytes());
-    if len == 0 {
-        return Some(hash);
-    }
-    let window = CONTENT_HASH_WINDOW as u64;
-    if len <= 2 * window {
-        let mut body = vec![0u8; usize::try_from(len).ok()?];
-        file.read_exact(&mut body).ok()?;
-        return Some(fnv1a(hash, &body));
-    }
-    let mut buf = vec![0u8; CONTENT_HASH_WINDOW];
-    file.read_exact(&mut buf).ok()?;
-    let hash = fnv1a(hash, &buf);
-    file.seek(SeekFrom::Start(len - window)).ok()?;
-    file.read_exact(&mut buf).ok()?;
-    Some(fnv1a(hash, &buf))
-}
-
 fn modified_ns(metadata: &fs::Metadata) -> Option<u64> {
     let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
     u64::try_from(duration.as_nanos()).ok()
@@ -1011,6 +1028,7 @@ fn changed_ns(_metadata: &fs::Metadata) -> Option<u64> {
     None
 }
 
+#[derive(Clone)]
 pub struct CurrentFile {
     pub ord: usize,
     pub path: PathBuf,
@@ -1038,14 +1056,209 @@ pub struct CurrentDir {
 pub struct CurrentSnapshot {
     walk_fingerprint: u64,
     git_freshness: bool,
-    pub files: Vec<CurrentFile>,
+    files: SnapshotFiles,
     dirs: Vec<CurrentDir>,
 }
 
-impl Manifest {
-    /// Number of files recorded in this manifest.
+impl CurrentSnapshot {
     pub fn file_count(&self) -> usize {
         self.files.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.file_count() == 0
+    }
+
+    pub fn binary_skipped_count(&self) -> usize {
+        self.files.binary_skipped_count()
+    }
+
+    pub fn file(&self, ord: usize) -> Option<CurrentFile> {
+        self.files.file(ord)
+    }
+
+    pub fn ordinals(&self) -> std::ops::Range<usize> {
+        0..self.file_count()
+    }
+
+    pub fn eager_files(&self) -> &[CurrentFile] {
+        self.files
+            .eager()
+            .expect("index build snapshots must be eager")
+    }
+}
+
+enum SnapshotFiles {
+    Eager(Vec<CurrentFile>),
+    Lazy(LazyManifestFiles),
+    PathTable(LazyPathFiles),
+}
+
+impl SnapshotFiles {
+    fn len(&self) -> usize {
+        match self {
+            Self::Eager(files) => files.len(),
+            Self::Lazy(files) => files.len(),
+            Self::PathTable(files) => files.len(),
+        }
+    }
+
+    fn binary_skipped_count(&self) -> usize {
+        match self {
+            Self::Eager(files) => files.iter().filter(|file| file.is_skipped_binary()).count(),
+            Self::Lazy(files) => files.binary_skipped_count(),
+            Self::PathTable(files) => files.binary_skipped_count(),
+        }
+    }
+
+    fn file(&self, ord: usize) -> Option<CurrentFile> {
+        match self {
+            Self::Eager(files) => files.get(ord).cloned(),
+            Self::Lazy(files) => files.file(ord),
+            Self::PathTable(files) => files.file(ord),
+        }
+    }
+
+    fn eager(&self) -> Option<&[CurrentFile]> {
+        match self {
+            Self::Eager(files) => Some(files),
+            Self::Lazy(_) | Self::PathTable(_) => None,
+        }
+    }
+}
+
+struct LazyPathFiles {
+    bytes: Arc<Mmap>,
+    count: usize,
+    flags_start: usize,
+    paths_start: usize,
+}
+
+impl LazyPathFiles {
+    fn open(path: &Path, expected_count: usize) -> anyhow::Result<Option<Self>> {
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let mmap = mmap_file(&file, path)?;
+        let Some(table) = Self::from_mmap(mmap, expected_count) else {
+            return Ok(None);
+        };
+        Ok(Some(table))
+    }
+
+    fn from_mmap(mmap: Mmap, expected_count: usize) -> Option<Self> {
+        let bytes = Arc::new(mmap);
+        if bytes.get(..PATH_TABLE_MAGIC.len())? != PATH_TABLE_MAGIC {
+            return None;
+        }
+        if read_u32_at(&bytes, 8)? != PATH_TABLE_VERSION {
+            return None;
+        }
+        let count = usize::try_from(read_u32_at(&bytes, 12)?).ok()?;
+        if count != expected_count {
+            return None;
+        }
+        let path_bytes_len = usize::try_from(read_u64_at(&bytes, 16)?).ok()?;
+        let offsets_len = count.checked_add(1)?.checked_mul(8)?;
+        let flags_start = PATH_TABLE_HEADER_SIZE.checked_add(offsets_len)?;
+        let paths_start = flags_start.checked_add(count)?;
+        let expected_len = paths_start.checked_add(path_bytes_len)?;
+        if bytes.len() != expected_len {
+            return None;
+        }
+        let last_offset =
+            usize::try_from(read_u64_at(&bytes, PATH_TABLE_HEADER_SIZE + count * 8)?).ok()?;
+        if last_offset != path_bytes_len {
+            return None;
+        }
+        Some(Self {
+            bytes,
+            count,
+            flags_start,
+            paths_start,
+        })
+    }
+
+    const fn len(&self) -> usize {
+        self.count
+    }
+
+    fn binary_skipped_count(&self) -> usize {
+        self.bytes[self.flags_start..self.paths_start]
+            .iter()
+            .filter(|&&flag| flag & PATH_FLAG_SKIPPED_BINARY != 0)
+            .count()
+    }
+
+    fn file(&self, ord: usize) -> Option<CurrentFile> {
+        if ord >= self.count {
+            return None;
+        }
+        let start = self.path_offset(ord)?;
+        let end = self.path_offset(ord + 1)?;
+        let path_bytes = self
+            .bytes
+            .get(self.paths_start + start..self.paths_start + end)?;
+        let path = String::from_utf8_lossy(path_bytes).into_owned();
+        let flag = *self.bytes.get(self.flags_start + ord)?;
+        Some(CurrentFile {
+            ord,
+            path: PathBuf::from(&path),
+            manifest: ManifestFile {
+                path,
+                display_path: String::new(),
+                path_hash: 0,
+                len: 0,
+                modified_ns: None,
+                changed_ns: None,
+                content_hash: None,
+                explicit: flag & PATH_FLAG_EXPLICIT != 0,
+                git_untracked: false,
+                skipped_binary: flag & PATH_FLAG_SKIPPED_BINARY != 0,
+            },
+        })
+    }
+
+    fn path_offset(&self, ord: usize) -> Option<usize> {
+        let offset_start = PATH_TABLE_HEADER_SIZE.checked_add(ord.checked_mul(8)?)?;
+        usize::try_from(read_u64_at(&self.bytes, offset_start)?).ok()
+    }
+}
+
+struct LazyManifestFiles {
+    root: PathBuf,
+    bytes: Arc<[u8]>,
+    offsets: Vec<usize>,
+    skipped: Vec<bool>,
+}
+
+impl LazyManifestFiles {
+    fn new(root: PathBuf, bytes: Vec<u8>, offsets: Vec<usize>, skipped: Vec<bool>) -> Self {
+        Self {
+            root,
+            bytes: bytes.into(),
+            offsets,
+            skipped,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    fn binary_skipped_count(&self) -> usize {
+        self.skipped.iter().filter(|&&skipped| skipped).count()
+    }
+
+    fn file(&self, ord: usize) -> Option<CurrentFile> {
+        let offset = *self.offsets.get(ord)?;
+        let mut reader = BinaryManifestReader {
+            bytes: &self.bytes,
+            pos: offset,
+        };
+        reader.read_current_file(ord, &self.root).ok()
     }
 }
 
@@ -1185,8 +1398,8 @@ mod tests {
             Path::new("/idx/manifest.bin")
         );
         assert_eq!(
-            binary_manifest_path(Path::new("/idx/delta-manifest.json")),
-            Path::new("/idx/delta-manifest.bin")
+            binary_manifest_path(Path::new("/idx/alternate-manifest.json")),
+            Path::new("/idx/alternate-manifest.bin")
         );
     }
 

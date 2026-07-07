@@ -159,7 +159,7 @@ impl GramNeedle {
 
     fn sort_keys_by_df(&mut self, df: &dyn DfStats) {
         if let Self::AnyKey(keys) = self {
-            keys.sort_by_key(|&key| df.entry_count(key));
+            keys.sort_by_cached_key(|&key| df.entry_count(key));
             keys.dedup();
         }
     }
@@ -244,6 +244,8 @@ pub trait DfStats {
 }
 
 impl PlanExpr {
+    const MAX_ALL_OF_GRAMS: usize = 3;
+
     fn tune(&mut self, df: &dyn DfStats, stop_df: u64) {
         match self {
             Self::All | Self::None => {},
@@ -273,7 +275,8 @@ impl PlanExpr {
         let mut kept = 0usize;
         grams.retain(|g| {
             kept += 1;
-            (keep_first && kept == 1) || g.estimate_candidates(df) < stop_df
+            ((keep_first && kept == 1) || g.estimate_candidates(df) < stop_df)
+                && kept <= Self::MAX_ALL_OF_GRAMS
         });
     }
 
@@ -281,7 +284,7 @@ impl PlanExpr {
         for needle in grams.iter_mut() {
             needle.sort_keys_by_df(df);
         }
-        grams.sort_by_key(|g| g.estimate_candidates(df));
+        grams.sort_by_cached_key(|g| g.estimate_candidates(df));
     }
 
     fn tune_children(children: &mut [Self], df: &dyn DfStats, stop_df: u64) {
@@ -487,6 +490,45 @@ mod tests {
         assert_eq!(estimate_candidates(&or, &df), 903);
         assert_eq!(estimate_candidates(&PlanExpr::All, &df), 1000);
         assert_eq!(estimate_candidates(&PlanExpr::None, &df), 0);
+    }
+
+    #[test]
+    fn tuning_caps_all_of_grams_to_rarest_few() {
+        let df = df_of(
+            &[
+                (key(1), 10),
+                (key(2), 20),
+                (key(3), 30),
+                (key(4), 40),
+                (key(5), 50),
+            ],
+            1000,
+        );
+        let mut plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![
+                GramNeedle::Key(key(5)),
+                GramNeedle::Key(key(4)),
+                GramNeedle::Key(key(3)),
+                GramNeedle::Key(key(2)),
+                GramNeedle::Key(key(1)),
+            ],
+            needs: vec![],
+            children: vec![],
+        });
+
+        plan.tune(&df, 500);
+
+        let PlanExpr::AllOf { grams, .. } = plan.root() else {
+            panic!("tuned plan must stay AllOf");
+        };
+        assert_eq!(
+            grams,
+            &[
+                GramNeedle::Key(key(1)),
+                GramNeedle::Key(key(2)),
+                GramNeedle::Key(key(3)),
+            ]
+        );
     }
 
     fn estimate_candidates(expr: &PlanExpr, df: &dyn DfStats) -> u64 {
