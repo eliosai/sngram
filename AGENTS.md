@@ -60,7 +60,7 @@ uv sync
 uv run pytest
 uv run sngram train --limit 1GB
 uv run sngram train --mint-dir ./bins
-uv run sngram inspect bins/5tb_weights.bin
+uv run sngram inspect bins/final_weights.bin
 ```
 
 ### `eg`
@@ -137,14 +137,14 @@ target/release/eg --no-index PATTERN PATH
 rg PATTERN PATH
 ```
 
-`--bench PATTERN PATH` emits one structured JSON report for the indexed path. Bare `--bench` runs the embedded high-false-positive TSV suite in `crates/eg/src/index/data/fp-queries.tsv` and compares indexed search with `--no-index` and `rg` when available.
+`--bench PATTERN PATH` emits one structured JSON report for the indexed path, ending with a `comparison` block that re-runs the query through `--no-index` and `rg`. Bare `--bench` runs the embedded high-false-positive TSV suite in `crates/eg/src/index/data/fp-queries.tsv` and compares indexed search with `--no-index` and `rg` when available.
 
 Library benches:
 
 ```sh
-cargo bench --manifest-path crates/lib/benches/Cargo.toml --bench extract
-cargo bench --manifest-path crates/lib/benches/Cargo.toml --bench query
-cargo bench --manifest-path crates/lib/benches/Cargo.toml --bench counter
+cargo bench -p sngram-benches --bench extract
+cargo bench -p sngram-benches --bench query
+cargo bench -p sngram-benches --bench counter
 ```
 
 Report command lines with results. For hot-path claims, compare indexed `eg`, `eg --no-index`, and `rg` on the same corpus and output mode.

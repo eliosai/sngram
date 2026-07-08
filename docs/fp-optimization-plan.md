@@ -182,8 +182,9 @@ adversarial design round. Measured findings that shaped it:
   postings.bin prologue; lists under 16 postings stay raw.
 
 Measured on linux (93,610 docs, 1.59GB text): FP 28.92 → 27.76, index
-2.24GB → 1.46GB (ratio 1.42 → 0.92), FN=0, speedup 2.4x. Per file:
-table 839 → 344MB, postings 1356 → 1019MB, summaries 37 → 21MB.
+2.24GB → 1.42GB (ratio 1.42 → 0.90), FN=0, speedup 2.4x. Per file:
+table 839 → 307MB (df=1 records drop their constant count byte behind a
+per-block inline bitmap), postings 1356 → 1019MB, summaries 37 → 21MB.
 
 Rejected with reasons:
 
@@ -209,7 +210,7 @@ Rejected with reasons:
 | metric | baseline | endline |
 |---|---|---|
 | linux aggregate FP | 38.06% | 27.76% |
-| linux index bytes | 7.0GB (ratio 4.4) | 1.46GB (ratio 0.92) |
+| linux index bytes | 7.0GB (ratio 4.4) | 1.42GB (ratio 0.90) |
 | linux suite speedup | 1.55x scan / 1.49x rg | 2.4x / 2.4x |
 | guard (gitoxide) FP | 49.8% | 35.51% |
 | guard index ratio | 5.12 | 1.13 |
