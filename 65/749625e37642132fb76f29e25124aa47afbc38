@@ -1,0 +1,30 @@
+python/sngram/__init__.py
+  s_f911a7f11fb798::t_84ca3c5a8ef6b1 9,33,47
+crates/python/src/lib.rs
+  s_f911a7f11fb798::t_84ca3c5a8ef6b1 65-70,76-83,360
+.github/workflows/ci.yml
+  s_f911a7f11fb798::t_15ddf51143c426 1-64
+python/tests/test_core.py
+  s_f911a7f11fb798::t_960e85d33a5508 32-38
+  s_f911a7f11fb798::t_9543a4fa9b172a 46-48,56,58-60,83-85
+crates/python/Cargo.toml
+  s_f911a7f11fb798::t_84ca3c5a8ef6b1 18
+Cargo.lock
+  s_f911a7f11fb798::t_01e74513e5b275 1538
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "65749625e37642132fb76f29e25124aa47afbc38",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
