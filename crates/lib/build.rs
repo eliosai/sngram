@@ -1,4 +1,4 @@
-//! Build-time validation for the embedded weight table.
+//! Build-time validation for embedded weight tier tables
 
 #![allow(
     clippy::expect_used,
@@ -8,20 +8,23 @@
 
 use std::{env, fs, path::PathBuf};
 
-const TABLE_PATH: &str = "data/final_weights.bin";
+const TIERS: &[&str] = &["12tb"];
 
 fn main() {
-    println!("cargo::rerun-if-changed={TABLE_PATH}");
-    if env::var_os("CARGO_FEATURE_PRODUCTION").is_some() {
-        validate();
+    for tier in TIERS {
+        let path = format!("data/{tier}_weights.bin");
+        println!("cargo::rerun-if-changed={path}");
+        if env::var_os(format!("CARGO_FEATURE_{}", tier.to_uppercase())).is_some() {
+            validate(&path);
+        }
     }
 }
 
-fn validate() {
+fn validate(relative: &str) {
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
     );
-    let path = manifest_dir.join(TABLE_PATH);
+    let path = manifest_dir.join(relative);
     let bytes =
         fs::read(&path).unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     sngram_types::WeightTable::from_bytes(&bytes)

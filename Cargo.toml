@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/types", "crates/lib", "crates/lib/benches", "crates/weights", "crates/python", "crates/eg"]
+members = ["crates/types", "crates/lib", "crates/lib/benches", "crates/python", "crates/eg"]
 
 [workspace.package]
 version = "0.5.0"
@@ -20,7 +20,6 @@ strip = true
 # Internal
 sngram-types = { version = "0.5.0", path = "crates/types" }
 sngram = { version = "0.5.0", path = "crates/lib" }
-sngram-weights = { version = "0.5.0", path = "crates/weights" }
 
 # Types / zero-copy
 crc32fast = "1.5"

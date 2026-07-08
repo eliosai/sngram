@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "sngram"
 version = "0.5.0"
-description = "Sparse n-gram extraction and regex query planning over trained byte-pair weight tables"
+description = "A sparse ngram library with trained weight tables"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -14,8 +14,8 @@ keywords = ["ngram", "regex", "search", "code-search", "index"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Programming Language :: Python :: 3",
     "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
     "Topic :: Text Processing :: Indexing",
 ]
 dependencies = []
@@ -27,7 +27,7 @@ Repository = "https://github.com/eliosai/sngram"
 manifest-path = "Cargo.toml"
 module-name = "sngram._core"
 python-source = "."
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "12tb"]
 
 [dependency-groups]
 dev = [

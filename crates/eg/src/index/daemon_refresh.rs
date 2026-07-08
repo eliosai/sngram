@@ -20,7 +20,7 @@ pub fn run(args: &HiArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let table = sngram_weights::weights();
+    let table = sngram::weights();
     let table_fingerprint = table.fingerprint();
     let roots = SearchRoots::from_args(args)?;
     let catalog = GenerationCatalog::open(args, table_fingerprint);

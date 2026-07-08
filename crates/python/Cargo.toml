@@ -15,11 +15,16 @@ crate-type = ["cdylib"]
 [dependencies]
 sngram = { workspace = true, features = ["learn"] }
 sngram-types = { workspace = true }
-sngram-weights = { workspace = true, features = ["production"] }
 
 pyo3 = { version = "0.28", features = ["abi3-py310"] }
 arrow-array = { version = "59", features = ["ffi"] }
 arrow-schema = "59"
+
+[features]
+default = []
+
+# weight tier features forwarded to the core library
+"12tb" = ["sngram/12tb"]
 
 [lints]
 workspace = true

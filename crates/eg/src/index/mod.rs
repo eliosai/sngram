@@ -123,7 +123,7 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
             args.index().backend()
         );
     }
-    let table = sngram_weights::weights();
+    let table = sngram::weights();
     let table_fingerprint = table.fingerprint();
     let plan_started_at = Instant::now();
     let plan = match planner::QueryPlanner::new(args, &table).plan() {
