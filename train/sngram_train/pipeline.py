@@ -505,6 +505,9 @@ class WorkerState:
 
     task: str = "idle"
     shard_bytes: int = 0
+    mint_counter: object = field(default_factory=sngram.BigramCounter)
+    mint_lock: threading.Lock = field(default_factory=threading.Lock)
+    mint_bytes: int = 0
     started: float = 0.0
     last_progress: float = field(default_factory=time.monotonic)
     stalled: bool = False
@@ -1303,6 +1306,30 @@ class Trainer:
             )
         ws.last_progress = now
 
+    def _publish_batch(
+        self, ws: WorkerState, sid: str, counter, bytes_counted: int
+    ) -> None:
+        if bytes_counted <= 0:
+            return
+        ws.shard_bytes += bytes_counted
+        self._note_worker_progress(ws, sid)
+        with ws.mint_lock:
+            ws.mint_counter.merge(counter)
+            ws.mint_bytes += bytes_counted
+        with self._lock:
+            self.in_flight_bytes += bytes_counted
+
+    def _set_mint_preview(self, ws: WorkerState, counter, bytes_counted: int) -> None:
+        fresh = sngram.BigramCounter()
+        if bytes_counted > 0:
+            fresh.merge(counter)
+        with ws.mint_lock:
+            ws.mint_counter = fresh
+            ws.mint_bytes = max(bytes_counted, 0)
+
+    def _reset_mint_preview(self, ws: WorkerState) -> None:
+        self._set_mint_preview(ws, None, 0)
+
     def _remaining_cap_for_worker(self, task: ShardTask, ws: WorkerState) -> int | None:
         with self._merge_lock:
             remaining = self._remaining_cap_locked(task)
@@ -1442,12 +1469,9 @@ class Trainer:
                                 batch, remaining
                             )
                             uncommitted += n
-                            ws.shard_bytes += n
-                            self._note_worker_progress(ws, sid)
-                            with self._lock:
-                                self.in_flight_bytes += n
                             if n:
                                 rg_counter.merge(batch_counter)
+                                self._publish_batch(ws, sid, batch_counter, n)
                             if capped:
                                 cap_stop = True
                                 break
@@ -1473,6 +1497,7 @@ class Trainer:
                     with self._lock:
                         self.in_flight_bytes -= uncommitted
                     ws.shard_bytes -= uncommitted
+                    self._set_mint_preview(ws, file_counter, ws.shard_bytes)
                     uncommitted = 0
                 self._bump("errors")
                 kind = classify_error(e)
@@ -1682,11 +1707,8 @@ class Trainer:
                     batch_counter, n, capped = self._count_arrow_with_cap(tbl, remaining)
                     if n:
                         file_counter.merge(batch_counter)
-                    ws.shard_bytes += n
                     stats["accepted_bytes"] += n
-                    self._note_worker_progress(ws, sid)
-                    with self._lock:
-                        self.in_flight_bytes += n
+                    self._publish_batch(ws, sid, batch_counter, n)
                     texts.clear()
                     text_bytes = 0
                     return capped
@@ -1943,10 +1965,7 @@ class Trainer:
                         batch_counter, n, capped = self._count_arrow_with_cap(tbl, remaining)
                         if n:
                             file_counter.merge(batch_counter)
-                        ws.shard_bytes += n
-                        self._note_worker_progress(ws, sid)
-                        with self._lock:
-                            self.in_flight_bytes += n
+                            self._publish_batch(ws, sid, batch_counter, n)
                         batch.clear()
                         batch_bytes = 0
                         return capped
@@ -2028,7 +2047,7 @@ class Trainer:
                 self.state.source_done[task.source.id] = (
                     self.state.source_done.get(task.source.id, 0) + 1
                 )
-        self._drop_in_flight(ws)
+            self._drop_in_flight(ws)
         task.accounted = True
         if skipped_for_cap:
             self._mark_family_failed(task.source.family)
@@ -2065,8 +2084,10 @@ class Trainer:
         )
 
     def _drop_in_flight(self, ws: WorkerState) -> None:
+        bytes_counted = ws.shard_bytes
+        self._reset_mint_preview(ws)
         with self._lock:
-            self.in_flight_bytes -= ws.shard_bytes
+            self.in_flight_bytes -= bytes_counted
         ws.shard_bytes = 0
 
     def _maybe_trim_memory(self, stage: str, shard: str | None = None) -> None:
@@ -2217,22 +2238,32 @@ class Trainer:
     # ------------------------------------------------------------- minting
 
     def _mint_if_due(self) -> None:
-        while self.thresholds and self.durable_bytes() >= self.thresholds[0]:
+        while self.thresholds and self.total_bytes() >= self.thresholds[0]:
             threshold = self.thresholds.pop(0)
             self._mint(mint_label(threshold))
             self._checkpoint()
+
+    def _mint_counter(self):
+        counter = sngram.BigramCounter()
+        with self._merge_lock:
+            counter.merge(self.counter)
+            durable_bytes = self.counter.bytes_processed
+            preview_bytes = 0
+            for ws in self.worker_state:
+                with ws.mint_lock:
+                    if ws.mint_bytes:
+                        counter.merge(ws.mint_counter)
+                        preview_bytes += ws.mint_bytes
+        return counter, durable_bytes, preview_bytes
 
     def _mint(self, label: str) -> None:
         if label in self.state.mints_done:
             return
         path = self.mint_dir / f"{label}_weights.bin"
         self.mint_dir.mkdir(parents=True, exist_ok=True)
-        with self._merge_lock:
-            # under the merge lock the table and its count snapshot are a
-            # consistent (total, counts) cut; a mint during a half-applied
-            # merge would silently skew both
-            table = self.counter.to_table_bytes()
-            counts = metrics.counts_from_snapshot(self.counter.snapshot())
+        mint_counter, durable_bytes, preview_bytes = self._mint_counter()
+        table = mint_counter.to_table_bytes()
+        counts = metrics.counts_from_snapshot(mint_counter.snapshot())
         tmp = path.with_suffix(".bin.tmp")
         tmp.write_bytes(table)
         os.replace(tmp, path)
@@ -2245,8 +2276,9 @@ class Trainer:
             self.last_kl = kl
         self.state.last_mint_counts = counts
         self.events.log(
-            "mint", label=label, path=str(path), bytes=self.durable_bytes(),
-            pairs=self.counter.pairs_processed,
+            "mint", label=label, path=str(path), bytes=mint_counter.bytes_processed,
+            durable_bytes=durable_bytes, in_flight_bytes=preview_bytes,
+            pairs=mint_counter.pairs_processed,
             kl_from_prev=round(kl, 6) if kl is not None else None,
         )
 
