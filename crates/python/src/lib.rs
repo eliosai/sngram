@@ -62,8 +62,22 @@ impl PyWeightTable {
         self.inner.version()
     }
 
+    /// Stable table identity hash.
+    #[getter]
+    fn fingerprint(&self) -> u64 {
+        self.inner.fingerprint()
+    }
+
     fn __repr__(&self) -> String {
         format!("WeightTable(version={})", self.inner.version())
+    }
+}
+
+/// The embedded production weight table.
+#[pyfunction]
+fn weights() -> PyWeightTable {
+    PyWeightTable {
+        inner: sngram_weights::weights(),
     }
 }
 
@@ -343,6 +357,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWeightTable>()?;
     m.add_class::<PyQueryPlan>()?;
     m.add_class::<PyBigramCounter>()?;
+    m.add_function(wrap_pyfunction!(weights, m)?)?;
     m.add_function(wrap_pyfunction!(scan, m)?)?;
     m.add_function(wrap_pyfunction!(scan_hashes, m)?)?;
     m.add_function(wrap_pyfunction!(gram_hash, m)?)?;

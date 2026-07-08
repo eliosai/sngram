@@ -1535,6 +1535,7 @@ dependencies = [
  "pyo3",
  "sngram",
  "sngram-types",
+ "sngram-weights",
 ]
 
 [[package]]

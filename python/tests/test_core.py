@@ -29,6 +29,13 @@ def test_trained_table_loads(table):
     assert table.weight(ord("f"), ord("n")) > 0
 
 
+def test_embedded_production_table_loads():
+    table = sngram.weights()
+    assert table.fingerprint != 0
+    keys = sngram.scan_hashes(table, b"fn main() { let x = foo_bar(42); }")
+    assert len(keys) > 0
+
+
 def test_scan_and_scan_hashes_agree(table):
     doc = b"pub async fn read_content(hash: Hash) -> Result<Bytes, Error> {}"
     triples = sngram.scan(table, doc)
@@ -36,7 +43,9 @@ def test_scan_and_scan_hashes_agree(table):
     assert len(triples) == len(keys) > 0
     for (start, end, h), k in zip(triples, keys):
         assert h == k
-        assert 3 <= end - start <= 100
+        # sentinel-bracketed grams may span fewer than 3 content bytes
+        assert 1 <= end - start <= 16
+        assert end <= len(doc)
 
 
 def test_scan_deterministic(table):
@@ -44,9 +53,11 @@ def test_scan_deterministic(table):
     assert sngram.scan(table, doc) == sngram.scan(table, doc)
 
 
-def test_scan_short_inputs_empty(table):
+def test_scan_short_inputs(table):
     assert sngram.scan(table, b"") == []
-    assert sngram.scan(table, b"ab") == []
+    # short inputs still index through sentinel-bracketed grams
+    short = sngram.scan(table, b"ab")
+    assert all(end <= 2 for (_, end, _) in short)
 
 
 def test_query_literal_is_and(table):
@@ -69,7 +80,9 @@ def test_query_broad_and_impossible(table):
 
 def test_query_alternation_has_structure(table):
     plan = sngram.query(table, "(a+hello|b+world)")
-    assert plan.op == "or"
+    # root scan-needs wrap the alternation in an "and"
+    assert plan.op == "and"
+    assert any(child.op == "or" for child in plan.children)
     assert "QueryPlan(" in repr(plan)
 
 

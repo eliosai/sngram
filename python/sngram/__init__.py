@@ -6,7 +6,7 @@ training pipeline (``sngram train``) on top.
 Index side::
 
     import sngram
-    table = sngram.WeightTable.from_path("crates/weights/data/5tb_weights.bin")
+    table = sngram.weights()                             # embedded production table
     keys = sngram.scan_hashes(table, b"fn main() {}")   # little-endian u64s
     # numpy view, zero-copy: np.frombuffer(keys, dtype=np.uint64)
 
@@ -30,6 +30,7 @@ from sngram._core import (
     query,
     scan,
     scan_hashes,
+    weights,
 )
 
 __version__ = "0.5.0"
@@ -43,4 +44,5 @@ __all__ = [
     "query",
     "scan",
     "scan_hashes",
+    "weights",
 ]
