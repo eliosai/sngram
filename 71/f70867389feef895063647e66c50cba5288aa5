@@ -1,0 +1,54 @@
+crates/eg/src/index/backend.rs
+  s_f911a7f11fb798::t_3b7fa82d6c1ba4 49
+crates/eg/src/index/manifest.rs
+  s_f911a7f11fb798::t_3b7fa82d6c1ba4 21
+crates/eg/src/index/catalog.rs
+  s_f911a7f11fb798::t_3b7fa82d6c1ba4 88
+crates/lib/src/query/analyze.rs
+  s_f911a7f11fb798::t_70a0bf4c9f6573 914
+crates/eg/src/flags/hiargs.rs
+  s_f911a7f11fb798::t_b44c4e0197d61a 396-401
+crates/eg/src/index/daemon/main.rs
+  s_f911a7f11fb798::t_3b7fa82d6c1ba4 26-27,940,942,967,969
+crates/eg/tests/index_integration.rs
+  s_f911a7f11fb798::t_dd2a1c6d9a6c60 2354-2387
+  s_f911a7f11fb798::t_3b7fa82d6c1ba4 357,1270
+crates/types/src/query.rs
+  s_f911a7f11fb798::t_b03061f8c5f296 136-144,152,161,170
+crates/lib/src/query/planner.rs
+  s_f911a7f11fb798::t_dea64522edfd3d 353-354
+  s_f911a7f11fb798::t_3b7fa82d6c1ba4 339-352,355-376
+  s_f911a7f11fb798::t_797f5b4ab8bffd 47-51
+  s_f911a7f11fb798::t_70a0bf4c9f6573 3,10,53,94,99,101,104,106,111,115,119,122,126,128-179
+crates/eg/src/index/executor.rs
+  s_f911a7f11fb798::t_a59300fe886f1c 9,12-20,219-229,306-309,320,359
+crates/eg/src/index/document.rs
+  s_f911a7f11fb798::t_e70d7dacd98462 282,285,290
+  s_f911a7f11fb798::t_797f5b4ab8bffd 248-251,260-263,270-277
+  s_f911a7f11fb798::t_2bd5283032708f 241,245-247,252-254,259,267-269,281,283-284,286-289,291-292
+  s_f911a7f11fb798::t_acd9febed1550a 13,121,133,139-140,152,159-162,170-171,175-189
+  s_f911a7f11fb798::t_9f23478a57b745 190
+crates/eg/src/index/postings.rs
+  s_f911a7f11fb798::t_3b7fa82d6c1ba4 46
+  s_f911a7f11fb798::t_acd9febed1550a 1067,1072-1073,1083,1095-1096,1100-1104
+crates/eg/src/index/daemon_refresh.rs
+  s_f911a7f11fb798::t_3b7fa82d6c1ba4 58
+crates/eg/src/index/snapshot.rs
+  s_f911a7f11fb798::t_3b7fa82d6c1ba4 35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "71f70867389feef895063647e66c50cba5288aa5",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
