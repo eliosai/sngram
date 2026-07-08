@@ -1,0 +1,20 @@
+crates/eg/src/index/progress.rs
+  s_96c5e027d2f6bb::t_876378de5bd8e2 342-347,352,357,399-403,492-501
+  s_96c5e027d2f6bb::t_1c0cb596376a32 502-503
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "28723b10324c2e5843cd8d314ec695f5f24fb6b3",
+  "prompts": {},
+  "sessions": {
+    "s_96c5e027d2f6bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4352-8dfb-72b3-8cac-454d470e7910",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
