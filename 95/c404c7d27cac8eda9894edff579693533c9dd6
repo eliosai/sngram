@@ -1,0 +1,73 @@
+train/tests/test_checkpoint.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-98
+train/tests/test_events.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-89
+train/tests/test_pipeline.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-472
+train/tests/test_dashboard.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-54
+train/tests/test_planner.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-393
+train/tests/test_live_datasets.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-38
+train/pyproject.toml
+  s_f911a7f11fb798::t_8f69317e15a571 1-36
+train/tests/test_rowgroup.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-117,120-214
+  s_f911a7f11fb798::t_24b128bd426d5b 118-119
+train/sngram_train/cli.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-201
+crates/python/pyproject.toml
+  s_f911a7f11fb798::t_2754904cf4bd41 8-27
+train/tests/test_config.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-139
+crates/python/sngram/__init__.py
+  s_f911a7f11fb798::t_c02c2fa96ade09 3-4
+train/tests/test_fsvalidate.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-109
+train/tests/test_swh_pipeline.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-237
+train/README.md
+  s_f911a7f11fb798::t_457eafb197ec0c 1-3
+crates/python/README.md
+  s_f911a7f11fb798::t_d8622cce1a24ad 3
+.github/workflows/ci.yml
+  s_f911a7f11fb798::t_62b88deeca2684 50,52-56
+train/tests/test_cli.py
+  s_f911a7f11fb798::t_24b128bd426d5b 31-34,70-73
+  s_f911a7f11fb798::t_9a71e56b866b48 1-30,35-69,74-111
+train/tests/test_hardening.py
+  s_f911a7f11fb798::t_9033b16d8d9748 218
+  s_f911a7f11fb798::t_9a71e56b866b48 1-217,219-679
+docs/training.md
+  s_f911a7f11fb798::t_5a119d1b0541fa 46
+  s_f911a7f11fb798::t_7addc1489911ef 39
+AGENTS.md
+  s_f911a7f11fb798::t_ad761499942a58 51,53,58-62,115-116
+train/tests/test_metrics.py
+  s_f911a7f11fb798::t_9a71e56b866b48 1-101
+train/.gitignore
+  s_f911a7f11fb798::t_1ca8c71bbb81e1 1-8
+CLAUDE.md
+  s_f911a7f11fb798::t_ad761499942a58 51,53,58-62,115-116
+crates/python/uv.lock
+  s_f911a7f11fb798::t_45184db2c98428 1-524
+train/uv.lock
+  s_f911a7f11fb798::t_803bf3090ee5c5 1608,1610-1625,1631,1647,1651-1652
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "95c404c7d27cac8eda9894edff579693533c9dd6",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
