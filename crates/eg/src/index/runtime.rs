@@ -49,6 +49,14 @@ impl<'a> Lease<'a> {
     pub fn keep_alive_best_effort(&self) {
         keep_alive_best_effort(self.index_root, self.state_root);
     }
+
+    /// Renew the lease off the hot path; a lapse only means the next query
+    /// falls back to the blocking cold registration
+    pub fn keep_alive_detached(&self) {
+        let index_root = self.index_root.to_path_buf();
+        let state_root = self.state_root.to_path_buf();
+        std::thread::spawn(move || keep_alive_best_effort(&index_root, &state_root));
+    }
 }
 
 pub fn keep_alive_best_effort(index_root: &Path, state_root: &Path) {

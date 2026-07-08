@@ -31,6 +31,8 @@ pub struct BenchReport {
     selectivity_rejected: bool,
     query_too_broad: bool,
     unsupported_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comparison: Option<Comparison>,
 }
 
 impl BenchReport {
@@ -58,6 +60,7 @@ impl BenchReport {
             selectivity_rejected: false,
             query_too_broad: false,
             unsupported_reason: None,
+            comparison: None,
         }
     }
 
@@ -165,6 +168,33 @@ impl BenchReport {
     pub fn timing_mut(&mut self) -> &mut Timings {
         &mut self.timings_ms
     }
+
+    pub fn set_comparison(&mut self, scan_wall_ms: f64, rg_wall_ms: Option<f64>) {
+        let indexed = self.timings_ms.total;
+        self.comparison = Some(Comparison {
+            indexed_wall_ms: indexed,
+            scan_wall_ms,
+            rg_wall_ms,
+            speedup_scan: speedup(scan_wall_ms, indexed),
+            speedup_rg: rg_wall_ms.and_then(|rg| speedup(rg, indexed)),
+        });
+    }
+}
+
+/// Same-query wall comparison against the scan path and rg
+#[derive(Serialize)]
+struct Comparison {
+    indexed_wall_ms: f64,
+    scan_wall_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rg_wall_ms: Option<f64>,
+    speedup_scan: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speedup_rg: Option<f64>,
+}
+
+fn speedup(reference_ms: f64, indexed_ms: f64) -> Option<f64> {
+    (indexed_ms > 0.0).then(|| reference_ms / indexed_ms)
 }
 
 #[derive(Default, Serialize)]
@@ -433,6 +463,7 @@ mod tests {
             selectivity_rejected: false,
             query_too_broad: false,
             unsupported_reason: None,
+            comparison: None,
         };
         report.set_snapshot_counts(100, 10);
         report.set_candidates(20);

@@ -82,6 +82,10 @@ fn run_bench(args: &HiArgs) -> anyhow::Result<bool> {
     report.timing_mut().set_total(total_started_at);
     match result {
         Ok(matched) => {
+            if std::env::var_os(suite::NO_COMPARE_ENV).is_none() {
+                let (scan_wall, rg_wall) = suite::compare_unindexed()?;
+                report.set_comparison(scan_wall, rg_wall);
+            }
             report.finish_ok(matched);
             report.print()?;
             Ok(matched)
@@ -164,7 +168,7 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     let lease = runtime::Lease::new(generation.index_root(), generation.state_root());
     if !cold_build {
         let register_started_at = Instant::now();
-        lease.keep_alive_best_effort();
+        lease.keep_alive_detached();
         if let Some(report) = bench.as_deref_mut() {
             report.timing_mut().set_daemon_register(register_started_at);
         }

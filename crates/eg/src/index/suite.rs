@@ -114,7 +114,7 @@ impl<'a> CaseRunner<'a> {
         args.push(OsString::from("--"));
         args.push(OsString::from(&self.case.pattern));
         args.extend(search_paths(self.args));
-        measure_command(self.exe, args).map(IndexedMeasurement::from_run)
+        measure_command_no_compare(self.exe, args).map(IndexedMeasurement::from_run)
     }
 
     fn unindexed(&self) -> anyhow::Result<UnindexedMeasurement> {
@@ -144,6 +144,41 @@ impl<'a> CaseRunner<'a> {
     }
 }
 
+/// Suite children and nested benches must not spawn their own comparison
+pub const NO_COMPARE_ENV: &str = "EG_BENCH_NO_COMPARE";
+
+/// Wall-time the same query over the scan path and rg for one live bench
+pub fn compare_unindexed() -> anyhow::Result<(f64, Option<f64>)> {
+    let exe = env::current_exe().context("failed to locate eg executable")?;
+    let user_args: Vec<OsString> = env::args_os()
+        .skip(1)
+        .filter(|arg| arg != "--bench")
+        .collect();
+    let mut scan_args = vec![
+        OsString::from("--no-index"),
+        OsString::from("--files-with-matches"),
+    ];
+    scan_args.extend(user_args.iter().cloned());
+    let scan = measure_command(&exe, scan_args)?;
+    let rg_wall = match binary_in_path("rg") {
+        Some(rg) => {
+            let mut rg_args = vec![OsString::from("--files-with-matches")];
+            rg_args.extend(user_args.iter().filter(|arg| !eg_only_flag(arg)).cloned());
+            measure_command(&rg, rg_args)
+                .ok()
+                .filter(|run| matches!(run.code, Some(0 | 1)))
+                .map(|run| run.wall_ms)
+        },
+        None => None,
+    };
+    Ok((scan.wall_ms, rg_wall))
+}
+
+/// True for flags rg does not understand
+fn eg_only_flag(arg: &OsString) -> bool {
+    arg.to_string_lossy().starts_with("--index") || arg == "--no-index"
+}
+
 fn search_paths(args: &HiArgs) -> impl Iterator<Item = OsString> + '_ {
     args.search_paths()
         .iter()
@@ -159,6 +194,19 @@ struct MeasuredCommand {
 fn measure_command(exe: &Path, args: Vec<OsString>) -> anyhow::Result<MeasuredCommand> {
     let started = Instant::now();
     let output = Command::new(exe).args(args).output()?;
+    Ok(MeasuredCommand {
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        wall_ms: started.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+fn measure_command_no_compare(exe: &Path, args: Vec<OsString>) -> anyhow::Result<MeasuredCommand> {
+    let started = Instant::now();
+    let output = Command::new(exe)
+        .args(args)
+        .env(NO_COMPARE_ENV, "1")
+        .output()?;
     Ok(MeasuredCommand {
         code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

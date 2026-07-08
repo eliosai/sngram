@@ -44,7 +44,7 @@ const LOCK_SUFFIX: &str = ".lock";
 const TEMP_SUFFIX: &str = ".rebuilding";
 const OLD_SUFFIX: &str = ".old";
 const SECTION_HEADER_SIZE: usize = 32;
-const SECTION_FORMAT_VERSION: u32 = 10;
+const SECTION_FORMAT_VERSION: u32 = 11;
 const TABLE_MAGIC: [u8; 8] = *b"EGTABL1\0";
 const POSTINGS_MAGIC: [u8; 8] = *b"EGPOST2\0";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -53,6 +53,8 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const DIRECTORY_ENTRY_SIZE: usize = 16;
 /// Delta-coded table records per skip-directory block
 const RECORDS_PER_BLOCK: usize = 256;
+/// Bytes in a per-block bitmap marking inline df=1 records
+const BLOCK_BITMAP_SIZE: usize = RECORDS_PER_BLOCK / 8;
 const RUN_PAIR_SIZE: usize = 9;
 const FILES_PER_RAYON_TASK: usize = 1024;
 const INDEX_RAM_CAP_BYTES: usize = 512 * 1024 * 1024;
@@ -783,6 +785,8 @@ impl<'a> MergeProgress<'a> {
 struct TableBuilder {
     writer: SectionWriter,
     directory: Vec<u8>,
+    bitmaps: Vec<u8>,
+    block_bitmap: [u8; BLOCK_BITMAP_SIZE],
     block_count: u32,
     block_records: usize,
     previous_hash: u32,
@@ -794,6 +798,8 @@ impl TableBuilder {
         Ok(Self {
             writer: SectionWriter::create(path, TABLE_MAGIC)?,
             directory: Vec::new(),
+            bitmaps: Vec::new(),
+            block_bitmap: [0u8; BLOCK_BITMAP_SIZE],
             block_count: 0,
             block_records: 0,
             previous_hash: 0,
@@ -814,16 +820,17 @@ impl TableBuilder {
         } else {
             hash - self.previous_hash
         };
-        let count = u32::try_from(docs.len()).context("posting count does not fit in u32")?;
         let mut record = Vec::with_capacity(12);
         push_uvarint(&mut record, gap);
-        push_uvarint(&mut record, count);
         if let [(ord, mask)] = docs {
+            self.block_bitmap[self.block_records / 8] |= 1 << (self.block_records % 8);
             push_uvarint(&mut record, *ord);
             record.push(*mask);
         } else {
+            let count = u32::try_from(docs.len()).context("posting count does not fit in u32")?;
             let list = encode_posting_list(docs, encoder);
             let size = u32::try_from(list.len()).context("posting list exceeds u32 bytes")?;
+            push_uvarint(&mut record, count);
             push_uvarint(&mut record, size);
             postings_writer.write_all(&list)?;
             self.postings_offset += u64::from(size);
@@ -835,6 +842,9 @@ impl TableBuilder {
     }
 
     fn begin_block(&mut self, hash: u32) -> anyhow::Result<()> {
+        if self.block_count > 0 {
+            self.flush_bitmap();
+        }
         let records_offset =
             u32::try_from(self.writer.body_len).context("table records exceed u32 bytes")?;
         self.directory.extend_from_slice(&hash.to_le_bytes());
@@ -846,9 +856,19 @@ impl TableBuilder {
         Ok(())
     }
 
+    fn flush_bitmap(&mut self) {
+        self.bitmaps.extend_from_slice(&self.block_bitmap);
+        self.block_bitmap = [0u8; BLOCK_BITMAP_SIZE];
+    }
+
     fn finalize(mut self) -> anyhow::Result<()> {
+        if self.block_count > 0 {
+            self.flush_bitmap();
+        }
         let directory = mem::take(&mut self.directory);
+        let bitmaps = mem::take(&mut self.bitmaps);
         self.writer.write_all(&directory)?;
+        self.writer.write_all(&bitmaps)?;
         self.writer.write_all(&self.block_count.to_le_bytes())?;
         self.writer.finalize(1)
     }
@@ -1106,13 +1126,19 @@ impl Segment {
         } else {
             self.records_len
         };
+        let bitmap = self.block_bitmap(block)?;
         let records = &self.table_body()[..self.records_len];
         let mut pos = records_offset as usize;
         let mut current = first_hash;
+        let mut idx = 0usize;
         while pos < end {
-            let (gap, count) = read_record_head(records, &mut pos)?;
+            let gap = read_uvarint(records, &mut pos).context("truncated record hash gap")?;
             current = current.wrapping_add(gap);
-            if count == 1 {
+            let inline = bitmap
+                .get(idx / 8)
+                .is_some_and(|byte| byte >> (idx % 8) & 1 == 1);
+            idx += 1;
+            if inline {
                 let ord = read_uvarint(records, &mut pos).context("truncated inline posting")?;
                 let mask = *records.get(pos).context("truncated inline mask")?;
                 pos += 1;
@@ -1123,6 +1149,7 @@ impl Segment {
                     })));
                 }
             } else {
+                let count = read_uvarint(records, &mut pos).context("truncated record count")?;
                 let size = read_uvarint(records, &mut pos).context("truncated list size")?;
                 if current == hash {
                     return Ok(Some(Located::Stored {
@@ -1139,6 +1166,15 @@ impl Segment {
         }
         Ok(None)
     }
+
+    /// The inline-record bitmap stored after the directory for one block
+    fn block_bitmap(&self, block: usize) -> anyhow::Result<&[u8]> {
+        let body = self.table_body();
+        let at =
+            self.records_len + self.block_count * DIRECTORY_ENTRY_SIZE + block * BLOCK_BITMAP_SIZE;
+        body.get(at..at + BLOCK_BITMAP_SIZE)
+            .context("inline bitmap past end of table")
+    }
 }
 
 /// One located posting list: inline single posting or a stored byte region
@@ -1147,22 +1183,15 @@ enum Located {
     Stored { offset: u64, count: u32, size: u32 },
 }
 
-fn read_record_head(records: &[u8], pos: &mut usize) -> anyhow::Result<(u32, u32)> {
-    let gap = read_uvarint(records, pos).context("truncated record hash gap")?;
-    let count = read_uvarint(records, pos).context("truncated record count")?;
-    anyhow::ensure!(count > 0, "zero-count table record");
-    Ok((gap, count))
-}
-
-/// Split the table body into the records region and directory footer
+/// Split the table body into records, directory, and inline-bitmap regions
 fn parse_table_footer(body: &[u8]) -> Option<(usize, usize)> {
     if body.is_empty() {
         return Some((0, 0));
     }
     let count_at = body.len().checked_sub(4)?;
     let block_count = read_u32_at(body, count_at).ok()? as usize;
-    let directory_len = block_count.checked_mul(DIRECTORY_ENTRY_SIZE)?;
-    let records_len = count_at.checked_sub(directory_len)?;
+    let footer_len = block_count.checked_mul(DIRECTORY_ENTRY_SIZE + BLOCK_BITMAP_SIZE)?;
+    let records_len = count_at.checked_sub(footer_len)?;
     Some((records_len, block_count))
 }
 
