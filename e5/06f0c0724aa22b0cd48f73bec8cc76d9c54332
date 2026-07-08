@@ -1,0 +1,35 @@
+crates/lib/src/weights.rs
+  s_96c5e027d2f6bb::t_0856aa6047b51d 16,34-39
+  s_96c5e027d2f6bb::t_5a9ba4e6c55873 40-41
+crates/lib/build.rs
+  s_96c5e027d2f6bb::t_ca8bdf7f0a5907 30,32-42
+  s_96c5e027d2f6bb::t_8b2afdbf887c52 43-47
+  s_96c5e027d2f6bb::t_5ca092a98e0186 48-59
+crates/types/src/table.rs
+  s_96c5e027d2f6bb::t_d071af7779e7b1 296-317
+  s_96c5e027d2f6bb::t_1b5930f4ff7ae6 58
+  s_96c5e027d2f6bb::t_f7033279cd9fc5 59,63-64
+  s_96c5e027d2f6bb::t_3475c28dc2a47f 48-57
+  s_96c5e027d2f6bb::t_f06095529642cb 142-180
+crates/eg/src/index/runtime.rs
+  s_96c5e027d2f6bb::t_cf9e43b376c93b 505-506,573-584
+  s_96c5e027d2f6bb::t_786bf536d5c952 54-56,431-440
+  s_96c5e027d2f6bb::t_d52a3aa57e98fe 441-442
+  s_96c5e027d2f6bb::t_8bbc524ca80394 585-586
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e506f0c0724aa22b0cd48f73bec8cc76d9c54332",
+  "prompts": {},
+  "sessions": {
+    "s_96c5e027d2f6bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4352-8dfb-72b3-8cac-454d470e7910",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
