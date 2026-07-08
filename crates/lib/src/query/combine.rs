@@ -164,9 +164,28 @@ impl Analyzer<'_> {
             return self.or_covers(q, covers);
         }
         if let Some(grams) = self.branch_single_covers(set, self.budget_left()) {
+            let q = self.and_edge_windows(q, set);
             return self.and_or_grams(q, grams);
         }
         self.truncated_cover(q, set, order, cap)
+    }
+
+    /// AND in the distinct head and tail windows of an oversized set. The
+    /// per-branch single-gram OR is as weak as its most shared member (a
+    /// gram missing one class byte admits scattered occurrences), while the
+    /// edge windows pin a real seam on each side.
+    fn and_edge_windows(&self, q: Query, set: &StringSet) -> Query {
+        if set.len() <= MAX_SET {
+            return q;
+        }
+        let q = match distinct_edge(set, Order::Prefix) {
+            Some(heads) => self.and_grams(q, &heads, Order::Prefix),
+            None => q,
+        };
+        match distinct_edge(set, Order::Suffix) {
+            Some(tails) => self.and_grams(q, &tails, Order::Suffix),
+            None => q,
+        }
     }
 
     fn truncated_cover(&self, q: Query, set: &StringSet, order: Order, cap: usize) -> Query {
@@ -235,8 +254,9 @@ impl Analyzer<'_> {
             .into_vec()
             .into_iter()
             .max_by(|a, b| {
-                a.len()
-                    .cmp(&b.len())
+                spans_center(s, a)
+                    .cmp(&spans_center(s, b))
+                    .then_with(|| a.len().cmp(&b.len()))
                     .then_with(|| a.as_bytes().cmp(b.as_bytes()))
             })
     }
@@ -532,6 +552,35 @@ fn should_flush_exact(info: &RegexpInfo, force: bool) -> bool {
     exact.len() > MAX_EXACT
         || exact.byte_len() > MAX_EXACT_BYTES
         || (min >= QuerySettings::MIN_GRAM_LEN && force)
+}
+
+/// True when some occurrence of `gram` in `s` covers the center byte, so a
+/// branch's single gram keeps the middle its edge windows cannot pin
+fn spans_center(s: &[u8], gram: &Gram) -> bool {
+    let center = s.len() / 2;
+    let gram = gram.as_bytes();
+    s.windows(gram.len())
+        .enumerate()
+        .any(|(at, window)| window == gram && at <= center && center < at + gram.len())
+}
+
+/// The longest edge truncation of `set` that collapses to at most
+/// [`MAX_SET`] distinct strings of gram length
+fn distinct_edge(set: &StringSet, order: Order) -> Option<StringSet> {
+    let mut keep = set.max_len().saturating_sub(1);
+    while keep >= QuerySettings::MIN_GRAM_LEN {
+        let mut edge = set.clone();
+        truncate_to(&mut edge, order, keep);
+        edge.clean(order);
+        if edge.min_len() < QuerySettings::MIN_GRAM_LEN {
+            return None;
+        }
+        if edge.len() <= MAX_SET {
+            return Some(edge);
+        }
+        keep -= 1;
+    }
+    None
 }
 
 /// Move each exact string into the prefix and suffix sets as a stub wide

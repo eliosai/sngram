@@ -232,6 +232,29 @@ fn finite_class_pair_keeps_correlated_middle_window() {
 }
 
 #[test]
+fn oversized_class_pair_pins_both_edge_windows() {
+    // 63x63 branches overflow the strong per-branch covers, and the fallback
+    // single-gram OR admits a document holding just one shared left-seam
+    // gram. The edge windows demand a real seam on each side: this document
+    // has "initx" but no <class-byte>call, so it is rejected.
+    assert_rejects(
+        "init[0-9a-zA-Z_][0-9a-zA-Z_]call",
+        b"initx present, then call() later",
+    );
+}
+
+#[test]
+fn oversized_class_pair_singles_span_the_middle() {
+    // Both edge windows are present ("initx" and "zcall"), so only the
+    // per-branch singles can reject this: each must span the string's
+    // middle, never collapsing to a shared edge gram like "initx" alone
+    assert_rejects(
+        "init[0-9a-zA-Z_][0-9a-zA-Z_]call",
+        b"initx present, then zcall() later",
+    );
+}
+
+#[test]
 fn numeric_plus_keeps_literal_prefix_context() {
     // A semver-like regex with a literal prefix must not degenerate into
     // only the broad digit-dot-digit middle window.
