@@ -104,8 +104,8 @@ Rust workspace:
 cargo test -p sngram-types --offline
 cargo test -p sngram --offline
 cargo test -p sngram --features 12tb --offline
-cargo test -p eg --offline
-cargo clippy -p eg --all-targets --offline -- -D warnings
+cargo test -p elgrep --offline
+cargo clippy -p elgrep --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 ```
 

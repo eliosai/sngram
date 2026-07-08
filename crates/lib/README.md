@@ -5,8 +5,8 @@ Stateless, `Send + Sync`.
 
 ```toml
 [dependencies]
-sngram = "0.5"
-sngram-types = "0.5"
+sngram = "0.6"
+sngram-types = "0.6"
 ```
 
 ## How it works

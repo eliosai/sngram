@@ -1,11 +1,15 @@
 [package]
-name = "eg"
+name = "elgrep"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+description = "A high-performance ripgrep alternative using a sparse n-gram index"
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
 rust-version.workspace = true
+keywords = ["grep", "ripgrep", "search", "regex", "index"]
+categories = ["command-line-utilities", "text-processing"]
 
 [[bin]]
 name = "eg"

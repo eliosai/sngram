@@ -27,8 +27,8 @@ feature per training-data tier.
 
 ```toml
 [dependencies]
-sngram = { version = "0.5", features = ["12tb"] }
-sngram-types = "0.5"
+sngram = { version = "0.6", features = ["12tb"] }
+sngram-types = "0.6"
 ```
 
 ```rust

@@ -55,7 +55,7 @@ fn eg(args: &[&str]) -> (Output, Duration) {
 }
 
 #[test]
-#[ignore = "local perf smoke; run with `cargo test -p eg --test index_perf -- --ignored --nocapture`"]
+#[ignore = "local perf smoke; run with `cargo test -p elgrep --test index_perf -- --ignored --nocapture`"]
 fn auto_reuse_and_one_file_refresh_timing_smoke() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.path("pkg")).unwrap();

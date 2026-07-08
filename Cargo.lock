@@ -516,8 +516,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 
 [[package]]
-name = "eg"
-version = "0.5.0"
+name = "either"
+version = "1.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
+
+[[package]]
+name = "elgrep"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bstr",
@@ -542,12 +548,6 @@ dependencies = [
  "textwrap",
  "tikv-jemallocator",
 ]
-
-[[package]]
-name = "either"
-version = "1.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "encode_unicode"
@@ -1505,7 +1505,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "sngram"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "crc32fast",
  "regex",
@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "sngram-benches"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "crc32fast",
  "criterion",
@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "sngram-python"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "sngram-types"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "crc32fast",
  "regex-syntax",

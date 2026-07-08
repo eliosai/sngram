@@ -5,7 +5,7 @@ the `sngram` crate.
 
 ```toml
 [dependencies]
-sngram-types = "0.5"
+sngram-types = "0.6"
 ```
 
 - `WeightTable` is the 256x256 grid of byte-pair weights. It loads from
