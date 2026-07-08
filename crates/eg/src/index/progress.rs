@@ -83,12 +83,6 @@ impl BuildSnapshot {
             Some(BuildPhase::Snapshot) if self.files_total > 0 => {
                 return format!("{phase}: {}/{} files", self.files_done, self.files_total);
             },
-            Some(BuildPhase::WritingPostings) if self.items_total > 0 => {
-                return format!(
-                    "{phase}: {}/{} pairs, {}/{} runs",
-                    self.items_done, self.items_total, self.runs_done, self.runs_total
-                );
-            },
             _ => {},
         }
         if self.files_total == 0 {
@@ -345,15 +339,22 @@ impl BuildProgressRenderer {
             self.bar.set_message("building index");
             return;
         };
-        if snapshot.files_total > 0 {
+        if matches!(snapshot.phase, Some(BuildPhase::WritingPostings)) {
+            self.bar.set_style(phase_style());
+            self.bar.set_length(0);
+            self.bar.set_position(0);
+        } else if snapshot.files_total > 0 {
+            self.bar.set_style(progress_style());
             self.bar.set_length(snapshot.files_total);
             self.bar
                 .set_position(snapshot.files_done.min(snapshot.files_total));
         } else if snapshot.items_total > 0 {
+            self.bar.set_style(progress_style());
             self.bar.set_length(snapshot.items_total);
             self.bar
                 .set_position(snapshot.items_done.min(snapshot.items_total));
         } else {
+            self.bar.set_style(phase_style());
             self.bar.set_length(0);
             self.bar.set_position(0);
         }
@@ -392,6 +393,11 @@ fn progress_style() -> ProgressStyle {
 
 fn spinner_style() -> ProgressStyle {
     ProgressStyle::with_template("{spinner:.green} {msg} ({elapsed})")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner())
+}
+
+fn phase_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner:.green} {msg}")
         .unwrap_or_else(|_| ProgressStyle::default_spinner())
 }
 
@@ -481,6 +487,18 @@ mod tests {
         assert_eq!(snapshot.items_done, 1_000_000);
         assert_eq!(snapshot.runs_total, 8);
         assert_eq!(snapshot.runs_done, 4);
+    }
+
+    #[test]
+    fn posting_progress_message_stays_indeterminate() {
+        let root_guard = scratch("postings-message");
+        let root = root_guard.path().to_path_buf();
+        let progress = BuildProgress::new(&root);
+
+        progress.start_postings(198, 198);
+
+        let snapshot = read(&root).expect("read progress").expect("snapshot");
+        assert_eq!(snapshot.message(), "writing postings");
     }
 
     #[test]
