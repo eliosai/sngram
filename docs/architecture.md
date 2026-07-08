@@ -11,10 +11,12 @@ engine. The index may return false positives. It must never miss a match.
 | crate | role |
 |---|---|
 | `crates/types` | shared data shapes: `WeightTable`, `GramKey`, `ScanEvent`, `QueryPlan`, `GramNeedle`, `ScanNeed` |
-| `crates/lib` | the public API: `sngram::scan` and `sngram::query`; training counters behind the `learn` feature |
-| `crates/weights` | the embedded production weight table, behind the `production` feature |
-| `crates/python` | pyo3 bindings: scan, query, the embedded table, and GIL-free training counters |
+| `crates/lib` | the public API: `sngram::scan`, `sngram::query`, and embedded weight tables behind per-tier features; training counters behind `learn` |
+| `crates/python` | the standalone `sngram` Python package: scan, query, weight tables, and GIL-free training counters |
 | `crates/eg` | the application: a ripgrep fork that prefilters through the index, plus the `eg-indexd` daemon |
+
+The training pipeline lives outside the workspace in `train/`, a uv
+project that depends on the Python package and mints weight tables.
 
 ## How a gram is chosen
 

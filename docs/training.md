@@ -49,7 +49,7 @@ lists them). Minting defaults to tuning off.
 
 ## Acceptance
 
-Replace `crates/weights/data/final_weights.bin` with the minted table,
+Replace `crates/lib/data/final_weights.bin` with the minted table,
 rebuild, and run both corpora:
 
 ```sh
