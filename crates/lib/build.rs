@@ -27,6 +27,34 @@ fn validate(relative: &str) {
     let path = manifest_dir.join(relative);
     let bytes =
         fs::read(&path).unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-    sngram_types::WeightTable::from_bytes(&bytes)
+    let table = sngram_types::WeightTable::from_bytes(&bytes)
         .unwrap_or_else(|err| panic!("invalid embedded table {}: {err}", path.display()));
+    write_fingerprint(relative, table.fingerprint());
+}
+
+fn write_fingerprint(relative: &str, fingerprint: u64) {
+    let tier = relative
+        .strip_prefix("data/")
+        .and_then(|name| name.strip_suffix("_weights.bin"))
+        .expect("known weight path");
+    let name = format!("WEIGHTS_{}_FINGERPRINT", tier.to_uppercase());
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+    let path = out_dir.join(format!("{tier}_weights.rs"));
+    fs::write(
+        path,
+        format!("const {name}: u64 = {};\n", rust_u64(fingerprint)),
+    )
+    .expect("write fingerprint");
+}
+
+fn rust_u64(value: u64) -> String {
+    let raw = value.to_string();
+    let mut out = String::with_capacity(raw.len() + raw.len() / 3);
+    for (i, ch) in raw.chars().enumerate() {
+        if i > 0 && (raw.len() - i).is_multiple_of(3) {
+            out.push('_');
+        }
+        out.push(ch);
+    }
+    out
 }

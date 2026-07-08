@@ -51,6 +51,9 @@ impl<'a> Lease<'a> {
     /// Renew the lease off the hot path; a lapse only means the next query
     /// falls back to the blocking cold registration
     pub fn keep_alive_detached(&self) {
+        if lease_is_fresh(self.state_root) {
+            return;
+        }
         let index_root = self.index_root.to_path_buf();
         let state_root = self.state_root.to_path_buf();
         std::thread::spawn(move || keep_alive_best_effort(&index_root, &state_root));
@@ -425,6 +428,18 @@ fn touch_lease(state_root: &Path) -> io::Result<()> {
     write_marker(&runtime.join(LEASE_FILE_NAME))
 }
 
+fn lease_is_fresh(state_root: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(runtime_dir(state_root).join(LEASE_FILE_NAME)) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    SystemTime::now()
+        .duration_since(modified)
+        .is_ok_and(|age| age <= lease_ttl())
+}
+
 fn lease_ttl() -> Duration {
     let value = env::var(LEASE_TTL_ENV).ok();
     lease_ttl_from(value.as_deref())
@@ -487,7 +502,8 @@ mod tests {
     use super::{
         DEFAULT_LEASE_TTL, LEASE_FILE_NAME, LOCK_FILE_NAME, OWNER_FILE_NAME,
         STARTUP_READY_FILE_NAME, WAKE_FILE_NAME, daemon_freshness_proof_in, install_daemon_binary,
-        keep_alive_best_effort, lease_ttl_from, request_refresh, runtime_root_is_writable,
+        keep_alive_best_effort, lease_is_fresh, lease_ttl_from, request_refresh,
+        runtime_root_is_writable,
     };
     use std::fs;
 
@@ -552,6 +568,20 @@ mod tests {
     fn lease_ttl_override_uses_seconds() {
         assert_eq!(lease_ttl_from(Some("7")), std::time::Duration::from_secs(7));
         assert_eq!(lease_ttl_from(Some("not-a-number")), DEFAULT_LEASE_TTL);
+    }
+
+    #[test]
+    fn lease_freshness_uses_runtime_marker() {
+        let root_guard = scratch("lease-fresh");
+        let root = root_guard.path().to_path_buf();
+
+        assert!(!lease_is_fresh(&root));
+
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&runtime).expect("runtime");
+        fs::write(runtime.join(LEASE_FILE_NAME), "lease").expect("lease");
+
+        assert!(lease_is_fresh(&root));
     }
 
     #[test]

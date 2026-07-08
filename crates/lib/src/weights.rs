@@ -13,7 +13,7 @@ use sngram_types::WeightTable;
     reason = "the build script validates the embedded table with the same parser"
 )]
 pub fn weights() -> WeightTable {
-    match WeightTable::from_bytes(weights_bytes()) {
+    match WeightTable::from_prevalidated_bytes(weights_bytes(), weights_fingerprint()) {
         Ok(table) => table,
         Err(err) => unreachable!("build script validated embedded weight table: {err}"),
     }
@@ -29,6 +29,14 @@ macro_rules! embed_table {
             $bytes
         }
     };
+}
+
+#[cfg(feature = "12tb")]
+include!(concat!(env!("OUT_DIR"), "/12tb_weights.rs"));
+
+#[cfg(feature = "12tb")]
+const fn weights_fingerprint() -> u64 {
+    WEIGHTS_12TB_FINGERPRINT
 }
 
 embed_table!("12tb", BYTES_12TB, "../data/12tb_weights.bin");

@@ -45,28 +45,23 @@ impl WeightTable {
     /// Returns `TableError` on malformed data, an unknown version, or a
     /// checksum mismatch.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, TableError> {
-        if bytes.len() < WeightTableSettings::HEADER_SIZE {
-            return Err(TableError::Truncated(bytes.len()));
-        }
-        if bytes.get(..4) != Some(WeightTableSettings::MAGIC.as_slice()) {
-            return Err(TableError::InvalidMagic);
-        }
-        let version = read_u32_le(bytes, 4)?;
-        let expected_crc = read_u32_le(bytes, 8)?;
-        let body = bytes
-            .get(WeightTableSettings::HEADER_SIZE..)
-            .ok_or(TableError::Truncated(bytes.len()))?;
-        let provenance = version_provenance(version, bytes.len(), body)?;
-        verify_checksum(expected_crc, body)?;
-        let data = body
-            .get(..WeightTableSettings::WEIGHTS_COUNT * 4)
-            .ok_or(TableError::Truncated(bytes.len()))?;
-        Ok(Self {
+        let parts = TableParts::parse(bytes)?;
+        verify_checksum(parts.expected_crc, parts.body)?;
+        Ok(parts.into_table(fingerprint_bytes(bytes)))
+    }
+
+    #[doc(hidden)]
+    pub fn from_prevalidated_bytes(bytes: &[u8], fingerprint: u64) -> Result<Self, TableError> {
+        Ok(TableParts::parse(bytes)?.into_table(fingerprint))
+    }
+
+    fn from_parts(version: u32, provenance: Option<String>, data: &[u8], fingerprint: u64) -> Self {
+        Self {
             weights: parse_weights(data),
             version,
             provenance,
-            fingerprint: fingerprint_bytes(bytes),
-        })
+            fingerprint,
+        }
     }
 
     /// Return a copy of this table in the `SPNG` binary format.
@@ -141,6 +136,45 @@ impl WeightTable {
     #[must_use]
     pub fn matrix(&self) -> &[u32; WeightTableSettings::WEIGHTS_COUNT] {
         &self.weights
+    }
+}
+
+struct TableParts<'a> {
+    version: u32,
+    expected_crc: u32,
+    body: &'a [u8],
+    data: &'a [u8],
+    provenance: Option<String>,
+}
+
+impl<'a> TableParts<'a> {
+    fn parse(bytes: &'a [u8]) -> Result<Self, TableError> {
+        if bytes.len() < WeightTableSettings::HEADER_SIZE {
+            return Err(TableError::Truncated(bytes.len()));
+        }
+        if bytes.get(..4) != Some(WeightTableSettings::MAGIC.as_slice()) {
+            return Err(TableError::InvalidMagic);
+        }
+        let version = read_u32_le(bytes, 4)?;
+        let expected_crc = read_u32_le(bytes, 8)?;
+        let body = bytes
+            .get(WeightTableSettings::HEADER_SIZE..)
+            .ok_or(TableError::Truncated(bytes.len()))?;
+        let provenance = version_provenance(version, bytes.len(), body)?;
+        let data = body
+            .get(..WeightTableSettings::WEIGHTS_COUNT * 4)
+            .ok_or(TableError::Truncated(bytes.len()))?;
+        Ok(Self {
+            version,
+            expected_crc,
+            body,
+            data,
+            provenance,
+        })
+    }
+
+    fn into_table(self, fingerprint: u64) -> WeightTable {
+        WeightTable::from_parts(self.version, self.provenance, self.data, fingerprint)
     }
 }
 
@@ -259,6 +293,28 @@ const fn low_pair_bytes(index: usize) -> [u8; 3] {
 }
 
 fn parse_weights(data: &[u8]) -> Box<[u32; WeightTableSettings::WEIGHTS_COUNT]> {
+    parse_weights_for_endian(data)
+}
+
+#[cfg(target_endian = "little")]
+#[allow(
+    unsafe_code,
+    reason = "the table payload is little-endian u32 data copied into an aligned u32 array"
+)]
+fn parse_weights_for_endian(data: &[u8]) -> Box<[u32; WeightTableSettings::WEIGHTS_COUNT]> {
+    let mut weights = Box::<[u32; WeightTableSettings::WEIGHTS_COUNT]>::new_uninit();
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            weights.as_mut_ptr().cast::<u8>(),
+            WeightTableSettings::WEIGHTS_COUNT * 4,
+        );
+        weights.assume_init()
+    }
+}
+
+#[cfg(not(target_endian = "little"))]
+fn parse_weights_for_endian(data: &[u8]) -> Box<[u32; WeightTableSettings::WEIGHTS_COUNT]> {
     let mut weights = zero_weights();
     for (i, w) in weights.iter_mut().enumerate() {
         let off = i * 4;
