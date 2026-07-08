@@ -113,6 +113,7 @@ class Source:
     data_files: str | None = None
     content_prefix: str | None = None
     metadata_fields: tuple[str, ...] = ()
+    bucket: str | None = None
 
     @property
     def id(self) -> str:
@@ -134,17 +135,45 @@ def _weight(cap_bytes: int) -> float:
     return cap_bytes / TRAIN_TARGET_BYTES
 
 
-def _stack_source(fid: str, bucket: str, cap: int) -> Source:
+def _stack_config_name(language: str) -> str | None:
+    special = {
+        "C#": "C-Sharp",
+        "F#": "F-Sharp",
+        "JSX": None,
+        "Visual Basic .NET": "Visual_Basic_.NET",
+    }
+    if language in special:
+        return special[language]
+    return language.replace(" ", "_")
+
+
+def _stack_source(fid: str, bucket: str, config: str, cap: int) -> Source:
     return Source(
         fid,
         STACK_V2_METADATA_REPO,
         "blob_id",
-        config=bucket,
+        config=config,
         cap_bytes=cap,
         format="swh",
         content_prefix=STACK_V2_CONTENT_PREFIX,
         metadata_fields=STACK_V2_REQUIRED_COLUMNS,
+        bucket=bucket,
     )
+
+
+def _stack_sources(fid: str, bucket: str, cap: int) -> tuple[Source, ...]:
+    languages = {
+        "core-programming": CORE_LANGUAGES,
+        "docs-prose-markup": DOC_LANGUAGES,
+        "config-build-infra": CONFIG_LANGUAGES | {"Text"},
+        "web-ui-templates": WEB_LANGUAGES,
+        "data-query-schema": DATA_LANGUAGES | {"Text"},
+        "long-tail": (),
+    }[bucket]
+    if bucket == "long-tail":
+        return (_stack_source(fid, bucket, "default", cap),)
+    configs = sorted({c for lang in languages if (c := _stack_config_name(lang))})
+    return tuple(_stack_source(fid, bucket, config, cap) for config in configs)
 
 
 def default_families() -> list[Family]:
@@ -156,7 +185,7 @@ def default_families() -> list[Family]:
             weight=_weight(cap),
             cap_bytes=cap,
             bucket=bucket,
-            sources=(_stack_source(f"stack-{bucket}", bucket, cap),),
+            sources=_stack_sources(f"stack-{bucket}", bucket, cap),
         )
         for bucket, cap in STACK_V2_BUCKET_CAPS.items()
     ]

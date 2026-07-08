@@ -22,7 +22,7 @@ import re
 import shutil
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -52,6 +52,7 @@ SWH_METADATA_BATCH_ROWS = 2048
 SWH_TEXT_BATCH_ROWS = 64
 SWH_TEXT_BATCH_BYTES = 8 * 1024 * 1024
 SWH_OBJECT_ATTEMPTS = 3
+DEFAULT_SWH_FETCHERS = 128
 SWH_SLOW_OBJECT_S = float(os.environ.get("SNG_SWH_SLOW_OBJECT_S", "15"))
 READ_GAP_WARN_S = 60.0
 STALL_AFTER_S = 180.0
@@ -249,6 +250,7 @@ def roster_hash(families: list[Family], target: int, mint_every: int) -> str:
                         "data_files": s.data_files,
                         "content_prefix": s.content_prefix,
                         "metadata_fields": s.metadata_fields,
+                        "bucket": s.bucket,
                     }
                     for s in f.sources
                 ],
@@ -564,12 +566,24 @@ class Trainer:
         # one worker's remote session/cache cannot serialize every other worker.
         self._fs = None
         self._fs_tls = threading.local()
-        self._s3_tls = threading.local()
+        self._s3_client_shared = None
+        self._s3_client_lock = threading.Lock()
         self.remote_streams = max(
             1,
             int(os.environ.get("SNG_HF_STREAMS", min(DEFAULT_REMOTE_STREAMS, workers))),
         )
         self._remote_sem = threading.BoundedSemaphore(self.remote_streams)
+        self.swh_fetchers = max(
+            1, int(os.environ.get("SNG_SWH_FETCHERS", DEFAULT_SWH_FETCHERS))
+        )
+        self.swh_pending = max(
+            1, int(os.environ.get("SNG_SWH_PENDING", self.swh_fetchers * 2))
+        )
+        self.cap_warmup_inflight = max(
+            1, int(os.environ.get("SNG_CAP_WARMUP_INFLIGHT", workers))
+        )
+        self._swh_pool: ThreadPoolExecutor | None = None
+        self._swh_pool_lock = threading.Lock()
         self.worker_state = [WorkerState() for _ in range(workers)]
         self.stop = threading.Event()
         self.planner_done = threading.Event()
@@ -670,8 +684,10 @@ class Trainer:
             return True
         if counted.get(fid, 0) >= cap:
             return False
-        if completed.get(fid, 0) == 0 and self._family_inflight(fid, completed, dispatched, failed):
-            return False
+        if completed.get(fid, 0) == 0:
+            in_flight = self._family_inflight(fid, completed, dispatched, failed)
+            if in_flight >= self.cap_warmup_inflight:
+                return False
         return est.get(fid, 0.0) < cap
 
     def _family_waiting_on_inflight(
@@ -712,8 +728,10 @@ class Trainer:
             return True
         if counted.get(sid, 0) >= cap:
             return False
-        if completed.get(sid, 0) == 0 and self._source_inflight(sid, completed, dispatched, failed):
-            return False
+        if completed.get(sid, 0) == 0:
+            in_flight = self._source_inflight(sid, completed, dispatched, failed)
+            if in_flight >= self.cap_warmup_inflight:
+                return False
         return est.get(sid, 0.0) < cap
 
     def _source_waiting_on_inflight(
@@ -971,7 +989,7 @@ class Trainer:
             )
         elif source.format == "swh":
             ds = load_dataset(
-                source.repo, split="train",
+                source.repo, name=source.config, split="train",
                 streaming=True, token=self.token, revision=rev,
             )
         else:
@@ -1375,24 +1393,62 @@ class Trainer:
         fh = open(url, "rb")
         return _HeartbeatFile(fh, ws) if ws is not None else fh
 
+    def _swh_executor(self) -> ThreadPoolExecutor:
+        with self._swh_pool_lock:
+            if self._swh_pool is None:
+                self._swh_pool = ThreadPoolExecutor(
+                    max_workers=self.swh_fetchers, thread_name_prefix="sngram-swh"
+                )
+            return self._swh_pool
+
+    def _shutdown_swh_pool(self) -> None:
+        with self._swh_pool_lock:
+            pool = self._swh_pool
+            self._swh_pool = None
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    def _swh_unsigned(self) -> bool:
+        if os.environ.get("SNG_SWH_ANONYMOUS") == "1":
+            return True
+        if os.environ.get("AWS_PROFILE"):
+            return False
+        return not (
+            os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")
+        )
+
     def _s3_client(self):
-        client = getattr(self._s3_tls, "client", None)
-        if client is None:
-            try:
-                import boto3
-                from botocore import UNSIGNED
-                from botocore.config import Config
-            except ImportError as e:  # pragma: no cover - exercised on run hosts
-                raise RuntimeError(
-                    "Stack v2 SWH content fetch needs boto3; install sngram[train]"
-                ) from e
-            # the Software Heritage content bucket is public: read it anonymously
-            # so stale or absent ambient AWS credentials cannot break the fetch
-            client = boto3.client(
-                "s3", region_name="us-east-1", config=Config(signature_version=UNSIGNED)
+        with self._s3_client_lock:
+            if self._s3_client_shared is None:
+                self._s3_client_shared = self._new_s3_client()
+            return self._s3_client_shared
+
+    def _new_s3_client(self):
+        try:
+            import boto3
+            from botocore import UNSIGNED
+            from botocore.config import Config
+        except ImportError as e:  # pragma: no cover - exercised on run hosts
+            raise RuntimeError(
+                "Stack v2 SWH content fetch needs boto3; install sngram[train]"
+            ) from e
+        config = Config(
+            max_pool_connections=max(16, self.swh_fetchers),
+            retries={"max_attempts": 5, "mode": "adaptive"},
+        )
+        if self._swh_unsigned():
+            config = Config(
+                signature_version=UNSIGNED,
+                max_pool_connections=max(16, self.swh_fetchers),
+                retries={"max_attempts": 5, "mode": "adaptive"},
             )
-            self._s3_tls.client = client
-        return client
+        return boto3.client(
+            "s3",
+            region_name=os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or "us-east-1",
+            config=config,
+        )
 
     def _swh_content_url(self, source: Source, blob_id: str) -> str:
         if not source.content_prefix:
@@ -1459,7 +1515,7 @@ class Trainer:
             file_counter = sngram.BigramCounter()
             ws.shard_bytes = 0
             remote_acquired = False
-            bucket = task.source.config or task.source.family
+            bucket = task.source.bucket or task.source.config or task.source.family
             stats: dict[str, int] = {
                 "scanned_rows": 0,
                 "accepted_objects": 0,
@@ -1473,6 +1529,7 @@ class Trainer:
             texts: list[str] = []
             text_bytes = 0
             last_fetch_error = ""
+            pending: dict[Future, tuple[dict[str, object], str, str]] = {}
             started = time.monotonic()
             try:
                 url = self._load_source(task.source)[task.shard]
@@ -1510,6 +1567,92 @@ class Trainer:
                     text_bytes = 0
                     return capped
 
+                def submit_fetch(row: dict[str, object]) -> None:
+                    blob_id = str(row["blob_id"])
+                    content_url = self._swh_content_url(task.source, blob_id)
+                    future = self._swh_executor().submit(
+                        self._read_swh_content, content_url, ws, sid
+                    )
+                    pending[future] = (row, blob_id, content_url)
+
+                def cancel_pending() -> None:
+                    for future in pending:
+                        future.cancel()
+                    pending.clear()
+
+                def process_fetch(future: Future) -> bool:
+                    nonlocal last_fetch_error, text_bytes
+                    row, blob_id, content_url = pending.pop(future)
+                    try:
+                        raw, elapsed = future.result()
+                        latencies.append(elapsed)
+                        if elapsed >= SWH_SLOW_OBJECT_S:
+                            self.events.log(
+                                "s3_slow_object",
+                                shard=sid,
+                                source=task.source.id,
+                                bucket=bucket,
+                                blob_id=blob_id,
+                                elapsed_ms=int(elapsed * 1000),
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        stats["fetch_errors"] += 1
+                        last_fetch_error = err_text(e)
+                        self.events.log(
+                            "s3_object_error",
+                            shard=sid,
+                            source=task.source.id,
+                            bucket=bucket,
+                            blob_id=blob_id,
+                            url=content_url,
+                            error_kind=classify_error(e),
+                            stage="fetch",
+                            error=err_text(e),
+                            **error_debug_fields(e),
+                        )
+                        return False
+                    stats["fetched_bytes"] += len(raw)
+                    try:
+                        text = raw.decode(str(row["src_encoding"]))
+                    except Exception as e:  # noqa: BLE001
+                        stats["decode_errors"] += 1
+                        self.events.log(
+                            "s3_object_error",
+                            shard=sid,
+                            source=task.source.id,
+                            bucket=bucket,
+                            blob_id=blob_id,
+                            error_kind="decode",
+                            stage="decode",
+                            encoding=row.get("src_encoding"),
+                            error=err_text(e),
+                        )
+                        return False
+                    if not text:
+                        _stats_skip(stats, "empty_content")
+                        return False
+                    encoded_len = len(text.encode("utf-8"))
+                    stats["decoded_bytes"] += encoded_len
+                    texts.append(text)
+                    text_bytes += encoded_len
+                    stats["accepted_objects"] += 1
+                    if len(texts) >= SWH_TEXT_BATCH_ROWS or text_bytes >= SWH_TEXT_BATCH_BYTES:
+                        return flush()
+                    return False
+
+                def drain_fetches(block: bool) -> bool:
+                    if not pending:
+                        return False
+                    done = wait(pending, return_when=FIRST_COMPLETED).done if block else [
+                        f for f in pending if f.done()
+                    ]
+                    capped = False
+                    for future in list(done):
+                        capped = process_fetch(future) or capped
+                        if capped:
+                            break
+                    return capped
+
                 cap_stop = False
                 try:
                     pf, fh = self._open_parquet(url, ws)
@@ -1544,70 +1687,21 @@ class Trainer:
                             if self._remaining_cap_for_worker(task, ws) == 0:
                                 cap_stop = True
                                 break
-                            blob_id = str(row["blob_id"])
-                            url = self._swh_content_url(task.source, blob_id)
-                            try:
-                                raw, elapsed = self._read_swh_content(url, ws, sid)
-                                latencies.append(elapsed)
-                                if elapsed >= SWH_SLOW_OBJECT_S:
-                                    self.events.log(
-                                        "s3_slow_object",
-                                        shard=sid,
-                                        source=task.source.id,
-                                        bucket=bucket,
-                                        blob_id=blob_id,
-                                        elapsed_ms=int(elapsed * 1000),
-                                    )
-                            except Exception as e:  # noqa: BLE001
-                                stats["fetch_errors"] += 1
-                                last_fetch_error = err_text(e)
-                                self.events.log(
-                                    "s3_object_error",
-                                    shard=sid,
-                                    source=task.source.id,
-                                    bucket=bucket,
-                                    blob_id=blob_id,
-                                    error_kind=classify_error(e),
-                                    stage="fetch",
-                                    error=err_text(e),
-                                    **error_debug_fields(e),
-                                )
-                                continue
-                            stats["fetched_bytes"] += len(raw)
-                            try:
-                                text = raw.decode(str(row["src_encoding"]))
-                            except Exception as e:  # noqa: BLE001
-                                stats["decode_errors"] += 1
-                                self.events.log(
-                                    "s3_object_error",
-                                    shard=sid,
-                                    source=task.source.id,
-                                    bucket=bucket,
-                                    blob_id=blob_id,
-                                    error_kind="decode",
-                                    stage="decode",
-                                    encoding=row.get("src_encoding"),
-                                    error=err_text(e),
-                                )
-                                continue
-                            if not text:
-                                _stats_skip(stats, "empty_content")
-                                continue
-                            encoded_len = len(text.encode("utf-8"))
-                            stats["decoded_bytes"] += encoded_len
-                            texts.append(text)
-                            text_bytes += encoded_len
-                            stats["accepted_objects"] += 1
-                            if (
-                                len(texts) >= SWH_TEXT_BATCH_ROWS
-                                or text_bytes >= SWH_TEXT_BATCH_BYTES
-                            ):
-                                cap_stop = flush()
+                            submit_fetch(row)
+                            if len(pending) >= self.swh_pending:
+                                cap_stop = drain_fetches(block=True)
                                 if cap_stop:
                                     break
+                            cap_stop = drain_fetches(block=False)
+                            if cap_stop:
+                                break
                         if cap_stop:
                             break
-                    if not cap_stop:
+                    while pending and not cap_stop:
+                        cap_stop = drain_fetches(block=True)
+                    if cap_stop:
+                        cancel_pending()
+                    else:
                         flush()
                     # every fetch failed and not one byte landed: a systemic
                     # access problem, not missing files — surface it loudly
@@ -1900,6 +1994,10 @@ class Trainer:
             shard_cache_type=SHARD_CACHE_TYPE,
             shard_block_size=SHARD_BLOCK_SIZE,
             remote_streams=self.remote_streams,
+            swh_fetchers=self.swh_fetchers,
+            swh_pending=self.swh_pending,
+            swh_unsigned=self._swh_unsigned(),
+            cap_warmup_inflight=self.cap_warmup_inflight,
             memory_soft_limit=MEMORY_SOFT_LIMIT_BYTES,
             memory_trim_interval_s=MEMORY_TRIM_INTERVAL_S,
             roster_hash=self.roster_hash,
@@ -1959,6 +2057,7 @@ class Trainer:
         finally:
             self.stop.set()
             pool.shutdown(wait=True, cancel_futures=True)
+            self._shutdown_swh_pool()
             for future in futures:
                 if future.done() and (exc := future.exception()) is not None:
                     self.events.log("error", stage="thread", error=err_text(exc))

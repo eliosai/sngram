@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import threading
+import time
 from pathlib import Path
 
 import pyarrow as pa
@@ -192,6 +194,37 @@ def test_swh_object_errors_are_logged_and_do_not_stop_the_shard(tmp_path: Path):
     assert batch["fetch_errors"] == 1
     assert batch["decode_errors"] == 1
     assert batch["accepted_objects"] == 1
+
+
+def test_swh_objects_fetch_concurrently_inside_one_shard(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("SNG_SWH_FETCHERS", "8")
+    monkeypatch.setenv("SNG_SWH_PENDING", "8")
+    content_dir = tmp_path / "content"
+    content = b"print('ok')\n"
+    rows = [_row(f"blob-{i}", content) for i in range(32)]
+    metadata = _write_metadata(tmp_path / "metadata", rows)
+    family = _swh_family(metadata, content_dir, "core-programming", len(content) * len(rows))
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_read(self, url, ws, sid):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return content, 0.02
+
+    monkeypatch.setattr(Trainer, "_read_swh_content", fake_read)
+    trainer = _run(tmp_path, family, target=len(content) * len(rows))
+
+    assert trainer.durable_bytes() == len(content) * len(rows)
+    assert max_active >= 4
 
 
 def test_swh_preflight_requires_stack_v2_metadata_columns(tmp_path: Path):

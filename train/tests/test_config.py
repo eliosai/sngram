@@ -28,6 +28,7 @@ def test_default_distribution_is_stack_v2_swh_only():
     assert all(s.text_field == "blob_id" for s in all_sources())
     assert all(s.content_prefix == STACK_V2_CONTENT_PREFIX for s in all_sources())
     assert all(set(STACK_V2_REQUIRED_COLUMNS) <= set(s.metadata_fields) for s in all_sources())
+    assert all(s.bucket == f.bucket for f in default_families() for s in f.sources)
 
 
 def test_bucket_caps_match_stack_v2_distribution_doc_exactly():
@@ -46,9 +47,21 @@ def test_bucket_caps_match_stack_v2_distribution_doc_exactly():
 def test_source_caps_roll_up_to_family_caps():
     for family in default_families():
         assert family.weight == family.cap_bytes / STACK_V2_TARGET_BYTES
-        assert len(family.sources) == 1
-        assert family.sources[0].family == family.id
-        assert family.sources[0].cap_bytes == family.cap_bytes
+        assert family.sources
+        assert all(source.family == family.id for source in family.sources)
+        assert all(source.cap_bytes == family.cap_bytes for source in family.sources)
+
+
+def test_stack_v2_sources_use_language_configs_for_dense_reads():
+    buckets = {family.bucket: {s.config for s in family.sources} for family in default_families()}
+
+    assert "Python" in buckets["core-programming"]
+    assert "F-Sharp" in buckets["core-programming"]
+    assert "Markdown" in buckets["docs-prose-markup"]
+    assert "YAML" in buckets["config-build-infra"]
+    assert "HTML" in buckets["web-ui-templates"]
+    assert "SQL" in buckets["data-query-schema"]
+    assert buckets["long-tail"] == {"default"}
 
 
 def test_stack_v2_content_source_is_part_of_roster_identity():
