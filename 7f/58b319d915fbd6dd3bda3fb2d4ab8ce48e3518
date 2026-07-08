@@ -1,0 +1,37 @@
+CLAUDE.md
+  s_f911a7f11fb798::t_0dc96d52e58da7 39,106
+  s_f911a7f11fb798::t_1f1ed9b7552ad6 44,95
+docs/training.md
+  s_f911a7f11fb798::t_1f1ed9b7552ad6 52
+AGENTS.md
+  s_f911a7f11fb798::t_1f1ed9b7552ad6 44,95
+  s_f911a7f11fb798::t_0dc96d52e58da7 39,106
+train/README.md
+  s_f911a7f11fb798::t_941ccbad1422bf 3-40
+docs/architecture.md
+  s_f911a7f11fb798::t_0dc96d52e58da7 14
+  s_f911a7f11fb798::t_c9739a03c2717c 15,18-19
+  s_f911a7f11fb798::t_9c2ebac8cfc7d7 20
+README.md
+  s_f911a7f11fb798::t_089a48e0f59852 5-23,36,42,49,53-58,60-62,64,66-70,72-73,75-78,80-82,85-86,88,90-93,96-99,103-123,127-132
+  s_f911a7f11fb798::t_0dc96d52e58da7 24-26,30,39
+crates/types/README.md
+  s_f911a7f11fb798::t_1f1ed9b7552ad6 3-4
+  s_f911a7f11fb798::t_ab1a079f00b856 11-24,26-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7f58b319d915fbd6dd3bda3fb2d4ab8ce48e3518",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
