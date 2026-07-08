@@ -140,6 +140,18 @@ Planner emits every need it can prove; index format unchanged.
 - Bonus: the 100GB untuned table nearly matches the 12tb tier on this suite
   (32.50 vs 31.82) — corpus scale has flat returns for FP here.
 
+### Phase 5b — word-edge posting bits (postings-v8, done 2026-07-07)
+
+- The simple-class FP mass was -w word queries: the index found substrings
+  ("domain" for `main -w`) and neither -w nor -x ever reached the planner.
+- Posting byte repacked: 6 block bits + 2 word-edge bits (occurrence borders a
+  non-word byte before/after), zero size cost. `\b literal \b` patterns lower
+  edge-aligned covers to GramNeedle::AtWordEdge; eg wraps -w/-x into the
+  indexed pattern.
+- Linux: aggregate 31.82 → 28.92, boundary 48.9 → 1.7, simple 44.8 → 21.5,
+  FN=0. Guard: 49.8 → 37.1. Residual: per-occurrence pairing (START from one
+  occurrence, END from another) — falls to phase 3.5 positions if pursued.
+
 ### Phase 5 — residual classes
 
 - Wide-class seams: boundary-byte-set representation so the seam contributes a
