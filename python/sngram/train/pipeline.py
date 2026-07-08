@@ -73,6 +73,12 @@ _TRANSIENT_MARKERS = (
 _TRANSIENT_STATUS_RE = re.compile(r"\b(?:429|500|502|503|504)\b")
 _NOT_FOUND_MARKERS = ("not found", "does not exist", "gated")
 _NOT_FOUND_STATUS_RE = re.compile(r"\b404\b")
+# credential/authorization failures: a systemic access problem, never a missing
+# object, so they must surface loudly instead of being skipped as "missing"
+_AUTH_MARKERS = (
+    "invalidaccesskeyid", "signaturedoesnotmatch", "access denied", "accessdenied",
+    "unable to locate credentials", "nocredentialserror", "expiredtoken", "invalidtoken",
+)
 _INCOMPLETE_BODY_RE = re.compile(r"received\s+(\d+)\s+bytes,\s+expected\s+(\d+)")
 _ERROR_TYPES = (
     "remoteprotocolerror",
@@ -101,6 +107,8 @@ def _chain_text(e: BaseException) -> str:
 def classify_error(e: Exception) -> str:
     """transient (retry forever with backoff) | missing (skip) | hard (bounded)."""
     s = _chain_text(e)
+    if any(m in s for m in _AUTH_MARKERS):
+        return "hard"
     if any(m in s for m in _TRANSIENT_MARKERS) or _TRANSIENT_STATUS_RE.search(s):
         return "transient"
     if any(m in s for m in _NOT_FOUND_MARKERS) or _NOT_FOUND_STATUS_RE.search(s):
@@ -1372,11 +1380,17 @@ class Trainer:
         if client is None:
             try:
                 import boto3
+                from botocore import UNSIGNED
+                from botocore.config import Config
             except ImportError as e:  # pragma: no cover - exercised on run hosts
                 raise RuntimeError(
                     "Stack v2 SWH content fetch needs boto3; install sngram[train]"
                 ) from e
-            client = boto3.Session().client("s3")
+            # the Software Heritage content bucket is public: read it anonymously
+            # so stale or absent ambient AWS credentials cannot break the fetch
+            client = boto3.client(
+                "s3", region_name="us-east-1", config=Config(signature_version=UNSIGNED)
+            )
             self._s3_tls.client = client
         return client
 
@@ -1458,6 +1472,7 @@ class Trainer:
             latencies: list[float] = []
             texts: list[str] = []
             text_bytes = 0
+            last_fetch_error = ""
             started = time.monotonic()
             try:
                 url = self._load_source(task.source)[task.shard]
@@ -1545,6 +1560,7 @@ class Trainer:
                                     )
                             except Exception as e:  # noqa: BLE001
                                 stats["fetch_errors"] += 1
+                                last_fetch_error = err_text(e)
                                 self.events.log(
                                     "s3_object_error",
                                     shard=sid,
@@ -1593,6 +1609,14 @@ class Trainer:
                             break
                     if not cap_stop:
                         flush()
+                    # every fetch failed and not one byte landed: a systemic
+                    # access problem, not missing files — surface it loudly
+                    # instead of committing a silent zero-byte shard
+                    if stats["fetch_errors"] and not stats["fetched_bytes"]:
+                        raise RuntimeError(
+                            f"{sid}: all {stats['fetch_errors']} content fetches "
+                            f"failed, none succeeded; last error: {last_fetch_error}"
+                        )
                 finally:
                     if fh is not None:
                         fh.close()
