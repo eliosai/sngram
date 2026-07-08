@@ -1,0 +1,44 @@
+crates/eg/src/index/mod.rs
+  s_f911a7f11fb798::t_8745c7f2edd9d0 12
+crates/eg/src/index/manifest.rs
+  s_f911a7f11fb798::t_03455ea08d7ef5 21
+crates/lib/src/query/combine.rs
+  s_f911a7f11fb798::t_95553ba8c5b444 732-746
+  s_f911a7f11fb798::t_492461c7842a75 510-512,515-516,518,525-541
+  s_f911a7f11fb798::t_6f7b238528a59e 542-543,731
+crates/types/src/query.rs
+  s_f911a7f11fb798::t_6baaf7babc0ef8 269-270,569-570,574-579,581-588,596,598-602,604,609
+  s_f911a7f11fb798::t_0e84bc3ea8a6d5 258,271-307,571-573,580,589-595,597,603,605-608
+  s_f911a7f11fb798::t_ff4b8d4d912e7f 610
+crates/eg/src/index/huffman.rs
+  s_f911a7f11fb798::t_d7720efaf553f6 22-25
+  s_f911a7f11fb798::t_453e7772d85236 1-21,26-263
+crates/eg/src/index/executor.rs
+  s_f911a7f11fb798::t_bff3686b6f5d67 359-361,364-371,380,389-414
+  s_f911a7f11fb798::t_ec355042c6fa1f 415
+crates/eg/src/index/postings.rs
+  s_f911a7f11fb798::t_274015ac1dbccf 1037-1039
+  s_f911a7f11fb798::t_33ce1fc679bc2a 1724-1729
+  s_f911a7f11fb798::t_03455ea08d7ef5 979,1004-1011,1017,1053-1056,1177,1179,1182-1184,1187,1189-1201
+  s_f911a7f11fb798::t_9dc12449496550 26
+  s_f911a7f11fb798::t_cc7e9abee453b6 68-69
+  s_f911a7f11fb798::t_cc589dfbeaab87 1669,1738-1747,1751-1752,1755,1757,1833,1835-1837,1843,1847-1864
+  s_f911a7f11fb798::t_0214ad261ec4f0 47,482,490,628-632,674,678-679,697,721,809,825,857-859,866-870,1635,1646-1668
+  s_f911a7f11fb798::t_3cb94046144554 1670,1865
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b0719426d27cc2947f6fdd7a9b604a30e117b296",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
