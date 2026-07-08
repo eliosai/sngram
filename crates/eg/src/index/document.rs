@@ -10,7 +10,7 @@ use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use sngram_types::{ScanError, ScanEvent, ScanSummary, WeightTable};
 
-use super::executor::{BLOCK_BITS, WORD_END_BIT, WORD_START_BIT};
+use super::executor::{BLOCK_BITS, WORD_BOTH_BIT, WORD_END_BIT, WORD_START_BIT};
 
 use super::{
     manifest::CurrentFile,
@@ -130,34 +130,30 @@ fn scan_bytes(
     Ok(Some((hashes, summary)))
 }
 
-/// Maps content spans to six scaled line-block bits plus two word-edge bits
+/// Maps content spans to five hashed line-bucket bits plus three word-edge bits
 struct BlockMap {
     newlines: Vec<usize>,
-    line_count: usize,
 }
 
-const BLOCK_COUNT: usize = 6;
+const BUCKET_COUNT: usize = 5;
 
 impl BlockMap {
     fn new(bytes: &[u8]) -> Self {
-        let newlines: Vec<usize> = memchr::memchr_iter(b'\n', bytes).collect();
-        let trailing = bytes.last().is_some_and(|&byte| byte != b'\n');
-        let line_count = (newlines.len() + usize::from(trailing)).max(1);
         Self {
-            newlines,
-            line_count,
+            newlines: memchr::memchr_iter(b'\n', bytes).collect(),
         }
     }
 
     fn mask(&self, bytes: &[u8], span: &sngram_types::ByteRange) -> u8 {
-        let first = self.block_of(self.line_of(span.start));
-        let last = self.block_of(self.line_of(span.end.saturating_sub(1).max(span.start)));
+        let first = self.line_of(span.start);
+        let last = self.line_of(span.end.saturating_sub(1).max(span.start));
         let mut mask = 0u8;
-        for block in first..=last {
-            mask |= 1 << block;
-        }
-        if mask == 0 {
+        if last - first >= BUCKET_COUNT {
             mask = BLOCK_BITS;
+        } else {
+            for line in first..=last {
+                mask |= 1 << bucket_of(line);
+            }
         }
         mask | word_edges(bytes, span)
     }
@@ -165,11 +161,12 @@ impl BlockMap {
     fn line_of(&self, offset: usize) -> usize {
         self.newlines.partition_point(|&newline| newline < offset)
     }
+}
 
-    fn block_of(&self, line: usize) -> u8 {
-        let block = line.min(self.line_count - 1) * BLOCK_COUNT / self.line_count;
-        u8::try_from(block.min(BLOCK_COUNT - 1)).unwrap_or(5)
-    }
+/// Hash a line index into a bucket so collisions stay file-size independent
+fn bucket_of(line: usize) -> u8 {
+    let mixed = (line as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
+    (mixed % BUCKET_COUNT as u64) as u8
 }
 
 /// Word-edge bits for one occurrence: set when a non-word byte or the text
@@ -181,7 +178,9 @@ fn word_edges(bytes: &[u8], span: &sngram_types::ByteRange) -> u8 {
         .and_then(|at| bytes.get(at))
         .is_none_or(|&byte| !is_word_byte(byte));
     let after = bytes.get(span.end).is_none_or(|&byte| !is_word_byte(byte));
-    u8::from(before) * WORD_START_BIT | u8::from(after) * WORD_END_BIT
+    u8::from(before) * WORD_START_BIT
+        | u8::from(after) * WORD_END_BIT
+        | u8::from(before && after) * WORD_BOTH_BIT
 }
 
 const fn is_word_byte(byte: u8) -> bool {
@@ -238,43 +237,39 @@ impl AsRef<[u8]> for FileBytes {
 
 #[cfg(test)]
 mod tests {
-    use super::{BLOCK_BITS, BlockMap, WORD_END_BIT, WORD_START_BIT, word_edges};
+    use super::{
+        BLOCK_BITS, BlockMap, WORD_BOTH_BIT, WORD_END_BIT, WORD_START_BIT, bucket_of, word_edges,
+    };
     use sngram_types::ByteRange;
 
     #[test]
-    fn six_line_doc_maps_lines_to_distinct_blocks() {
-        let map = BlockMap::new(b"a\nb\nc\nd\ne\nf\n");
+    fn same_line_grams_share_one_bucket_bit() {
+        let text = b"alpha beta\ngamma\n";
+        let map = BlockMap::new(text);
+        let first = map.mask(text, &ByteRange::new(0, 5)) & BLOCK_BITS;
+        let second = map.mask(text, &ByteRange::new(6, 10)) & BLOCK_BITS;
+        assert_eq!(first, second);
+        assert_eq!(first.count_ones(), 1);
+        assert_eq!(first, 1 << bucket_of(0));
+    }
+
+    #[test]
+    fn bucket_is_independent_of_file_length() {
+        let short = b"x\n".repeat(6);
+        let long = b"x\n".repeat(60_000);
+        let span = ByteRange::new(8, 9);
         assert_eq!(
-            map.mask(b"a\nb\nc\nd\ne\nf\n", &ByteRange::new(0, 1)) & BLOCK_BITS,
-            0b00_0001
-        );
-        assert_eq!(
-            map.mask(b"a\nb\nc\nd\ne\nf\n", &ByteRange::new(10, 11)) & BLOCK_BITS,
-            0b10_0000
+            BlockMap::new(&short).mask(&short, &span) & BLOCK_BITS,
+            BlockMap::new(&long).mask(&long, &span) & BLOCK_BITS,
         );
     }
 
     #[test]
-    fn newline_spanning_gram_sets_both_blocks() {
-        let map = BlockMap::new(b"a\nb\nc\nd\ne\nf\n");
-        assert_eq!(
-            map.mask(b"a\nb\nc\nd\ne\nf\n", &ByteRange::new(0, 3)) & BLOCK_BITS,
-            0b00_0011
-        );
-    }
-
-    #[test]
-    fn long_doc_scales_lines_across_blocks() {
-        let content = b"x\n".repeat(60);
-        let map = BlockMap::new(&content);
-        assert_eq!(
-            map.mask(&content, &ByteRange::new(0, 1)) & BLOCK_BITS,
-            0b00_0001
-        );
-        assert_eq!(
-            map.mask(&content, &ByteRange::new(118, 119)) & BLOCK_BITS,
-            0b10_0000
-        );
+    fn newline_spanning_gram_sets_both_line_buckets() {
+        let text = b"a\nb\nc\nd\ne\nf\n";
+        let map = BlockMap::new(text);
+        let mask = map.mask(text, &ByteRange::new(0, 3)) & BLOCK_BITS;
+        assert_eq!(mask, 1 << bucket_of(0) | 1 << bucket_of(1));
     }
 
     #[test]
@@ -283,12 +278,22 @@ mod tests {
         assert_eq!(word_edges(text, &ByteRange::new(2, 6)), 0);
         assert_eq!(
             word_edges(text, &ByteRange::new(8, 12)),
-            WORD_START_BIT | WORD_END_BIT
+            WORD_START_BIT | WORD_END_BIT | WORD_BOTH_BIT
         );
         assert_eq!(word_edges(text, &ByteRange::new(0, 6)), WORD_START_BIT);
         assert_eq!(
             word_edges(text, &ByteRange::new(13, 14)),
-            WORD_START_BIT | WORD_END_BIT
+            WORD_START_BIT | WORD_END_BIT | WORD_BOTH_BIT
+        );
+    }
+
+    #[test]
+    fn split_edge_occurrences_do_not_set_both_bit() {
+        let text = b"main? remain";
+        assert_eq!(word_edges(text, &ByteRange::new(8, 12)) & WORD_BOTH_BIT, 0);
+        assert_eq!(
+            word_edges(text, &ByteRange::new(0, 4)),
+            WORD_START_BIT | WORD_END_BIT | WORD_BOTH_BIT
         );
     }
 }

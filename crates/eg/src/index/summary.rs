@@ -16,9 +16,9 @@ use sngram_types::{
 pub const SUMMARY_FILE_NAME: &str = "summaries.bin";
 
 const MAGIC: [u8; 8] = *b"EGSUM1\0\0";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const HEADER_SIZE: usize = 32;
-const RECORD_SIZE: usize = 400;
+const RECORD_SIZE: usize = 240;
 const STATUS_SKIPPED: u8 = 0;
 const STATUS_UNKNOWN_TEXT: u8 = 1;
 const STATUS_KNOWN: u8 = 2;
@@ -59,10 +59,6 @@ impl SummaryRecord {
 
     pub const fn status(self) -> SummaryStatus {
         self.status
-    }
-
-    const fn ord(self) -> u32 {
-        self.ord
     }
 }
 
@@ -237,21 +233,22 @@ impl SummarySegment {
     fn count_text(&self) -> usize {
         self.body()
             .chunks_exact(RECORD_SIZE)
-            .filter_map(decode_record)
+            .enumerate()
+            .filter_map(|(idx, bytes)| decode_record(idx as u32, bytes))
             .filter(|record| record.status().is_text())
             .count()
     }
 
     fn dense_status(&self, ord: u32) -> Option<SummaryStatus> {
         let idx = usize::try_from(ord).ok()?;
-        let record = self.record(idx)?;
-        (record.ord() == ord).then_some(record.status)
+        Some(self.record(idx)?.status)
     }
 
     fn record(&self, idx: usize) -> Option<SummaryRecord> {
         let start = idx.checked_mul(RECORD_SIZE)?;
         let end = start.checked_add(RECORD_SIZE)?;
-        self.body().get(start..end).and_then(decode_record)
+        let bytes = self.body().get(start..end)?;
+        decode_record(idx as u32, bytes)
     }
 
     fn body(&self) -> &[u8] {
@@ -312,8 +309,10 @@ fn fsync_dir(dir: &Path) -> anyhow::Result<()> {
 
 fn sort_records(records: &mut [SummaryRecord]) -> anyhow::Result<()> {
     records.sort_by_key(|record| record.ord);
-    if records.windows(2).any(|pair| pair[0].ord == pair[1].ord) {
-        anyhow::bail!("duplicate summary record ordinal");
+    for (idx, record) in records.iter().enumerate() {
+        if usize::try_from(record.ord) != Ok(idx) {
+            anyhow::bail!("summary record ordinals are not dense from zero");
+        }
     }
     Ok(())
 }
@@ -371,13 +370,10 @@ fn body_covers_base_and_count_text(body: &[u8], doc_count: usize) -> Option<usiz
         return None;
     }
     let mut text_count = 0usize;
-    for (expected, record) in body.chunks_exact(RECORD_SIZE).enumerate() {
-        let Some(record) = decode_record(record) else {
+    for (idx, record) in body.chunks_exact(RECORD_SIZE).enumerate() {
+        let Some(record) = decode_record(idx as u32, record) else {
             return None;
         };
-        if usize::try_from(record.ord) != Ok(expected) {
-            return None;
-        }
         if record.status().is_text() {
             text_count += 1;
         }
@@ -397,24 +393,22 @@ fn header(count: usize, checksum: u64, text_count: usize) -> [u8; HEADER_SIZE] {
 
 fn encode_record(record: SummaryRecord) -> [u8; RECORD_SIZE] {
     let mut out = [0u8; RECORD_SIZE];
-    write_u32(&mut out, 0, record.ord);
     match record.status {
-        SummaryStatus::Skipped => out[4] = STATUS_SKIPPED,
-        SummaryStatus::UnknownText => out[4] = STATUS_UNKNOWN_TEXT,
+        SummaryStatus::Skipped => out[0] = STATUS_SKIPPED,
+        SummaryStatus::UnknownText => out[0] = STATUS_UNKNOWN_TEXT,
         SummaryStatus::Known(summary) => {
-            out[4] = STATUS_KNOWN;
+            out[0] = STATUS_KNOWN;
             write_summary(&mut out, summary);
         },
     }
     out
 }
 
-fn decode_record(bytes: &[u8]) -> Option<SummaryRecord> {
+fn decode_record(ord: u32, bytes: &[u8]) -> Option<SummaryRecord> {
     if bytes.len() != RECORD_SIZE {
         return None;
     }
-    let ord = read_u32(bytes, 0);
-    let status = match *bytes.get(4)? {
+    let status = match *bytes.first()? {
         STATUS_SKIPPED => SummaryStatus::Skipped,
         STATUS_UNKNOWN_TEXT => SummaryStatus::UnknownText,
         STATUS_KNOWN => SummaryStatus::Known(read_summary(bytes)?),
@@ -424,39 +418,55 @@ fn decode_record(bytes: &[u8]) -> Option<SummaryRecord> {
 }
 
 fn write_summary(out: &mut [u8], summary: ScanSummary) {
-    write_u64(out, 8, summary.byte_len);
-    write_u32(out, 16, summary.line_count);
-    write_u32(out, 20, summary.empty_line_count);
-    write_u32(out, 24, summary.longest_line_len);
-    write_u32(out, 28, summary.gram_count);
-    write_u64(out, 32, summary.flags.bits());
-    out[40..296].copy_from_slice(&summary.byte_counts.counts);
-    write_words(out, 296, summary.line_start_bytes.words);
-    write_words(out, 328, summary.line_end_bytes.words);
-    write_edge(out, 360, 361, summary.prefix);
-    write_edge(out, 377, 378, summary.suffix);
+    write_u64(out, 1, summary.byte_len);
+    write_u32(out, 9, summary.longest_line_len);
+    write_nibble_counts(out, 13, &summary.byte_counts);
+    write_words(out, 141, summary.line_start_bytes.words);
+    write_words(out, 173, summary.line_end_bytes.words);
+    write_edge(out, 205, 206, summary.prefix);
+    write_edge(out, 222, 223, summary.suffix);
 }
 
 fn read_summary(bytes: &[u8]) -> Option<ScanSummary> {
-    let mut counts = [0u8; 256];
-    counts.copy_from_slice(bytes.get(40..296)?);
     Some(ScanSummary {
-        byte_len: read_u64(bytes, 8),
-        line_count: read_u32(bytes, 16),
-        empty_line_count: read_u32(bytes, 20),
-        longest_line_len: read_u32(bytes, 24),
-        gram_count: read_u32(bytes, 28),
-        flags: ScanFlags(read_u64(bytes, 32)),
-        byte_counts: SaturatingByteCounts256 { counts },
+        byte_len: read_u64(bytes, 1),
+        line_count: 0,
+        empty_line_count: 0,
+        longest_line_len: read_u32(bytes, 9),
+        gram_count: 0,
+        flags: ScanFlags::default(),
+        byte_counts: read_nibble_counts(bytes, 13)?,
         line_start_bytes: ByteSet256 {
-            words: read_words(bytes, 296)?,
+            words: read_words(bytes, 141)?,
         },
         line_end_bytes: ByteSet256 {
-            words: read_words(bytes, 328)?,
+            words: read_words(bytes, 173)?,
         },
-        prefix: read_edge(bytes, 360, 361)?,
-        suffix: read_edge(bytes, 377, 378)?,
+        prefix: read_edge(bytes, 205, 206)?,
+        suffix: read_edge(bytes, 222, 223)?,
     })
+}
+
+/// Four-bit saturating byte counts: 15 means fifteen or more
+fn write_nibble_counts(out: &mut [u8], offset: usize, counts: &SaturatingByteCounts256) {
+    for (idx, pair) in counts.counts.chunks_exact(2).enumerate() {
+        out[offset + idx] = pair[0].min(15) | (pair[1].min(15) << 4);
+    }
+}
+
+/// Expand nibbles back to saturating u8 counts, widening 15 to unbounded
+fn read_nibble_counts(bytes: &[u8], offset: usize) -> Option<SaturatingByteCounts256> {
+    let packed = bytes.get(offset..offset + 128)?;
+    let mut counts = [0u8; 256];
+    for (idx, &byte) in packed.iter().enumerate() {
+        counts[idx * 2] = expand_nibble(byte & 0x0F);
+        counts[idx * 2 + 1] = expand_nibble(byte >> 4);
+    }
+    Some(SaturatingByteCounts256 { counts })
+}
+
+const fn expand_nibble(nibble: u8) -> u8 {
+    if nibble == 15 { u8::MAX } else { nibble }
 }
 
 fn write_words(out: &mut [u8], offset: usize, words: [u64; 4]) {
@@ -523,14 +533,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn summary_records_round_trip() {
+    fn summary_records_round_trip_persisted_fields() {
         let summary = ScanSummary {
             byte_len: 3,
-            line_count: 1,
+            line_count: 0,
             empty_line_count: 0,
             longest_line_len: 3,
-            gram_count: 2,
-            flags: ScanFlags::default().with_ascii_lower(),
+            gram_count: 0,
+            flags: ScanFlags::default(),
             byte_counts: {
                 let mut counts = SaturatingByteCounts256::default();
                 counts.observe(b'a');
@@ -551,19 +561,35 @@ mod tests {
         };
         let record = SummaryRecord::new(7, SummaryStatus::Known(summary));
 
-        assert_eq!(decode_record(&encode_record(record)), Some(record));
+        assert_eq!(decode_record(7, &encode_record(record)), Some(record));
     }
 
     #[test]
-    fn base_summary_must_cover_dense_ordinals() {
+    fn nibble_counts_stay_exact_below_saturation_and_widen_above() {
+        let mut counts = SaturatingByteCounts256::default();
+        for _ in 0..14 {
+            counts.observe(b'x');
+        }
+        for _ in 0..90 {
+            counts.observe(b'y');
+        }
+        let mut out = [0u8; RECORD_SIZE];
+        write_nibble_counts(&mut out, 13, &counts);
+        let decoded = read_nibble_counts(&out, 13).unwrap();
+
+        assert_eq!(decoded.counts[usize::from(b'x')], 14);
+        assert_eq!(decoded.counts[usize::from(b'y')], u8::MAX);
+        assert_eq!(decoded.counts[usize::from(b'z')], 0);
+    }
+
+    #[test]
+    fn non_dense_ordinals_are_rejected_at_build() {
         let records = vec![
             SummaryRecord::new(1, SummaryStatus::UnknownText),
             SummaryRecord::new(2, SummaryStatus::UnknownText),
         ];
-        let segment = SummarySegment::from_records(records).unwrap();
 
-        assert_eq!(segment.len(), 2);
-        assert!(!segment.covers_base(2));
+        assert!(SummarySegment::from_records(records).is_err());
     }
 
     #[test]
@@ -605,12 +631,12 @@ mod tests {
     }
 
     #[test]
-    fn open_rejects_non_dense_ordinals() {
-        let path = scratch("summary-nondense").join(SUMMARY_FILE_NAME);
-        let record = SummaryRecord::new(1, SummaryStatus::Known(empty_summary()));
+    fn open_rejects_wrong_document_count() {
+        let path = scratch("summary-count").join(SUMMARY_FILE_NAME);
+        let record = SummaryRecord::new(0, SummaryStatus::Known(empty_summary()));
         fs::write(&path, summary_file(&[record])).unwrap();
 
-        assert!(SummaryIndex::open(&path, 1).unwrap().is_none());
+        assert!(SummaryIndex::open(&path, 2).unwrap().is_none());
     }
 
     fn scratch(name: &str) -> PathBuf {

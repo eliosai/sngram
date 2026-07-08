@@ -43,16 +43,16 @@ const LOCK_SUFFIX: &str = ".lock";
 const TEMP_SUFFIX: &str = ".rebuilding";
 const OLD_SUFFIX: &str = ".old";
 const SECTION_HEADER_SIZE: usize = 32;
-const SECTION_FORMAT_VERSION: u32 = 8;
+const SECTION_FORMAT_VERSION: u32 = 9;
 const TABLE_MAGIC: [u8; 8] = *b"EGTABL1\0";
 const POSTINGS_MAGIC: [u8; 8] = *b"EGPOST2\0";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-/// Table record layout: truncated hash32, u40 byte offset, saturating u24 count
-const TABLE_RECORD_SIZE: usize = 12;
+/// Directory entry layout: first hash32, records byte offset, postings byte offset
+const DIRECTORY_ENTRY_SIZE: usize = 16;
+/// Delta-coded table records per skip-directory block
+const RECORDS_PER_BLOCK: usize = 256;
 const RUN_PAIR_SIZE: usize = 9;
-const MAX_U40: u64 = (1 << 40) - 1;
-const MAX_U24: u32 = (1 << 24) - 1;
 const FILES_PER_RAYON_TASK: usize = 1024;
 const INDEX_RAM_CAP_BYTES: usize = 512 * 1024 * 1024;
 const MIN_PAIRS_PER_RUN: usize = 128 * 1024;
@@ -662,7 +662,7 @@ fn merge_runs(
     progress: Option<&BuildProgress>,
     pairs_total: u64,
 ) -> anyhow::Result<()> {
-    let mut table_writer = SectionWriter::create(table_path, TABLE_MAGIC)?;
+    let mut table_builder = TableBuilder::create(table_path)?;
     let mut postings_writer = SectionWriter::create(postings_path, POSTINGS_MAGIC)?;
     let mut merge_progress = MergeProgress::new(progress, run_count, pairs_total);
     let mut readers = Vec::with_capacity(run_count);
@@ -681,7 +681,7 @@ fn merge_runs(
     while let Some(item) = heap.pop() {
         if current_hash != Some(item.pair.hash) {
             if let Some(hash) = current_hash {
-                flush_posting(&mut table_writer, &mut postings_writer, hash, &docs)?;
+                table_builder.push(&mut postings_writer, hash, &docs)?;
                 docs.clear();
             }
             current_hash = Some(item.pair.hash);
@@ -705,9 +705,9 @@ fn merge_runs(
         }
     }
     if let Some(hash) = current_hash {
-        flush_posting(&mut table_writer, &mut postings_writer, hash, &docs)?;
+        table_builder.push(&mut postings_writer, hash, &docs)?;
     }
-    table_writer.finalize(TABLE_RECORD_SIZE as u64)?;
+    table_builder.finalize()?;
     postings_writer.finalize(1)?;
     merge_progress.finish();
     Ok(())
@@ -765,16 +765,92 @@ impl<'a> MergeProgress<'a> {
     }
 }
 
-fn flush_posting(
-    table_writer: &mut SectionWriter,
-    postings_writer: &mut SectionWriter,
-    hash: u32,
-    docs: &[(u32, u8)],
-) -> anyhow::Result<()> {
-    let len = u32::try_from(docs.len()).context("posting list length does not fit in u32")?;
-    let offset = postings_writer.body_len;
-    write_table_record(table_writer, hash, offset, len)?;
-    write_posting_gaps(postings_writer, docs)
+/// Streams delta-coded table records in skip-directory blocks; df=1 lists
+/// inline into the record instead of touching the postings section
+struct TableBuilder {
+    writer: SectionWriter,
+    directory: Vec<u8>,
+    block_count: u32,
+    block_records: usize,
+    previous_hash: u32,
+    postings_offset: u64,
+}
+
+impl TableBuilder {
+    fn create(path: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            writer: SectionWriter::create(path, TABLE_MAGIC)?,
+            directory: Vec::new(),
+            block_count: 0,
+            block_records: 0,
+            previous_hash: 0,
+            postings_offset: 0,
+        })
+    }
+
+    fn push(
+        &mut self,
+        postings_writer: &mut SectionWriter,
+        hash: u32,
+        docs: &[(u32, u8)],
+    ) -> anyhow::Result<()> {
+        let gap = if self.block_records == 0 {
+            self.begin_block(hash)?;
+            0
+        } else {
+            hash - self.previous_hash
+        };
+        let count = u32::try_from(docs.len()).context("posting count does not fit in u32")?;
+        let mut record = Vec::with_capacity(12);
+        push_uvarint(&mut record, gap);
+        push_uvarint(&mut record, count);
+        if let [(ord, mask)] = docs {
+            push_uvarint(&mut record, *ord);
+            record.push(*mask);
+        } else {
+            let list = encode_posting_list(docs);
+            let size = u32::try_from(list.len()).context("posting list exceeds u32 bytes")?;
+            push_uvarint(&mut record, size);
+            postings_writer.write_all(&list)?;
+            self.postings_offset += u64::from(size);
+        }
+        self.writer.write_all(&record)?;
+        self.previous_hash = hash;
+        self.block_records = (self.block_records + 1) % RECORDS_PER_BLOCK;
+        Ok(())
+    }
+
+    fn begin_block(&mut self, hash: u32) -> anyhow::Result<()> {
+        let records_offset =
+            u32::try_from(self.writer.body_len).context("table records exceed u32 bytes")?;
+        self.directory.extend_from_slice(&hash.to_le_bytes());
+        self.directory
+            .extend_from_slice(&records_offset.to_le_bytes());
+        self.directory
+            .extend_from_slice(&self.postings_offset.to_le_bytes());
+        self.block_count += 1;
+        Ok(())
+    }
+
+    fn finalize(mut self) -> anyhow::Result<()> {
+        let directory = mem::take(&mut self.directory);
+        self.writer.write_all(&directory)?;
+        self.writer.write_all(&self.block_count.to_le_bytes())?;
+        self.writer.finalize(1)
+    }
+}
+
+/// Posting list layout: ascending ordinal gaps as uvarints, then one mask
+/// byte per posting
+fn encode_posting_list(docs: &[(u32, u8)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(docs.len() * 3);
+    let mut previous = 0u32;
+    for (idx, &(doc, _)) in docs.iter().enumerate() {
+        push_uvarint(&mut out, if idx == 0 { doc } else { doc - previous });
+        previous = doc;
+    }
+    out.extend(docs.iter().map(|&(_, mask)| mask));
+    out
 }
 
 fn run_path(runs_dir: &Path, id: usize) -> PathBuf {
@@ -847,10 +923,6 @@ impl PostingsIndex {
         self.base.lookup(hash)
     }
 
-    fn posting_list(&self, hash: u64) -> anyhow::Result<PostingList<'_>> {
-        self.base.posting_list(hash)
-    }
-
     /// Posting-list length without decoding: the df prior for the cost model.
     fn posting_len(&self, hash: u64) -> anyhow::Result<usize> {
         self.base.posting_len(hash)
@@ -884,6 +956,8 @@ impl PlanBackend for PostingsIndex {
 struct Segment {
     table: Mmap,
     postings: Mmap,
+    records_len: usize,
+    block_count: usize,
 }
 
 impl Segment {
@@ -894,13 +968,26 @@ impl Segment {
         mode: IndexOpen,
     ) -> anyhow::Result<Option<Self>> {
         let strict = matches!(mode, IndexOpen::Strict);
-        let Some(table) = open_section(table_path, TABLE_MAGIC, TABLE_RECORD_SIZE, strict)? else {
+        let Some(table) = open_section(table_path, TABLE_MAGIC, 1, strict)? else {
             return Ok(None);
         };
         let Some(postings) = open_section(postings_path, POSTINGS_MAGIC, 1, strict)? else {
             return Ok(None);
         };
-        Ok(Some(Self { table, postings }))
+        let body = table.get(SECTION_HEADER_SIZE..).unwrap_or_default();
+        let Some((records_len, block_count)) = parse_table_footer(body) else {
+            log::debug!(
+                "eg index: {} has a malformed directory footer",
+                table_path.display()
+            );
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            table,
+            postings,
+            records_len,
+            block_count,
+        }))
     }
 
     fn table_body(&self) -> &[u8] {
@@ -912,39 +999,141 @@ impl Segment {
     }
 
     fn lookup(&self, hash: u64) -> anyhow::Result<Vec<executor::Posting>> {
-        self.posting_list(hash).map(|list| list.postings())
+        match self.locate(hash)? {
+            None => Ok(Vec::new()),
+            Some(Located::Inline(posting)) => Ok(vec![posting]),
+            Some(Located::Stored {
+                offset,
+                count,
+                size,
+            }) => Ok(self.stored_list(offset, count, size)?.postings()),
+        }
     }
 
-    fn posting_list(&self, hash: u64) -> anyhow::Result<PostingList<'_>> {
-        let Some(location) = find_record(self.table_body(), hash)? else {
-            return Ok(PostingList::empty());
-        };
+    fn posting_len(&self, hash: u64) -> anyhow::Result<usize> {
+        Ok(match self.locate(hash)? {
+            None => 0,
+            Some(Located::Inline(_)) => 1,
+            Some(Located::Stored { count, .. }) => count as usize,
+        })
+    }
+
+    fn stored_list(&self, offset: u64, count: u32, size: u32) -> anyhow::Result<PostingList<'_>> {
         let postings = self.postings_body();
-        let offset =
-            usize::try_from(location.offset).context("posting offset does not fit in usize")?;
-        let end = match location.next_offset {
-            Some(next) => usize::try_from(next).context("posting end does not fit in usize")?,
-            None => postings.len(),
-        };
-        let Some(region) = (offset <= end).then(|| postings.get(offset..end)).flatten() else {
+        let start = usize::try_from(offset).context("posting offset does not fit in usize")?;
+        let end = start
+            .checked_add(size as usize)
+            .context("posting end overflows usize")?;
+        let Some(region) = postings.get(start..end) else {
             anyhow::bail!("posting list points past postings file");
         };
         Ok(PostingList {
             bytes: region,
-            count: location.count,
+            count,
         })
     }
 
-    fn posting_len(&self, hash: u64) -> anyhow::Result<usize> {
-        let table = self.table_body();
-        let Some(location) = find_record(table, hash)? else {
-            return Ok(0);
+    fn locate(&self, hash: u64) -> anyhow::Result<Option<Located>> {
+        let hash = truncate_hash(hash);
+        let Some(block) = self.block_for(hash)? else {
+            return Ok(None);
         };
-        usize::try_from(location.count).context("posting length does not fit in usize")
+        self.walk_block(block, hash)
+    }
+
+    /// Greatest directory block whose first hash is at most the target
+    fn block_for(&self, hash: u32) -> anyhow::Result<Option<usize>> {
+        let mut lo = 0usize;
+        let mut hi = self.block_count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.directory_entry(mid)?.0 <= hash {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(lo.checked_sub(1))
+    }
+
+    fn directory_entry(&self, idx: usize) -> anyhow::Result<(u32, u32, u64)> {
+        let body = self.table_body();
+        let at = self.records_len + idx * DIRECTORY_ENTRY_SIZE;
+        Ok((
+            read_u32_at(body, at)?,
+            read_u32_at(body, at + 4)?,
+            read_u64_at(body, at + 8)?,
+        ))
+    }
+
+    fn walk_block(&self, block: usize, hash: u32) -> anyhow::Result<Option<Located>> {
+        let (first_hash, records_offset, mut postings_offset) = self.directory_entry(block)?;
+        let end = if block + 1 < self.block_count {
+            self.directory_entry(block + 1)?.1 as usize
+        } else {
+            self.records_len
+        };
+        let records = &self.table_body()[..self.records_len];
+        let mut pos = records_offset as usize;
+        let mut current = first_hash;
+        while pos < end {
+            let (gap, count) = read_record_head(records, &mut pos)?;
+            current = current.wrapping_add(gap);
+            if count == 1 {
+                let ord = read_uvarint(records, &mut pos).context("truncated inline posting")?;
+                let mask = *records.get(pos).context("truncated inline mask")?;
+                pos += 1;
+                if current == hash {
+                    return Ok(Some(Located::Inline(executor::Posting {
+                        ord: ord as usize,
+                        mask,
+                    })));
+                }
+            } else {
+                let size = read_uvarint(records, &mut pos).context("truncated list size")?;
+                if current == hash {
+                    return Ok(Some(Located::Stored {
+                        offset: postings_offset,
+                        count,
+                        size,
+                    }));
+                }
+                postings_offset += u64::from(size);
+            }
+            if current > hash {
+                return Ok(None);
+            }
+        }
+        Ok(None)
     }
 }
 
-/// Delta-varint posting list: first ordinal raw, then ascending gaps
+/// One located posting list: inline single posting or a stored byte region
+enum Located {
+    Inline(executor::Posting),
+    Stored { offset: u64, count: u32, size: u32 },
+}
+
+fn read_record_head(records: &[u8], pos: &mut usize) -> anyhow::Result<(u32, u32)> {
+    let gap = read_uvarint(records, pos).context("truncated record hash gap")?;
+    let count = read_uvarint(records, pos).context("truncated record count")?;
+    anyhow::ensure!(count > 0, "zero-count table record");
+    Ok((gap, count))
+}
+
+/// Split the table body into the records region and directory footer
+fn parse_table_footer(body: &[u8]) -> Option<(usize, usize)> {
+    if body.is_empty() {
+        return Some((0, 0));
+    }
+    let count_at = body.len().checked_sub(4)?;
+    let block_count = read_u32_at(body, count_at).ok()? as usize;
+    let directory_len = block_count.checked_mul(DIRECTORY_ENTRY_SIZE)?;
+    let records_len = count_at.checked_sub(directory_len)?;
+    Some((records_len, block_count))
+}
+
+/// Stored posting list: ascending ordinal gaps, then one mask byte per posting
 #[derive(Clone, Copy)]
 struct PostingList<'a> {
     bytes: &'a [u8],
@@ -952,36 +1141,20 @@ struct PostingList<'a> {
 }
 
 impl<'a> PostingList<'a> {
-    const fn empty() -> Self {
-        Self {
-            bytes: &[],
-            count: 0,
-        }
-    }
-
-    fn len(self) -> usize {
-        self.count as usize
-    }
-
     fn postings(self) -> Vec<executor::Posting> {
-        let mut out = Vec::with_capacity(self.len());
+        let count = self.count as usize;
+        let Some(split) = self.bytes.len().checked_sub(count) else {
+            return Vec::new();
+        };
+        let (gaps, masks) = self.bytes.split_at(split);
+        let mut out = Vec::with_capacity(count);
         let mut pos = 0usize;
         let mut ord = 0u32;
-        let mut first = true;
-        while pos < self.bytes.len() {
-            let Some(value) = read_uvarint(self.bytes, &mut pos) else {
+        for (idx, &mask) in masks.iter().enumerate() {
+            let Some(gap) = read_uvarint(gaps, &mut pos) else {
                 break;
             };
-            let Some(&mask) = self.bytes.get(pos) else {
-                break;
-            };
-            pos += 1;
-            ord = if first {
-                value
-            } else {
-                ord.wrapping_add(value)
-            };
-            first = false;
+            ord = if idx == 0 { gap } else { ord.wrapping_add(gap) };
             out.push(executor::Posting {
                 ord: ord as usize,
                 mask,
@@ -1095,7 +1268,7 @@ impl FastNeedle {
         let required = executor::required_edges(needle);
         let mut lists = needle
             .keys()
-            .map(|key| index.posting_list(key.value()).map(PostingList::postings))
+            .map(|key| index.lookup(key.value()))
             .collect::<anyhow::Result<Vec<_>>>()?;
         if required != 0 {
             for list in &mut lists {
@@ -1251,77 +1424,9 @@ fn sampled_checksum(body: &[u8]) -> u64 {
     fnv1a_state(hash, body.get(tail_start..).unwrap_or_default())
 }
 
-/// Binary search the table for `hash`, returning the posting byte offset and
-/// list length stored in the record — no per-open reconstruction, because a
-/// process-per-query CLI pays any open-time work on every invocation.
-/// One located posting list: byte offset, ordinal count, next list's offset
-struct PostingLocation {
-    offset: u64,
-    count: u32,
-    next_offset: Option<u64>,
-}
-
 /// Fold a 64-bit gram key into the stored 32-bit hash; collisions merge lists
 const fn truncate_hash(hash: u64) -> u32 {
     hash as u32
-}
-
-fn find_record(table: &[u8], hash: u64) -> anyhow::Result<Option<PostingLocation>> {
-    if !table.len().is_multiple_of(TABLE_RECORD_SIZE) {
-        anyhow::bail!("index table has invalid length");
-    }
-    let hash = truncate_hash(hash);
-    let mut lo = 0usize;
-    let mut hi = table.len() / TABLE_RECORD_SIZE;
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let mid_hash = read_u32_at(table, mid * TABLE_RECORD_SIZE)?;
-        match mid_hash.cmp(&hash) {
-            Ordering::Less => lo = mid + 1,
-            Ordering::Greater => hi = mid,
-            Ordering::Equal => return record_at(table, mid).map(Some),
-        }
-    }
-    Ok(None)
-}
-
-fn record_at(table: &[u8], idx: usize) -> anyhow::Result<PostingLocation> {
-    let next_start = (idx + 1) * TABLE_RECORD_SIZE;
-    let next_offset = if next_start < table.len() {
-        Some(read_u40_at(table, next_start + 4)?)
-    } else {
-        None
-    };
-    Ok(PostingLocation {
-        offset: read_u40_at(table, idx * TABLE_RECORD_SIZE + 4)?,
-        count: read_u24_at(table, idx * TABLE_RECORD_SIZE + 9)?,
-        next_offset,
-    })
-}
-
-fn write_table_record(
-    writer: &mut SectionWriter,
-    hash: u32,
-    offset: u64,
-    len: u32,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(offset <= MAX_U40, "posting offset exceeds u40");
-    writer.write_all(&hash.to_le_bytes())?;
-    writer.write_all(&offset.to_le_bytes()[..5])?;
-    writer.write_all(&len.min(MAX_U24).to_le_bytes()[..3])?;
-    Ok(())
-}
-
-fn write_posting_gaps(writer: &mut SectionWriter, docs: &[(u32, u8)]) -> anyhow::Result<()> {
-    let mut buffer = Vec::with_capacity(docs.len().saturating_mul(3));
-    let mut previous = 0u32;
-    for (idx, &(doc, mask)) in docs.iter().enumerate() {
-        let value = if idx == 0 { doc } else { doc - previous };
-        push_uvarint(&mut buffer, value);
-        buffer.push(mask);
-        previous = doc;
-    }
-    writer.write_all(&buffer)
 }
 
 fn push_uvarint(out: &mut Vec<u8>, mut value: u32) {
@@ -1443,24 +1548,12 @@ fn read_pair(reader: &mut BufReader<File>) -> anyhow::Result<Option<Pair>> {
     }))
 }
 
-fn read_u40_at(bytes: &[u8], offset: usize) -> anyhow::Result<u64> {
-    let end = offset.checked_add(5).context("u40 read offset overflow")?;
+fn read_u64_at(bytes: &[u8], offset: usize) -> anyhow::Result<u64> {
+    let end = offset.checked_add(8).context("u64 read offset overflow")?;
     let Some(slice) = bytes.get(offset..end) else {
-        anyhow::bail!("u40 read past end of table");
+        anyhow::bail!("u64 read past end of table");
     };
-    let mut buf = [0u8; 8];
-    buf[..5].copy_from_slice(slice);
-    Ok(u64::from_le_bytes(buf))
-}
-
-fn read_u24_at(bytes: &[u8], offset: usize) -> anyhow::Result<u32> {
-    let end = offset.checked_add(3).context("u24 read offset overflow")?;
-    let Some(slice) = bytes.get(offset..end) else {
-        anyhow::bail!("u24 read past end of table");
-    };
-    let mut buf = [0u8; 4];
-    buf[..3].copy_from_slice(slice);
-    Ok(u32::from_le_bytes(buf))
+    Ok(u64::from_le_bytes(slice.try_into().expect("eight bytes")))
 }
 
 fn read_u32_at(bytes: &[u8], offset: usize) -> anyhow::Result<u32> {
@@ -1565,10 +1658,10 @@ impl PartialOrd for HeapItem {
 mod tests {
     use super::{
         FNV_OFFSET, IndexOpen, MAX_PAIRS_PER_RUN, MIN_PAIRS_PER_RUN, POSTINGS_MAGIC, Pair,
-        PostingList, RUN_PAIR_SIZE, SECTION_HEADER_SIZE, SectionWriter, Segment, TABLE_MAGIC,
-        TABLE_RECORD_SIZE, executor::Posting, find_record, fnv1a_state, pairs_per_run,
-        push_uvarint, read_pair, read_uvarint, sampled_checksum, section_header, suffixed_path,
-        verify_section_with_checksum, write_pair, write_posting_gaps,
+        PostingList, RECORDS_PER_BLOCK, RUN_PAIR_SIZE, SECTION_HEADER_SIZE, SectionWriter, Segment,
+        TABLE_MAGIC, TableBuilder, encode_posting_list, executor::Posting, fnv1a_state,
+        pairs_per_run, push_uvarint, read_pair, read_uvarint, sampled_checksum, section_header,
+        suffixed_path, verify_section_with_checksum, write_pair,
     };
     use std::{
         fs,
@@ -1577,29 +1670,98 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    fn table_body(records: &[(u32, u64, u32)]) -> Vec<u8> {
-        let mut body = Vec::new();
-        for &(hash, offset, len) in records {
-            body.extend_from_slice(&hash.to_le_bytes());
-            body.extend_from_slice(&offset.to_le_bytes()[..5]);
-            body.extend_from_slice(&len.to_le_bytes()[..3]);
+    fn build_segment(dir: &Path, lists: &[(u32, Vec<(u32, u8)>)]) -> Segment {
+        let table = dir.join("table.bin");
+        let postings = dir.join("postings.bin");
+        let mut builder = TableBuilder::create(&table).unwrap();
+        let mut writer = SectionWriter::create(&postings, POSTINGS_MAGIC).unwrap();
+        for (hash, docs) in lists {
+            builder.push(&mut writer, *hash, docs).unwrap();
         }
-        body
+        builder.finalize().unwrap();
+        writer.finalize(1).unwrap();
+        Segment::open(&table, &postings, IndexOpen::Strict)
+            .unwrap()
+            .expect("segment opens")
+    }
+
+    fn masked(pairs: &[(u32, u8)]) -> Vec<Posting> {
+        pairs
+            .iter()
+            .map(|&(ord, mask)| Posting {
+                ord: ord as usize,
+                mask,
+            })
+            .collect()
     }
 
     #[test]
-    fn find_record_returns_location_with_neighbor_offset() {
-        let records = [(10u32, 0u64, 3u32), (20, 5, 0), (30, 5, 5)];
-        let body = table_body(&records);
-
-        let first = find_record(&body, 10).unwrap().expect("first");
-        assert_eq!(
-            (first.offset, first.count, first.next_offset),
-            (0, 3, Some(5))
+    fn lookup_round_trips_stored_and_inline_lists() {
+        let dir = scratch("roundtrip");
+        let stored = vec![(3u32, 0x05u8), (8, 0x21), (70_000, 0xFF)];
+        let segment = build_segment(
+            &dir,
+            &[
+                (10, vec![(42, 0x1F)]),
+                (500, stored.clone()),
+                (u32::MAX, vec![(7, 0xFF)]),
+            ],
         );
-        let last = find_record(&body, 30).unwrap().expect("last");
-        assert_eq!((last.offset, last.count, last.next_offset), (5, 5, None));
-        assert!(find_record(&body, 25).unwrap().is_none());
+
+        assert_eq!(segment.lookup(10).unwrap(), masked(&[(42, 0x1F)]));
+        assert_eq!(segment.lookup(500).unwrap(), masked(&stored));
+        assert_eq!(segment.lookup(u64::MAX).unwrap(), masked(&[(7, 0xFF)]));
+        assert_eq!(segment.lookup(11).unwrap(), Vec::<Posting>::new());
+        assert_eq!(segment.posting_len(500).unwrap(), 3);
+        assert_eq!(segment.posting_len(10).unwrap(), 1);
+        assert_eq!(segment.posting_len(999).unwrap(), 0);
+    }
+
+    #[test]
+    fn counts_above_u16_stay_exact() {
+        let dir = scratch("bigcount");
+        let docs: Vec<(u32, u8)> = (0..70_000u32).map(|ord| (ord, 0x01)).collect();
+        let segment = build_segment(&dir, &[(77, docs.clone())]);
+
+        assert_eq!(segment.posting_len(77).unwrap(), 70_000);
+        assert_eq!(segment.lookup(77).unwrap().len(), 70_000);
+    }
+
+    #[test]
+    fn lookups_cross_directory_blocks() {
+        let dir = scratch("blocks");
+        let lists: Vec<(u32, Vec<(u32, u8)>)> = (0..3 * RECORDS_PER_BLOCK as u32 + 7)
+            .map(|i| {
+                let hash = i * 3 + 1;
+                let docs = if i % 4 == 0 {
+                    vec![(i, 0x11u8)]
+                } else {
+                    vec![(i, 0x0F), (i + 9, 0x10)]
+                };
+                (hash, docs)
+            })
+            .collect();
+        let segment = build_segment(&dir, &lists);
+
+        for (hash, docs) in &lists {
+            assert_eq!(segment.lookup(u64::from(*hash)).unwrap(), masked(docs));
+            assert_eq!(segment.posting_len(u64::from(*hash)).unwrap(), docs.len());
+        }
+        assert_eq!(segment.lookup(0).unwrap(), Vec::<Posting>::new());
+        assert_eq!(segment.lookup(2).unwrap(), Vec::<Posting>::new());
+    }
+
+    #[test]
+    fn posting_list_splits_gaps_from_mask_column() {
+        let docs = [(3u32, 0x01u8), (8, 0x20), (70_000, 0xFF)];
+        let bytes = encode_posting_list(&docs);
+        let list = PostingList {
+            bytes: &bytes,
+            count: docs.len() as u32,
+        };
+
+        assert_eq!(list.postings(), masked(&docs));
+        assert_eq!(&bytes[bytes.len() - 3..], &[0x01, 0x20, 0xFF]);
     }
 
     #[test]
@@ -1612,41 +1774,6 @@ mod tests {
             assert_eq!(pos, bytes.len());
         }
         assert_eq!(read_uvarint(&[0x80], &mut 0), None);
-    }
-
-    #[test]
-    fn posting_list_decodes_delta_varints_with_masks() {
-        let docs = [(3u32, 0b0000_0001u8), (8, 0b1000_0000), (70000, 0xFF)];
-        let mut bytes = Vec::new();
-        let mut previous = 0u32;
-        for (idx, &(doc, mask)) in docs.iter().enumerate() {
-            push_uvarint(&mut bytes, if idx == 0 { doc } else { doc - previous });
-            bytes.push(mask);
-            previous = doc;
-        }
-        let list = PostingList {
-            bytes: &bytes,
-            count: docs.len() as u32,
-        };
-
-        assert_eq!(list.len(), docs.len());
-        assert_eq!(
-            list.postings(),
-            vec![
-                Posting {
-                    ord: 3,
-                    mask: 0b0000_0001
-                },
-                Posting {
-                    ord: 8,
-                    mask: 0b1000_0000
-                },
-                Posting {
-                    ord: 70000,
-                    mask: 0xFF
-                },
-            ]
-        );
     }
 
     #[test]
@@ -1691,89 +1818,41 @@ mod tests {
     }
 
     #[test]
-    fn posting_gap_writer_round_trips_through_section() {
-        let dir = scratch("posting-gaps");
-        let path = dir.join("postings.bin");
-        let docs = (0..40_000u32)
-            .map(|ord| (ord * 3, (ord % 8 + 1) as u8))
-            .collect::<Vec<_>>();
-        let mut writer = SectionWriter::create(&path, POSTINGS_MAGIC).unwrap();
-
-        write_posting_gaps(&mut writer, &docs).unwrap();
-        writer.finalize(1).unwrap();
-
-        let bytes = fs::read(path).unwrap();
-        let body = &bytes[SECTION_HEADER_SIZE..];
-        assert!(body.len() < docs.len() * 3);
-        let list = PostingList {
-            bytes: body,
-            count: docs.len() as u32,
-        };
-        let decoded = list.postings();
-        assert_eq!(decoded.len(), docs.len());
-        for (posting, &(ord, mask)) in decoded.iter().zip(&docs) {
-            assert_eq!((posting.ord, posting.mask), (ord as usize, mask));
-        }
-    }
-
-    fn framed(magic: [u8; 8], record_size: usize, records: usize) -> Vec<u8> {
-        let body = vec![0xABu8; record_size * records];
-        let mut file = section_header(magic, records as u64, sampled_checksum(&body)).to_vec();
-        file.extend_from_slice(&body);
-        file
-    }
-
-    #[test]
     fn section_roundtrip_verifies() {
-        let file = framed(TABLE_MAGIC, TABLE_RECORD_SIZE, 3);
-        assert!(verify_section_with_checksum(&file, TABLE_MAGIC, TABLE_RECORD_SIZE, true).is_ok());
-        let empty = framed(POSTINGS_MAGIC, 1, 0);
+        let body = vec![0xABu8; 24];
+        let mut file = section_header(TABLE_MAGIC, 24, sampled_checksum(&body)).to_vec();
+        file.extend_from_slice(&body);
+        assert!(verify_section_with_checksum(&file, TABLE_MAGIC, 1, true).is_ok());
+
+        let empty = section_header(POSTINGS_MAGIC, 0, sampled_checksum(&[])).to_vec();
         assert!(verify_section_with_checksum(&empty, POSTINGS_MAGIC, 1, true).is_ok());
     }
 
     #[test]
-    fn section_detects_body_corruption() {
-        let mut file = framed(POSTINGS_MAGIC, 1, 4);
-        if let Some(byte) = file.get_mut(SECTION_HEADER_SIZE + 1) {
-            *byte ^= 0xFF;
-        }
+    fn section_detects_body_corruption_and_bad_magic() {
+        let body = vec![0x11u8; 16];
+        let mut file = section_header(POSTINGS_MAGIC, 16, sampled_checksum(&body)).to_vec();
+        file.extend_from_slice(&body);
+        assert!(verify_section_with_checksum(&file, TABLE_MAGIC, 1, true).is_err());
+        file[SECTION_HEADER_SIZE + 1] ^= 0xFF;
         assert!(verify_section_with_checksum(&file, POSTINGS_MAGIC, 1, true).is_err());
     }
 
     #[test]
-    fn actual_open_rejects_corrupted_section_body() {
+    fn actual_open_rejects_corrupted_table_body() {
         let dir = scratch("corrupt-open");
+        build_segment(&dir, &[(9, vec![(1, 0x01), (5, 0x02)])]);
         let table = dir.join("table.bin");
         let postings = dir.join("postings.bin");
-
-        write_section(
-            &table,
-            TABLE_MAGIC,
-            TABLE_RECORD_SIZE,
-            &table_body(&[(1, 0, 1)]),
-        );
-        write_section(&postings, POSTINGS_MAGIC, 1, &1u32.to_le_bytes());
         let mut corrupted = fs::read(&table).unwrap();
-        corrupted[SECTION_HEADER_SIZE + 1] ^= 0xFF;
+        let at = corrupted.len() - 3;
+        corrupted[at] ^= 0xFF;
         fs::write(&table, corrupted).unwrap();
 
         assert!(
             Segment::open(&table, &postings, IndexOpen::Strict)
                 .unwrap()
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn section_detects_bad_magic_and_length() {
-        let file = framed(TABLE_MAGIC, TABLE_RECORD_SIZE, 2);
-        assert!(verify_section_with_checksum(&file, POSTINGS_MAGIC, 1, true).is_err());
-
-        let body = vec![1u8; TABLE_RECORD_SIZE * 2];
-        let mut lying = section_header(TABLE_MAGIC, 3, sampled_checksum(&body)).to_vec();
-        lying.extend_from_slice(&body);
-        assert!(
-            verify_section_with_checksum(&lying, TABLE_MAGIC, TABLE_RECORD_SIZE, true).is_err()
         );
     }
 
@@ -1820,16 +1899,5 @@ mod tests {
         let path = std::env::temp_dir().join(format!("eg-postings-{name}-{stamp}"));
         fs::create_dir_all(&path).unwrap();
         path
-    }
-
-    fn write_section(path: &Path, magic: [u8; 8], record_size: usize, body: &[u8]) {
-        let mut file = section_header(
-            magic,
-            (body.len() / record_size) as u64,
-            sampled_checksum(body),
-        )
-        .to_vec();
-        file.extend_from_slice(body);
-        fs::write(path, file).unwrap();
     }
 }

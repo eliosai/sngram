@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use crate::{ByteSet256, EdgeBytes, GramKey, SaturatingByteCounts256, ScanFlags, ScanSummary};
+use crate::{ByteSet256, EdgeBytes, GramKey, SaturatingByteCounts256, ScanSummary};
 
 /// Errors from parsing query patterns.
 ///
@@ -141,6 +141,8 @@ pub enum GramNeedle {
         starts: bool,
         /// A non-word byte or text end must follow some occurrence.
         ends: bool,
+        /// One single occurrence must carry both word edges at once.
+        whole: bool,
     },
 }
 
@@ -179,16 +181,8 @@ impl GramNeedle {
 pub enum ScanNeed {
     /// Content length must be at least this many bytes.
     MinByteLen(u64),
-    /// Line count must be at least this value.
-    MinLineCount(u32),
-    /// Empty-line count must be at least this value.
-    MinEmptyLineCount(u32),
     /// Longest line must be at least this many bytes.
     MinLongestLineLen(u32),
-    /// All flags must be present.
-    HasFlags(ScanFlags),
-    /// All bytes in the set must occur somewhere.
-    ContainsAllBytes(ByteSet256),
     /// At least one byte in the set must occur somewhere.
     ContainsAnyByte(ByteSet256),
     /// Byte counts must meet these saturating minima.
@@ -209,11 +203,7 @@ impl ScanNeed {
     pub fn satisfied_by(&self, summary: &ScanSummary) -> bool {
         match self {
             Self::MinByteLen(n) => summary.byte_len >= *n,
-            Self::MinLineCount(n) => summary.line_count >= *n,
-            Self::MinEmptyLineCount(n) => summary.empty_line_count >= *n,
             Self::MinLongestLineLen(n) => summary.longest_line_len >= *n,
-            Self::HasFlags(flags) => summary.flags.contains(*flags),
-            Self::ContainsAllBytes(bytes) => Self::summary_byte_set(summary).contains_all(*bytes),
             Self::ContainsAnyByte(bytes) => Self::summary_byte_set(summary).contains_any(*bytes),
             Self::MinByteCounts(counts) => summary.byte_counts.contains_at_least(counts),
             Self::LineStartsWithAnyByte(bytes) => summary.line_start_bytes.contains_any(*bytes),
@@ -366,11 +356,7 @@ impl fmt::Display for ScanNeed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MinByteLen(n) => write!(f, "MinByteLen({n})"),
-            Self::MinLineCount(n) => write!(f, "MinLineCount({n})"),
-            Self::MinEmptyLineCount(n) => write!(f, "MinEmptyLineCount({n})"),
             Self::MinLongestLineLen(n) => write!(f, "MinLongestLineLen({n})"),
-            Self::HasFlags(flags) => write!(f, "HasFlags({flags:?})"),
-            Self::ContainsAllBytes(bytes) => write!(f, "ContainsAllBytes({bytes:?})"),
             Self::ContainsAnyByte(bytes) => write!(f, "ContainsAnyByte({bytes:?})"),
             Self::MinByteCounts(counts) => write_byte_counts(f, counts),
             Self::LineStartsWithAnyByte(bytes) => write!(f, "LineStartsWithAnyByte({bytes:?})"),
@@ -420,6 +406,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::ScanFlags;
 
     #[test]
     fn scan_need_matches_summary_bytes() {
@@ -440,7 +427,7 @@ mod tests {
             suffix: edge(b"ab"),
         };
 
-        assert!(ScanNeed::ContainsAllBytes(one_byte(b'a')).satisfied_by(&summary));
+        assert!(ScanNeed::ContainsAnyByte(one_byte(b'a')).satisfied_by(&summary));
         assert!(ScanNeed::StartsWith(edge(b"a")).satisfied_by(&summary));
         assert!(ScanNeed::EndsWith(edge(b"b")).satisfied_by(&summary));
     }
@@ -501,6 +488,14 @@ mod tests {
         assert_eq!(estimate_candidates(&PlanExpr::None, &df), 0);
     }
 
+    fn all_of_keys(values: &[u64]) -> QueryPlan {
+        QueryPlan::new(PlanExpr::AllOf {
+            grams: values.iter().map(|&v| GramNeedle::Key(key(v))).collect(),
+            needs: vec![],
+            children: vec![],
+        })
+    }
+
     #[test]
     fn tuning_caps_all_of_grams_to_rarest_few() {
         let df = df_of(
@@ -513,17 +508,7 @@ mod tests {
             ],
             1000,
         );
-        let mut plan = QueryPlan::new(PlanExpr::AllOf {
-            grams: vec![
-                GramNeedle::Key(key(5)),
-                GramNeedle::Key(key(4)),
-                GramNeedle::Key(key(3)),
-                GramNeedle::Key(key(2)),
-                GramNeedle::Key(key(1)),
-            ],
-            needs: vec![],
-            children: vec![],
-        });
+        let mut plan = all_of_keys(&[5, 4, 3, 2, 1]);
 
         plan.tune(&df, 45);
 

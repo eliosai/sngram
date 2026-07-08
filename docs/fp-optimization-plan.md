@@ -152,6 +152,33 @@ Planner emits every need it can prove; index format unchanged.
   FN=0. Guard: 49.8 → 37.1. Residual: per-occurrence pairing (START from one
   occurrence, END from another) — falls to phase 3.5 positions if pursued.
 
+### Phase 6 — postings-v9: the final format (2026-07-07)
+
+One format bump carrying every size and precision decision from the
+adversarial design round. Measured findings that shaped it:
+
+- The fixed u40 offset column made table.bin the single largest waste:
+  delta-coding hash gaps and letting offsets accumulate from per-block
+  directory entries collapses 12B records to ~3B.
+- Max gram df on linux is 90,031 — a u16 count would truncate; counts are
+  exact uvarints now (the old u24 saturation is gone).
+- Varint posting gaps measured within 14% of the Elias-Fano floor; kept.
+  Roaring/PEF/SIMD-BP128 all lose on the 68% df=1 gram majority.
+- df=1 lists inline into their table record (ord + mask), removing one
+  postings touch and the size varint.
+- Masks split into a per-list column after the gaps.
+- Scaled line blocks scaled with file size, so big files degraded to
+  doc-granularity. Buckets are now hash(line) % 5 — collision probability
+  is file-size independent. The sixth bit becomes WORD_BOTH: some single
+  occurrence carries both word edges, demanded by whole-literal `-w` plans
+  (split START/END from different occurrences no longer slip through).
+- Summaries drop dead fields (ord, line_count, empty_line_count,
+  gram_count, flags) and pack byte counts as 4-bit saturating nibbles
+  (15 = unbounded, over-inclusive and sound): 400B → 240B per doc.
+- MinLongestLineLen is emitted for patterns that provably cannot match a
+  newline; dead ScanNeed variants removed from types.
+- Binary manifests skip display_path when it equals the relative path.
+
 ### Phase 5 — residual classes
 
 - Wide-class seams: boundary-byte-set representation so the seam contributes a

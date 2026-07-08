@@ -133,18 +133,27 @@ fn needle_for(gram: &Gram, fold: bool, edges: Option<&[u8]>) -> GramNeedle {
             GramKey(HashKey::UNKEYED.folded().hash_bytes(gram.as_bytes())),
         ]
     };
-    if let Some(literal) = edges {
-        let starts = literal.starts_with(gram.as_bytes());
-        let ends = literal.ends_with(gram.as_bytes());
-        if starts || ends {
-            return GramNeedle::AtWordEdge { keys, starts, ends };
-        }
+    if let Some(needle) = edge_needle(gram, edges, &keys) {
+        return needle;
     }
     if keys.len() == 1 {
         GramNeedle::Key(raw)
     } else {
         GramNeedle::AnyKey(keys)
     }
+}
+
+/// Word-edge needle for grams pinned to a word-bounded literal's edges
+fn edge_needle(gram: &Gram, edges: Option<&[u8]>, keys: &[GramKey]) -> Option<GramNeedle> {
+    let literal = edges?;
+    let starts = literal.starts_with(gram.as_bytes());
+    let ends = literal.ends_with(gram.as_bytes());
+    (starts || ends).then(|| GramNeedle::AtWordEdge {
+        keys: keys.to_vec(),
+        starts,
+        ends,
+        whole: gram.as_bytes() == literal,
+    })
 }
 
 /// The literal of a whole-pattern `\b literal \b` shape whose word-byte
@@ -353,6 +362,23 @@ mod tests {
         let unbounded = plan_of("main");
         each_needle(unbounded.root(), &mut |needle| {
             assert!(!matches!(needle, GramNeedle::AtWordEdge { .. }));
+        });
+    }
+
+    #[test]
+    fn literal_spanning_gram_demands_both_edges_at_once() {
+        let mut whole_seen = false;
+        each_needle(plan_of(r"\bmain\b").root(), &mut |needle| {
+            if let GramNeedle::AtWordEdge { whole, .. } = needle {
+                whole_seen |= whole;
+            }
+        });
+        assert!(whole_seen, "expected a whole-literal needle");
+
+        each_needle(plan_of(r"\bnetif_receive_skb_list\b").root(), &mut |n| {
+            if let GramNeedle::AtWordEdge { whole, .. } = n {
+                assert!(!whole, "partial-cover grams must not demand both edges");
+            }
         });
     }
 

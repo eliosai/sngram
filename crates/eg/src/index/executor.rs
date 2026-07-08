@@ -6,11 +6,14 @@ use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed};
 
 use super::summary::{SummaryIndex, SummaryStatus};
 
-/// All blocks and both word edges set: fully unconstrained
+/// All buckets and all word-edge bits set: fully unconstrained
 pub const FULL_MASK: u8 = u8::MAX;
 
-/// Low six mask bits: which scaled line blocks a gram touches
-pub const BLOCK_BITS: u8 = 0b0011_1111;
+/// Low five mask bits: which hashed line buckets a gram touches
+pub const BLOCK_BITS: u8 = 0b0001_1111;
+
+/// Some single occurrence carries both word edges at once
+pub const WORD_BOTH_BIT: u8 = 1 << 5;
 
 /// Some occurrence is preceded by a non-word byte or text start
 pub const WORD_START_BIT: u8 = 1 << 6;
@@ -224,7 +227,15 @@ fn needle_may_match(needle: &GramNeedle) -> bool {
 pub fn required_edges(needle: &GramNeedle) -> u8 {
     match needle {
         GramNeedle::Key(_) | GramNeedle::AnyKey(_) => 0,
-        GramNeedle::AtWordEdge { starts, ends, .. } => {
+        GramNeedle::AtWordEdge {
+            starts,
+            ends,
+            whole,
+            ..
+        } => {
+            if *whole {
+                return WORD_BOTH_BIT;
+            }
             u8::from(*starts) * WORD_START_BIT | u8::from(*ends) * WORD_END_BIT
         },
     }
@@ -479,7 +490,7 @@ mod tests {
         let backend = fake_backend(&[(GramKey(1), full(&[0, 1]))], Vec::new());
         let plan = QueryPlan::new(PlanExpr::AllOf {
             grams: vec![GramNeedle::Key(GramKey(1))],
-            needs: vec![ScanNeed::MinLineCount(2)],
+            needs: vec![ScanNeed::MinByteLen(2)],
             children: vec![],
         });
 
@@ -568,7 +579,7 @@ mod tests {
         let backend = fake_backend(&[(GramKey(7), full(&[2]))], Vec::new());
         let plan = QueryPlan::new(PlanExpr::AnyOf {
             grams: vec![GramNeedle::Key(GramKey(7))],
-            needs: vec![ScanNeed::MinLineCount(2)],
+            needs: vec![ScanNeed::MinByteLen(2)],
             children: vec![],
         });
 
@@ -580,7 +591,7 @@ mod tests {
         let backend = fake_backend(&[], vec![2]);
         let plan = QueryPlan::new(PlanExpr::AllOf {
             grams: vec![GramNeedle::Key(GramKey(99))],
-            needs: vec![ScanNeed::MinLineCount(9)],
+            needs: vec![ScanNeed::MinByteLen(9)],
             children: vec![],
         });
 
@@ -592,7 +603,7 @@ mod tests {
         let backend = fake_backend(&[], vec![0, 1, 2]);
         let plan = QueryPlan::new(PlanExpr::AllOf {
             grams: vec![GramNeedle::Key(GramKey(99))],
-            needs: vec![ScanNeed::MinLineCount(2)],
+            needs: vec![ScanNeed::MinByteLen(2)],
             children: vec![],
         });
 
@@ -604,7 +615,7 @@ mod tests {
         let backend = fake_backend(&[], vec![0, 1, 2]);
         let plan = QueryPlan::new(PlanExpr::AllOf {
             grams: vec![GramNeedle::Key(GramKey(99))],
-            needs: vec![ScanNeed::MinLineCount(2)],
+            needs: vec![ScanNeed::MinByteLen(2)],
             children: vec![],
         });
         let df = FakeDf { total: 3 };
@@ -669,11 +680,7 @@ mod tests {
         let backend = fake_backend(&[], Vec::new());
         let needs = vec![
             ScanNeed::MinByteLen(4),
-            ScanNeed::MinLineCount(2),
-            ScanNeed::MinEmptyLineCount(1),
             ScanNeed::MinLongestLineLen(4),
-            ScanNeed::HasFlags(ScanFlags::default().with_ascii_digit()),
-            ScanNeed::ContainsAllBytes(byte_set(b"a1")),
             ScanNeed::ContainsAnyByte(byte_set(b"z1")),
             ScanNeed::MinByteCounts(Box::new(byte_counts(b"aa"))),
             ScanNeed::LineStartsWithAnyByte(byte_set(b"a")),

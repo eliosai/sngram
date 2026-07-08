@@ -55,7 +55,7 @@ pub fn run(args: &HiArgs) -> anyhow::Result<()> {
             args,
             table_fingerprint,
             &table,
-            &location.index_dir().join("postings-v8"),
+            &location.index_dir().join("postings-v9"),
             &snapshot,
             Some(&progress),
         )?,

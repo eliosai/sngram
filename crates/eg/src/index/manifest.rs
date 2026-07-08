@@ -18,12 +18,12 @@ use crate::{flags::HiArgs, haystack::Haystack};
 
 const MANIFEST_VERSION: u32 = 6;
 const TANTIVY_SCHEMA_VERSION: u32 = 4;
-const POSTINGS_SCHEMA_VERSION: u32 = 10;
+const POSTINGS_SCHEMA_VERSION: u32 = 11;
 const TANTIVY_BACKEND: &str = "tantivy";
 const POSTINGS_BACKEND: &str = "postings";
 const TANTIVY_COMPAT_VERSION: &str = "0.26.1";
 const MANIFEST_BINARY_MAGIC: &[u8; 8] = b"EGMANI4\0";
-const MANIFEST_BINARY_VERSION: u32 = 4;
+const MANIFEST_BINARY_VERSION: u32 = 5;
 const MANIFEST_BINARY_EXTENSION: &str = "bin";
 const MANIFEST_HEADER_READ_CAP: usize = 4096;
 const PATH_TABLE_FILE_NAME: &str = "paths-v1.bin";
@@ -163,14 +163,7 @@ pub fn read_current_snapshot(
     let json_exists = path.exists();
     let binary_exists = binary_path.exists();
     if binary_exists && (!json_exists || binary_is_fresh(&binary_path, path)) {
-        match read_binary_snapshot(
-            path,
-            &binary_path,
-            index_root,
-            args,
-            backend,
-            table_fingerprint,
-        ) {
+        match read_binary_snapshot(path, &binary_path, args, backend, table_fingerprint) {
             Ok(snapshot) => return Ok(snapshot),
             Err(err) => log::debug!(
                 "eg index: binary manifest {} unreadable ({err:#}); falling back to JSON",
@@ -287,7 +280,6 @@ fn read_binary_manifest_header(binary_path: &Path) -> anyhow::Result<Option<Mani
 fn read_binary_snapshot(
     manifest_path: &Path,
     binary_path: &Path,
-    index_root: &Path,
     args: &HiArgs,
     backend: ManifestBackend,
     table_fingerprint: u64,
@@ -336,12 +328,7 @@ fn read_binary_snapshot(
     Ok(Some(CurrentSnapshot {
         walk_fingerprint: header.walk_fingerprint,
         git_freshness: header.git_freshness,
-        files: SnapshotFiles::Lazy(LazyManifestFiles::new(
-            index_root.to_path_buf(),
-            bytes,
-            offsets,
-            skipped,
-        )),
+        files: SnapshotFiles::Lazy(LazyManifestFiles::new(bytes, offsets, skipped)),
         dirs: Vec::new(),
     }))
 }
@@ -628,7 +615,12 @@ fn write_binary_manifest(path: &Path, manifest: &Manifest) -> anyhow::Result<()>
     }
     for file in &manifest.files {
         write_string(&mut bytes, &file.path)?;
-        write_string(&mut bytes, &file.display_path)?;
+        let display = if file.display_path == file.path {
+            ""
+        } else {
+            &file.display_path
+        };
+        write_string(&mut bytes, display)?;
         write_u64(&mut bytes, file.path_hash);
         write_u64(&mut bytes, file.len);
         write_option_u64(&mut bytes, file.modified_ns);
@@ -781,7 +773,7 @@ impl BinaryManifestReader<'_> {
         Ok(())
     }
 
-    fn read_current_file(&mut self, ord: usize, root: &Path) -> anyhow::Result<CurrentFile> {
+    fn read_current_file(&mut self, ord: usize) -> anyhow::Result<CurrentFile> {
         let mut manifest = ManifestFile {
             path: self.read_string()?,
             display_path: self.read_string()?,
@@ -796,7 +788,7 @@ impl BinaryManifestReader<'_> {
         };
         let display_path = std::mem::take(&mut manifest.display_path);
         let path = if display_path.is_empty() {
-            root.join(&manifest.path)
+            PathBuf::from(&manifest.path)
         } else {
             PathBuf::from(display_path)
         };
@@ -1233,16 +1225,14 @@ impl LazyPathFiles {
 }
 
 struct LazyManifestFiles {
-    root: PathBuf,
     bytes: Arc<[u8]>,
     offsets: Vec<usize>,
     skipped: Vec<bool>,
 }
 
 impl LazyManifestFiles {
-    fn new(root: PathBuf, bytes: Vec<u8>, offsets: Vec<usize>, skipped: Vec<bool>) -> Self {
+    fn new(bytes: Vec<u8>, offsets: Vec<usize>, skipped: Vec<bool>) -> Self {
         Self {
-            root,
             bytes: bytes.into(),
             offsets,
             skipped,
@@ -1263,7 +1253,7 @@ impl LazyManifestFiles {
             bytes: &self.bytes,
             pos: offset,
         };
-        reader.read_current_file(ord, &self.root).ok()
+        reader.read_current_file(ord).ok()
     }
 }
 
