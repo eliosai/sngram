@@ -1,0 +1,25 @@
+crates/eg/tests/index_integration.rs
+  s_f911a7f11fb798::t_2beb4585e7bc3d 649
+crates/lib/src/query/needs.rs
+  s_f911a7f11fb798::t_07645987fa7a3a 11,24,39-41
+  s_f911a7f11fb798::t_148d183bd48463 590-621
+  s_f911a7f11fb798::t_0896b044424d81 409
+  s_f911a7f11fb798::t_e71fa224ba80a7 402-408,410-425
+  s_f911a7f11fb798::t_5f34d73faa75f0 42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "17ef7f159f35b79f3dace74c06042c358d85b76d",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
