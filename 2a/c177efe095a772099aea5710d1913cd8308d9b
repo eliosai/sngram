@@ -1,0 +1,31 @@
+README.md
+  s_f911a7f11fb798::t_3f3371ee1df353 34,74-76,79,108-110,115,117,120-134
+docs/daemon.md
+  s_f911a7f11fb798::t_2fdb8328315fa3 1-66
+docs/benchmarking.md
+  s_f911a7f11fb798::t_8328e078806c03 1-74
+docs/index-format.md
+  s_f911a7f11fb798::t_8d6ee255b798b6 1-112
+docs/architecture.md
+  s_f911a7f11fb798::t_954897ff9b49a1 1-73
+docs/training.md
+  s_f911a7f11fb798::t_255e06c4bfe739 1-71
+docs/query-planning.md
+  s_f911a7f11fb798::t_b859a4f307dc13 1-88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2ac177efe095a772099aea5710d1913cd8308d9b",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
