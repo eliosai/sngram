@@ -3,7 +3,7 @@ name = "sngram-weights"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Pre-trained sparse n-gram weight tables, embedded at compile time and selectable per training-data tier via Cargo features."
+description = "The pre-trained production sparse n-gram weight table, embedded at compile time."
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
@@ -21,19 +21,7 @@ sngram-types = { workspace = true }
 [features]
 default = []
 
-"500gb" = []
-"1tb" = []
-"2tb" = []
-"3tb" = []
-"4tb" = []
-"5tb" = []
-"6tb" = []
-"7tb" = []
-"8tb" = []
-"9tb" = []
-"10tb" = []
-"11tb" = []
-"12tb" = []
+production = []
 
 [lints]
 workspace = true

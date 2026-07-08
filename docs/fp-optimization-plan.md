@@ -178,6 +178,23 @@ adversarial design round. Measured findings that shaped it:
 - MinLongestLineLen is emitted for patterns that provably cannot match a
   newline; dead ScanNeed variants removed from types.
 - Binary manifests skip display_path when it equals the relative path.
+- Mask columns Huffman-code through a canonical table in a 256B
+  postings.bin prologue; lists under 16 postings stay raw.
+
+Measured on linux (93,610 docs, 1.59GB text): FP 28.92 → 27.76, index
+2.24GB → 1.46GB (ratio 1.42 → 0.92), FN=0, speedup 2.4x. Per file:
+table 839 → 344MB, postings 1356 → 1019MB, summaries 37 → 21MB.
+
+Rejected with reasons:
+
+- SELECTIVITY_REFINE_MULTIPLIER 4: admits refused wide/gap queries at
+  90-100% FP for no wall win; stays 2.
+- 40-bit table keys: hash32 collisions measured +31 candidates per 848k.
+- Wider bucket masks (+1B/posting): gap-class grams occur 20+ times per
+  file and saturate any bucket count — gap stayed ~90.5% after the
+  hashing fix, so more buckets buy nothing there.
+- The gap class is the structural floor of doc+bucket granularity; real
+  positions would fix it and were rejected on size.
 
 ### Phase 5 — residual classes
 
@@ -187,7 +204,28 @@ adversarial design round. Measured findings that shaped it:
 - Revisit `tune()` constants (MAX_ALL_OF_GRAMS=3) and the 30% selectivity ceiling
   once block precision changes the cost model.
 
-## Targets
+## Endline (2026-07-07, format frozen)
+
+| metric | baseline | endline |
+|---|---|---|
+| linux aggregate FP | 38.06% | 27.76% |
+| linux index bytes | 7.0GB (ratio 4.4) | 1.46GB (ratio 0.92) |
+| linux suite speedup | 1.55x scan / 1.49x rg | 2.4x / 2.4x |
+| guard (gitoxide) FP | 49.8% | 35.51% |
+| guard index ratio | 5.12 | 1.13 |
+| false negatives | 0 | 0 (suite-enforced) |
+
+The seam-constant sweep (MAX_SEAM_CROSS 4096/8192, BOUNDARY_KEEP 12/16,
+MAX_CONCAT_ALTERNATIVES 16, and the combination) found the shipped
+constants optimal — every variant measured equal or worse.
+
+What remains is the gap class (~90% FP, half the FP mass): occurrence
+ordering and distance are invisible to doc+bucket granularity, and real
+positions were rejected on size. That is the accepted floor of this
+format. The single-digit aggregate target was not reachable inside the
+size budget; 27.76% at 0.92x corpus is the frozen trade.
+
+## Original targets
 
 - Aggregate suite FP: 33.5% → single digits; gap and scatter classes → <10% each.
 - Index size: ≤ 50% of corpus text bytes.

@@ -36,7 +36,7 @@ The `learn` feature exposes training counters. Keep training-specific code behin
 
 ### `weights`
 
-`crates/weights` embeds trained weight tables. Features expose released tables from `500gb` through `12tb`. The smaller bootstrap tables can exist as data, but the crate should expose only production tiers.
+`crates/weights` embeds the trained production weight table behind the `production` feature. Historical tier tables live in git history and are re-mintable from training checkpoints.
 
 Use:
 
