@@ -23,17 +23,21 @@ pub struct WeightTable {
     weights: Box<[u32; WeightTableSettings::WEIGHTS_COUNT]>,
     version: u32,
     provenance: Option<String>,
+    fingerprint: u64,
 }
 
 impl WeightTable {
     /// Build a table from a function over every byte pair.
     #[must_use]
     pub fn from_weight_fn(mut weight: impl FnMut(u8, u8) -> u32) -> Self {
-        Self {
+        let mut table = Self {
             weights: build_weights(&mut weight),
             version: 1,
             provenance: None,
-        }
+            fingerprint: 0,
+        };
+        table.fingerprint = fingerprint_bytes(&table.to_bytes());
+        table
     }
 
     /// # Errors
@@ -61,6 +65,7 @@ impl WeightTable {
             weights: parse_weights(data),
             version,
             provenance,
+            fingerprint: fingerprint_bytes(bytes),
         })
     }
 
@@ -93,8 +98,8 @@ impl WeightTable {
     /// This is not a cryptographic authenticity check; table payload integrity
     /// is validated by [`WeightTable::from_bytes`].
     #[must_use]
-    pub fn fingerprint(&self) -> u64 {
-        fingerprint_bytes(&self.to_bytes())
+    pub const fn fingerprint(&self) -> u64 {
+        self.fingerprint
     }
 
     /// Return this table with an embedded provenance record.
@@ -110,6 +115,7 @@ impl WeightTable {
         }
         self.version = 2;
         self.provenance = Some(provenance);
+        self.fingerprint = fingerprint_bytes(&self.to_bytes());
         Ok(self)
     }
 

@@ -150,7 +150,13 @@ pub fn query_index(
         );
         return Ok(Some(BTreeSet::new()));
     }
-    let estimate = estimate_with_forced(index, &plan, &df)?;
+    let forced = executor::forced_candidates(index, &plan)?;
+    if let Some(report) = bench.as_deref_mut() {
+        report.set_forced_candidate_files(u64::try_from(forced.len()).unwrap_or(u64::MAX));
+    }
+    let estimate = executor::estimate_candidates(index, &plan, &df)
+        .saturating_add(u64::try_from(forced.len()).unwrap_or(u64::MAX))
+        .min(index.summaries.text_count() as u64);
     if estimate > ceiling {
         if !can_refine_estimate || estimate > selectivity_refinement_ceiling(ceiling, text_count) {
             log::debug!(
@@ -165,7 +171,7 @@ pub fn query_index(
         );
     }
     let lookup_started_at = Instant::now();
-    let candidates = execute_plan(index, &plan, index_plan.precision)?;
+    let candidates = execute_plan(index, &plan, index_plan.precision, &forced)?;
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_index_execute(lookup_started_at);
     }
@@ -194,19 +200,12 @@ fn execute_plan(
     index: &PostingsIndex,
     plan: &QueryPlan,
     precision: executor::Precision,
+    forced: &[usize],
 ) -> anyhow::Result<Vec<usize>> {
     if let Some(candidates) = FastAllOf::try_execute(index, plan, precision)? {
-        let forced = executor::forced_candidates(index, plan)?;
-        return Ok(executor::union_sorted(candidates, forced));
+        return Ok(executor::union_sorted(candidates, forced.to_vec()));
     }
     executor::execute(index, plan, precision)
-}
-
-pub fn forced_candidate_ordinals(
-    index: &PostingsIndex,
-    index_plan: &super::planner::IndexPlan,
-) -> anyhow::Result<Vec<usize>> {
-    executor::forced_candidates(index, &index_plan.plan)
 }
 
 pub fn selectivity_ceiling(doc_count: u64) -> u64 {
@@ -222,22 +221,6 @@ pub fn selectivity_refinement_ceiling(ceiling: u64, doc_count: u64) -> u64 {
     ceiling
         .saturating_mul(SELECTIVITY_REFINE_MULTIPLIER)
         .min(doc_count)
-}
-
-/// Estimated verification set, including files deliberately forced through
-/// exact matching because they have no gram postings.
-fn estimate_with_forced(
-    index: &PostingsIndex,
-    plan: &QueryPlan,
-    df: &PostingsDf<'_>,
-) -> anyhow::Result<u64> {
-    if plan.is_none() {
-        return Ok(0);
-    }
-    let forced = executor::estimate_forced_candidates(index, plan)?;
-    Ok(executor::estimate_candidates(index, plan, df)
-        .saturating_add(forced)
-        .min(index.summaries.text_count() as u64))
 }
 
 /// Posting-list lengths as document-frequency priors.

@@ -50,6 +50,16 @@ impl SearchRoots {
         let path = absolute_path(cwd, path);
         self.roots.iter().any(|root| root.contains(&path))
     }
+
+    pub fn covers_index_root(&self, index_root: &Path) -> bool {
+        matches!(
+            self.roots.as_slice(),
+            [SearchRoot {
+                path,
+                kind: SearchRootKind::Directory
+            }] if path == index_root
+        )
+    }
 }
 
 /// Directory covered by one index generation.

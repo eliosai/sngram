@@ -221,7 +221,13 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     }
     let restrict_started_at = Instant::now();
     let unrestricted_candidates = candidates.len();
-    restrict_candidates(args, &roots, &snapshot, &mut candidates);
+    restrict_candidates(
+        args,
+        &roots,
+        generation.index_root(),
+        &snapshot,
+        &mut candidates,
+    );
     if let Some(report) = bench.as_deref_mut() {
         report
             .timing_mut()
@@ -362,9 +368,13 @@ fn plan_gram_count(plan: &QueryPlan) -> usize {
 fn restrict_candidates(
     args: &HiArgs,
     roots: &SearchRoots,
+    index_root: &std::path::Path,
     snapshot: &manifest::CurrentSnapshot,
     candidates: &mut BTreeSet<usize>,
 ) {
+    if roots.covers_index_root(index_root) {
+        return;
+    }
     candidates.retain(|ord| {
         snapshot
             .file(*ord)
