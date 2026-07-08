@@ -31,7 +31,7 @@ use sngram::{query, scan};
 use sngram_types::{ScanEvent, WeightTable};
 use std::io::Cursor;
 
-let table = WeightTable::from_bytes(&std::fs::read("bins/5tb_weights.bin")?)?;
+let table = sngram_weights::weights();
 let doc = b"fn max_file_size() -> u64 { 0 }";
 
 // Every sparse gram arrives with its 64-bit index key, computed in O(1)
@@ -71,14 +71,12 @@ changed — reindex.
 A table is a 256x256 grid: one `u32` per byte pair, 65,536 entries, plus a
 16-byte header (magic, version, CRC32). 262,160 bytes, validated on load.
 
-The 0.4-era tables are retired: the 0.5 trainer uses a capped blended corpus
-and a new mint schedule (`100gb`, `500gb`, then every 1 TB to `15tb`).
-`sngram-weights` embeds the released tables from `500gb` through `12tb`; the
-`100gb` bootstrap table is kept as data but is not exposed as a crate feature.
-You can also load a table you minted yourself:
+`sngram-weights` embeds the production table behind the `production`
+feature; historical tier tables live in git history. You can also load a
+table you minted yourself:
 
 ```rust
-let table = sngram_types::WeightTable::from_bytes(&std::fs::read("bins/5tb_weights.bin")?)?;
+let table = sngram_types::WeightTable::from_bytes(&std::fs::read("bins/my_weights.bin")?)?;
 let w = table.weight(b'f', b'n');
 ```
 
@@ -107,26 +105,33 @@ table is a function of the data alone. The minted `.bin` files are what
 ## Python
 
 The `python/` uv project ships the `sngram` Python package: maturin-built
-bindings (`scan`, `scan_hashes`, `query`, `gram_hash`, plus the
-training counters with zero-copy, GIL-free Arrow ingestion) and the training
-CLI.
+bindings (`weights` returning the embedded production table, `scan`,
+`scan_hashes`, `query`, `gram_hash`, plus the training counters with
+zero-copy, GIL-free Arrow ingestion) and the training CLI.
 
 ```sh
 cd python && uv sync
 export HF_TOKEN=hf_...                   # or put it in python/.env
-uv run sngram train --mint-dir ./bins    # 15 TB target, mints every 1 TB
+uv run sngram train --mint-dir ./bins    # mints every 1 TB
 uv run sngram train --limit 1GB          # smoke run
-uv run sngram inspect bins/5tb_weights.bin
+uv run sngram inspect bins/final_weights.bin
 ```
 
-`train` streams the capped corpus mix (CodeClippy, GitHub2025, the selected
-high-star Stack v2 mirror, FinePDFs, FineWeb-2, StarCoderData config/markup,
-and code/text blend sources) from Hugging Face with N parallel workers, blends
-the datasets so every mint reflects the whole mix, counts through the Rust
-core (~3 GB/s/core), mints every 1 TB, checkpoints continuously, and
-resumes exactly where it stopped. A live dashboard shows throughput, ETA to
-the next mint, per-worker progress, and stalls; every event also lands in a
-JSONL log next to the mints.
+`train` streams the Stack v2 / Software Heritage distribution
+(docs/training-data.md), counts through the Rust core (~3 GB/s/core),
+mints every 1 TB, checkpoints continuously, and resumes exactly where it
+stopped. A live dashboard shows throughput, ETA to the next mint,
+per-worker progress, and stalls; every event also lands in a JSONL log
+next to the mints.
+
+## Docs
+
+- [docs/architecture.md](docs/architecture.md): the system in one page
+- [docs/index-format.md](docs/index-format.md): postings-v9 on disk
+- [docs/query-planning.md](docs/query-planning.md): regex to plan to candidates
+- [docs/daemon.md](docs/daemon.md): who builds and owns indexes
+- [docs/benchmarking.md](docs/benchmarking.md): how to measure claims
+- [docs/training.md](docs/training.md): the final training run
 
 ## License
 

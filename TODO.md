@@ -1,2 +1,0 @@
-- [x] ask about metadata stored and respected while executing query plan — answered, see docs/fp-optimization-plan.md phase 1
-- [x] ask about table changes if made — mint-time tuning sweeps in scope before the final training run, see docs/fp-optimization-plan.md phase 4
