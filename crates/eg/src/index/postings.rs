@@ -43,7 +43,7 @@ const LOCK_SUFFIX: &str = ".lock";
 const TEMP_SUFFIX: &str = ".rebuilding";
 const OLD_SUFFIX: &str = ".old";
 const SECTION_HEADER_SIZE: usize = 32;
-const SECTION_FORMAT_VERSION: u32 = 7;
+const SECTION_FORMAT_VERSION: u32 = 8;
 const TABLE_MAGIC: [u8; 8] = *b"EGTABL1\0";
 const POSTINGS_MAGIC: [u8; 8] = *b"EGPOST2\0";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1064,13 +1064,13 @@ impl<'a> FastAllOf<'a> {
         if !status.is_text() {
             return false;
         }
-        let mut mask = self.effective(posting.mask);
+        let mut blocks = self.effective(posting.mask) & executor::BLOCK_BITS;
         for filter in &self.filters {
             let Some(filter_mask) = filter.mask_at(posting.ord) else {
                 return false;
             };
-            mask &= self.effective(filter_mask);
-            if mask == 0 {
+            blocks &= self.effective(filter_mask);
+            if blocks == 0 {
                 return false;
             }
         }
@@ -1080,7 +1080,7 @@ impl<'a> FastAllOf<'a> {
     const fn effective(&self, mask: u8) -> u8 {
         match self.precision {
             executor::Precision::Block => mask,
-            executor::Precision::Doc => executor::FULL_MASK,
+            executor::Precision::Doc => mask | executor::BLOCK_BITS,
         }
     }
 }
@@ -1092,10 +1092,16 @@ struct FastNeedle {
 
 impl FastNeedle {
     fn open(index: &PostingsIndex, needle: &GramNeedle) -> anyhow::Result<Self> {
-        let lists = needle
+        let required = executor::required_edges(needle);
+        let mut lists = needle
             .keys()
             .map(|key| index.posting_list(key.value()).map(PostingList::postings))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        if required != 0 {
+            for list in &mut lists {
+                list.retain(|posting| posting.mask & required == required);
+            }
+        }
         let len = lists.iter().map(Vec::len).sum();
         Ok(Self { lists, len })
     }

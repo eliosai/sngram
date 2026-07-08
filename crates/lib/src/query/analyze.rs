@@ -911,7 +911,7 @@ const fn unicode_word_of(boundary: Option<Boundary>) -> Option<bool> {
     }
 }
 
-const fn is_word_byte(b: u8) -> bool {
+pub const fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 

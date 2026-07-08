@@ -46,7 +46,7 @@ impl<'a> CandidateQuery<'a> {
     }
 
     fn query_postings(&mut self) -> anyhow::Result<Option<BTreeSet<usize>>> {
-        let index_home = self.index_dir.join("postings-v7");
+        let index_home = self.index_dir.join("postings-v8");
         let open_started_at = Instant::now();
         let index = postings::open_index(&index_home, self.snapshot)?;
         if let Some(report) = self.bench.as_deref_mut() {

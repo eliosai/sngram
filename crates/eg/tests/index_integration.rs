@@ -354,7 +354,7 @@ fn default_search_builds_and_uses_index() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("default indexed needle"));
-    assert!(fixture.path(".eg/index/postings-v7/manifest.bin").exists());
+    assert!(fixture.path(".eg/index/postings-v8/manifest.bin").exists());
 }
 
 #[test]
@@ -1267,7 +1267,7 @@ fn auto_index_refreshes_changed_files_through_daemon_republish() {
         String::from_utf8(first.stderr).unwrap()
     );
 
-    let marker = fixture.root.join(".eg/index/postings-v7/auto-marker");
+    let marker = fixture.root.join(".eg/index/postings-v8/auto-marker");
     fs::write(&marker, "keep").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
     fs::write(fixture.path("sample.txt"), "beta changed needle\n").unwrap();
@@ -2348,6 +2348,40 @@ fn block_masks_prune_cross_line_gap_candidates() {
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
     assert_eq!(Some(true), report["ok"].as_bool());
+    assert_eq!(Some(2), report["counts"]["candidate_files"].as_u64());
+    assert_eq!(Some(2), report["counts"]["matched_files"].as_u64());
+}
+
+#[test]
+fn word_boundary_queries_prune_midword_candidates() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.path("midword.txt"),
+        "the domain remains chained explained\n",
+    )
+    .unwrap();
+    fs::write(fixture.path("word.txt"), "fn main() { start here }\n").unwrap();
+    for pad in 0..40 {
+        fs::write(
+            fixture.path(format!("pad{pad}.txt")),
+            format!("padding corpus file {pad} keeps selectivity ceilings sane\n"),
+        )
+        .unwrap();
+    }
+    let root = fixture.root.to_str().unwrap();
+
+    let bench = eg(&["--bench", "-w", "main", root]);
+    let stdout = String::from_utf8(bench.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(Some(true), report["ok"].as_bool());
+    assert_eq!(Some(1), report["counts"]["candidate_files"].as_u64());
+    assert_eq!(Some(1), report["counts"]["matched_files"].as_u64());
+
+    let plain = eg(&["--bench", "main", root]);
+    let stdout = String::from_utf8(plain.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
     assert_eq!(Some(2), report["counts"]["candidate_files"].as_u64());
     assert_eq!(Some(2), report["counts"]["matched_files"].as_u64());
 }

@@ -85,7 +85,7 @@ impl<'a> GenerationCatalog<'a> {
     fn manifest_path(&self, state_root: &Path) -> Option<PathBuf> {
         let index_dir = state_root.join("index");
         match self.args.index().backend() {
-            IndexBackend::Postings => Some(index_dir.join("postings-v7/manifest.json")),
+            IndexBackend::Postings => Some(index_dir.join("postings-v8/manifest.json")),
             IndexBackend::Tantivy => Some(index_dir.join("tantivy-v2/manifest.json")),
         }
     }

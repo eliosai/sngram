@@ -133,6 +133,15 @@ pub enum GramNeedle {
     Key(GramKey),
     /// Any one of these keys satisfies the gram requirement.
     AnyKey(Vec<GramKey>),
+    /// Any one key, with occurrences required at word edges.
+    AtWordEdge {
+        /// Alternative keys for the gram.
+        keys: Vec<GramKey>,
+        /// A non-word byte or text start must precede some occurrence.
+        starts: bool,
+        /// A non-word byte or text end must follow some occurrence.
+        ends: bool,
+    },
 }
 
 impl GramNeedle {
@@ -140,7 +149,7 @@ impl GramNeedle {
     pub fn keys(&self) -> impl Iterator<Item = GramKey> + '_ {
         match self {
             Self::Key(key) => core::slice::from_ref(key).iter(),
-            Self::AnyKey(keys) => keys.iter(),
+            Self::AnyKey(keys) | Self::AtWordEdge { keys, .. } => keys.iter(),
         }
         .copied()
     }
@@ -149,7 +158,7 @@ impl GramNeedle {
         let total = df.total_entries();
         match self {
             Self::Key(key) => df.entry_count(*key).min(total),
-            Self::AnyKey(keys) => keys
+            Self::AnyKey(keys) | Self::AtWordEdge { keys, .. } => keys
                 .iter()
                 .map(|&key| df.entry_count(key))
                 .sum::<u64>()
@@ -158,7 +167,7 @@ impl GramNeedle {
     }
 
     fn sort_keys_by_df(&mut self, df: &dyn DfStats) {
-        if let Self::AnyKey(keys) = self {
+        if let Self::AnyKey(keys) | Self::AtWordEdge { keys, .. } = self {
             keys.sort_by_cached_key(|&key| df.entry_count(key));
             keys.dedup();
         }

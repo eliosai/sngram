@@ -6,8 +6,17 @@ use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed};
 
 use super::summary::{SummaryIndex, SummaryStatus};
 
-/// All-blocks mask for doc-granular entries
+/// All blocks and both word edges set: fully unconstrained
 pub const FULL_MASK: u8 = u8::MAX;
+
+/// Low six mask bits: which scaled line blocks a gram touches
+pub const BLOCK_BITS: u8 = 0b0011_1111;
+
+/// Some occurrence is preceded by a non-word byte or text start
+pub const WORD_START_BIT: u8 = 1 << 6;
+
+/// Some occurrence is followed by a non-word byte or text end
+pub const WORD_END_BIT: u8 = 1 << 7;
 
 /// One posting: a document ordinal and the line blocks the gram touches
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,7 +216,17 @@ fn summary_may_satisfy(expr: &PlanExpr, status: SummaryStatus) -> bool {
 fn needle_may_match(needle: &GramNeedle) -> bool {
     match needle {
         GramNeedle::Key(_) => true,
-        GramNeedle::AnyKey(keys) => !keys.is_empty(),
+        GramNeedle::AnyKey(keys) | GramNeedle::AtWordEdge { keys, .. } => !keys.is_empty(),
+    }
+}
+
+/// The context bits a needle demands on its postings
+pub fn required_edges(needle: &GramNeedle) -> u8 {
+    match needle {
+        GramNeedle::Key(_) | GramNeedle::AnyKey(_) => 0,
+        GramNeedle::AtWordEdge { starts, ends, .. } => {
+            u8::from(*starts) * WORD_START_BIT | u8::from(*ends) * WORD_END_BIT
+        },
     }
 }
 
@@ -284,6 +303,10 @@ impl<B: PlanBackend> Executor<'_, B> {
         for key in needle.keys() {
             acc = union_postings(&acc, &self.lookup_cached(key)?);
         }
+        let required = required_edges(needle);
+        if required != 0 {
+            acc.retain(|posting| posting.mask & required == required);
+        }
         Ok(acc)
     }
 
@@ -294,7 +317,7 @@ impl<B: PlanBackend> Executor<'_, B> {
         let mut list = self.backend.lookup_gram(key)?;
         if self.precision == Precision::Doc {
             for posting in &mut list {
-                posting.mask = FULL_MASK;
+                posting.mask |= BLOCK_BITS;
             }
         }
         let list = Rc::new(list);
@@ -333,7 +356,7 @@ fn intersect_postings(left: &[Posting], right: &[Posting]) -> Vec<Posting> {
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
                 let mask = left[i].mask & right[j].mask;
-                if mask != 0 {
+                if mask & BLOCK_BITS != 0 {
                     out.push(Posting {
                         ord: left[i].ord,
                         mask,

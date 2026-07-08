@@ -393,7 +393,12 @@ impl HiArgs {
             return Some(String::new());
         }
         let joined = JoinedPattern::from_patterns(patterns, self.fixed_strings).into_regex();
-        Some(InlineFlags::from_args(self, &joined).wrap(joined))
+        let wrapped = InlineFlags::from_args(self, &joined).wrap(joined);
+        Some(match self.boundary {
+            Some(BoundaryMode::Word) => format!(r"\b(?:{wrapped})\b"),
+            Some(BoundaryMode::Line) => format!("^(?:{wrapped})$"),
+            None => wrapped,
+        })
     }
 
     /// Returns true when a non-default regex engine may be used.
