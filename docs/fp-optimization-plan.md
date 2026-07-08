@@ -125,11 +125,20 @@ Planner emits every need it can prove; index format unchanged.
   Zoekt's full positional cost. Remaining FP mass: gap 110k, simple 52k, wide 23k,
   seam 14.5k of 257k total.
 
-### Phase 4 — mint-time tuning sweep (gates the final training run)
+### Phase 4 — mint-time tuning sweep (done 2026-07-07)
 
-- Re-mint from saved trainer counts across a boundary_discount/floor grid.
-- Rebuild + full suite per variant on linux; guard corpus on finalists.
-- Deliverable: the tuning setting the final training run will bake in.
+- Minted discount {1, 4, 16, 64} (floor 1) from the 100GB checkpoint counts;
+  rebuild + full suite per variant, same counts so only tuning varies.
+- Result: untuned wins. Aggregate FP 32.50 / 33.47 / 33.85 / 34.45; tuning
+  pushed 3 more queries over the selectivity ceiling and cost speed. Per class
+  it trades (ci/opt/plus improve, rep/seam worsen) with a net loss.
+- Why: discounting boundary bigrams aligns gram borders with identifier seams,
+  producing vocabulary-shaped grams with higher df; seam-straddling grams are
+  rarer and more selective. The frequency weights already encode selectivity.
+- **Deliverable: the final training run mints with Tuning::OFF**, matching
+  current production behavior.
+- Bonus: the 100GB untuned table nearly matches the 12tb tier on this suite
+  (32.50 vs 31.82) — corpus scale has flat returns for FP here.
 
 ### Phase 5 — residual classes
 
