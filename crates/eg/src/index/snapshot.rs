@@ -43,8 +43,10 @@ impl<'a> SnapshotLoader<'a> {
         }
     }
 
-    pub fn load(self) -> anyhow::Result<LoadedSnapshot> {
-        if let Some(current) = self.try_daemon_snapshot()? {
+    /// Load the published snapshot; `proofed` skips re-proving freshness the
+    /// caller already established for this query
+    pub fn load(self, proofed: bool) -> anyhow::Result<LoadedSnapshot> {
+        if let Some(current) = self.try_daemon_snapshot(proofed)? {
             return Ok(LoadedSnapshot {
                 current,
                 freshness_proof: "daemon",
@@ -56,8 +58,11 @@ impl<'a> SnapshotLoader<'a> {
         )
     }
 
-    fn try_daemon_snapshot(&self) -> anyhow::Result<Option<manifest::CurrentSnapshot>> {
-        if !runtime::daemon_freshness_proof(&self.location.state_root) {
+    fn try_daemon_snapshot(
+        &self,
+        proofed: bool,
+    ) -> anyhow::Result<Option<manifest::CurrentSnapshot>> {
+        if !proofed && !runtime::daemon_freshness_proof(&self.location.state_root) {
             return Ok(None);
         }
         let backend = match self.args.index().backend() {

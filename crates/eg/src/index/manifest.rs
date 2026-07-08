@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::{flags::HiArgs, haystack::Haystack};
 
 const MANIFEST_VERSION: u32 = 6;
-const TANTIVY_SCHEMA_VERSION: u32 = 4;
-const POSTINGS_SCHEMA_VERSION: u32 = 13;
+const TANTIVY_SCHEMA_VERSION: u32 = 5;
+const POSTINGS_SCHEMA_VERSION: u32 = 14;
 const TANTIVY_BACKEND: &str = "tantivy";
 const POSTINGS_BACKEND: &str = "postings";
 const TANTIVY_COMPAT_VERSION: &str = "0.26.1";
@@ -1058,6 +1058,11 @@ pub struct CurrentSnapshot {
 }
 
 impl CurrentSnapshot {
+    /// Relative directory paths recorded by the walk
+    pub fn dir_paths(&self) -> impl Iterator<Item = &str> {
+        self.dirs.iter().map(|dir| dir.manifest.path.as_str())
+    }
+
     pub fn file_count(&self) -> usize {
         self.files.len()
     }
@@ -1304,11 +1309,7 @@ struct ManifestFile {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::path::Path;
 
     use super::{
         Manifest, ManifestFile, binary_manifest_path, changed_ordinals, file_content_changed,
@@ -1344,14 +1345,11 @@ mod tests {
         }
     }
 
-    fn scratch_path(name: &str) -> PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("eg-manifest-{}-{stamp}", std::process::id()));
-        fs::create_dir_all(&root).expect("scratch dir");
-        root.join(name)
+    fn scratch(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("eg-manifest-{name}-"))
+            .tempdir()
+            .expect("scratch dir")
     }
 
     #[test]
@@ -1419,7 +1417,8 @@ mod tests {
 
     #[test]
     fn binary_manifest_round_trips_skipped_binary_disposition() {
-        let path = scratch_path("manifest.bin");
+        let dir = scratch("roundtrip");
+        let path = dir.path().join("manifest.bin");
         let mut source = manifest(vec![file(10, 1, 1, Some(42))]);
         source.files[0].skipped_binary = true;
 
@@ -1429,8 +1428,5 @@ mod tests {
         assert_eq!(decoded.files.len(), 1);
         assert!(decoded.files[0].skipped_binary);
         assert_eq!(decoded.files[0].content_hash, Some(42));
-
-        fs::remove_file(&path).expect("remove manifest");
-        fs::remove_dir(path.parent().expect("parent")).expect("remove scratch dir");
     }
 }

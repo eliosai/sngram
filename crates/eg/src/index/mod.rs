@@ -190,15 +190,15 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
             report.timing_mut().set_daemon_ready(build_started_at);
         }
     }
-    let proof_started_at = Instant::now();
-    let _ = runtime::daemon_freshness_proof(generation.state_root());
     if let Some(report) = bench.as_deref_mut() {
+        let proof_started_at = Instant::now();
+        let _ = runtime::daemon_freshness_proof(generation.state_root());
         report.timing_mut().set_daemon_proof(proof_started_at);
     }
     let validate_started_at = Instant::now();
     let (snapshot, freshness_proof) =
         snapshot::SnapshotLoader::new(args, table_fingerprint, generation.location(), &index_dir)
-            .load()?
+            .load(true)?
             .into_parts();
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_manifest_open(validate_started_at);
@@ -237,6 +237,7 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
 
 const COLD_BUILD_WAIT: Duration = Duration::from_secs(60 * 60);
 const COLD_PROGRESS_POLL: Duration = Duration::from_millis(100);
+const DAEMON_GONE_GRACE: Duration = Duration::from_secs(5);
 
 fn ensure_daemon_index_ready(generation: &Generation, show_progress: bool) -> anyhow::Result<()> {
     if !runtime::daemon_watch_supported() {
@@ -244,39 +245,65 @@ fn ensure_daemon_index_ready(generation: &Generation, show_progress: bool) -> an
     }
     let started = Instant::now();
     let lease = runtime::Lease::new(generation.index_root(), generation.state_root());
-    let mut progress = progress::BuildProgressRenderer::new(show_progress);
+    let catching_up = generation.source() == "stale";
+    let wake_floor = runtime::wake_mtime(generation.state_root());
+    let mut progress = progress::BuildProgressRenderer::new(show_progress, catching_up);
+    let mut daemon_gone_since = None;
     loop {
         progress.tick(generation.state_root());
-        if runtime::daemon_autospawn_disabled() && !runtime::daemon_running() {
-            bail!("indexed search needs eg-indexd when daemon autospawn is disabled");
+        check_daemon_available(&mut daemon_gone_since)?;
+        if catching_up
+            && let Some(floor) = wake_floor
+            && runtime::daemon_caught_up_since(generation.state_root(), floor)
+        {
+            progress.finish();
+            return Ok(());
         }
-        let remaining = COLD_BUILD_WAIT.saturating_sub(started.elapsed());
-        let poll = remaining.min(COLD_PROGRESS_POLL);
-        match runtime::wait_for_freshness_proof(generation.state_root(), poll) {
-            runtime::ProofWait::Ready => {
-                progress.finish();
-                return Ok(());
-            },
-            runtime::ProofWait::DaemonStopped if !runtime::daemon_autospawn_disabled() => {
-                if started.elapsed() < COLD_BUILD_WAIT {
-                    lease.request_refresh()?;
-                    continue;
-                }
-            },
-            runtime::ProofWait::DaemonStopped => {
-                bail!(
-                    "eg-indexd stopped before publishing {}",
-                    generation.index_dir().display()
-                );
-            },
-            runtime::ProofWait::TimedOut if started.elapsed() < COLD_BUILD_WAIT => continue,
-            runtime::ProofWait::TimedOut => {},
+        if wait_one_proof_poll(generation, &lease, started)? {
+            progress.finish();
+            return Ok(());
         }
-        bail!(
-            "timed out waiting for daemon-owned index at {}",
-            generation.index_dir().display()
-        );
     }
+}
+
+/// Tolerate a daemon-liveness misread briefly before failing the query
+fn check_daemon_available(gone_since: &mut Option<Instant>) -> anyhow::Result<()> {
+    if !runtime::daemon_autospawn_disabled() || runtime::daemon_running() {
+        *gone_since = None;
+        return Ok(());
+    }
+    let since = gone_since.get_or_insert_with(Instant::now);
+    if since.elapsed() > DAEMON_GONE_GRACE {
+        bail!("indexed search needs eg-indexd when daemon autospawn is disabled");
+    }
+    std::thread::sleep(COLD_PROGRESS_POLL);
+    Ok(())
+}
+
+/// One bounded proof poll; true means the index is ready to serve
+fn wait_one_proof_poll(
+    generation: &Generation,
+    lease: &runtime::Lease<'_>,
+    started: Instant,
+) -> anyhow::Result<bool> {
+    let remaining = COLD_BUILD_WAIT.saturating_sub(started.elapsed());
+    let poll = remaining.min(COLD_PROGRESS_POLL);
+    match runtime::wait_for_freshness_proof(generation.state_root(), poll) {
+        runtime::ProofWait::Ready => return Ok(true),
+        runtime::ProofWait::DaemonStopped if !runtime::daemon_autospawn_disabled() => {
+            if started.elapsed() < COLD_BUILD_WAIT {
+                lease.request_refresh()?;
+                return Ok(false);
+            }
+        },
+        runtime::ProofWait::DaemonStopped => return Ok(false),
+        runtime::ProofWait::TimedOut if started.elapsed() < COLD_BUILD_WAIT => return Ok(false),
+        runtime::ProofWait::TimedOut => {},
+    }
+    bail!(
+        "timed out waiting for daemon-owned index at {}",
+        generation.index_dir().display()
+    );
 }
 
 const DEBUG_PLAN_PREVIEW_BYTES: usize = 4096;

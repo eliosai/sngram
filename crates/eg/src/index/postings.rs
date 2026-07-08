@@ -996,7 +996,8 @@ struct Segment {
     postings: Mmap,
     records_len: usize,
     block_count: usize,
-    decoder: Decoder,
+    code_lengths: CodeLengths,
+    decoder: std::sync::OnceLock<Decoder>,
 }
 
 impl Segment {
@@ -1034,7 +1035,8 @@ impl Segment {
             postings,
             records_len,
             block_count,
-            decoder: Decoder::new(&code_lengths),
+            code_lengths,
+            decoder: std::sync::OnceLock::new(),
         }))
     }
 
@@ -1054,9 +1056,10 @@ impl Segment {
                 offset,
                 count,
                 size,
-            }) => Ok(self
-                .stored_list(offset, count, size)?
-                .postings(&self.decoder)),
+            }) => Ok(self.stored_list(offset, count, size)?.postings(
+                self.decoder
+                    .get_or_init(|| Decoder::new(&self.code_lengths)),
+            )),
         }
     }
 
@@ -1804,7 +1807,7 @@ mod tests {
 
     #[test]
     fn lookup_round_trips_stored_and_inline_lists() {
-        let dir = scratch("roundtrip");
+        let (_dir, dir) = scratch("roundtrip");
         let stored = vec![(3u32, 0x05u8), (8, 0x21), (70_000, 0xFF)];
         let segment = build_segment(
             &dir,
@@ -1826,7 +1829,7 @@ mod tests {
 
     #[test]
     fn counts_above_u16_stay_exact() {
-        let dir = scratch("bigcount");
+        let (_dir, dir) = scratch("bigcount");
         let docs: Vec<(u32, u8)> = (0..70_000u32).map(|ord| (ord, 0x01)).collect();
         let segment = build_segment(&dir, &[(77, docs.clone())]);
 
@@ -1836,7 +1839,7 @@ mod tests {
 
     #[test]
     fn lookups_cross_directory_blocks() {
-        let dir = scratch("blocks");
+        let (_dir, dir) = scratch("blocks");
         let lists: Vec<(u32, Vec<(u32, u8)>)> = (0..3 * RECORDS_PER_BLOCK as u32 + 7)
             .map(|i| {
                 let hash = i * 3 + 1;
@@ -1913,7 +1916,7 @@ mod tests {
 
     #[test]
     fn run_pair_io_round_trips_and_stops_at_eof() {
-        let dir = scratch("pair-io");
+        let (_dir, dir) = scratch("pair-io");
         let path = dir.join("run.bin");
         let pairs = [
             Pair {
@@ -1968,7 +1971,7 @@ mod tests {
 
     #[test]
     fn actual_open_rejects_corrupted_table_body() {
-        let dir = scratch("corrupt-open");
+        let (_dir, dir) = scratch("corrupt-open");
         build_segment(&dir, &[(9, vec![(1, 0x01), (5, 0x02)])]);
         let table = dir.join("table.bin");
         let postings = dir.join("postings.bin");
@@ -2019,13 +2022,12 @@ mod tests {
         );
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("eg-postings-{name}-{stamp}"));
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn scratch(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("eg-postings-{name}-"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_path_buf();
+        (dir, path)
     }
 }

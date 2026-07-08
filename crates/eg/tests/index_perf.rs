@@ -28,7 +28,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> Fixture {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("eg-index-perf-{}-{id}", std::process::id()));
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("eg-index-perf-{}-{id}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         Fixture { root }
     }

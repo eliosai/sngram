@@ -304,16 +304,24 @@ pub struct BuildProgressRenderer {
     bar: ProgressBar,
     last_poll: Instant,
     enabled: bool,
+    spinner: bool,
 }
 
 impl BuildProgressRenderer {
-    /// Create a terminal renderer when stderr can display one.
-    pub fn new(enabled: bool) -> Self {
+    /// Create a terminal renderer: phase progress, or one steady spinner
+    pub fn new(enabled: bool, spinner: bool) -> Self {
         let enabled = enabled && io::stderr().is_terminal();
         let bar = if enabled {
             let bar = ProgressBar::new(0);
             bar.set_draw_target(ProgressDrawTarget::stderr());
-            bar.set_style(progress_style());
+            bar.set_style(if spinner {
+                spinner_style()
+            } else {
+                progress_style()
+            });
+            if spinner {
+                bar.set_message("indexing changes");
+            }
             bar.enable_steady_tick(Duration::from_millis(100));
             bar
         } else {
@@ -323,12 +331,13 @@ impl BuildProgressRenderer {
             bar,
             last_poll: Instant::now() - PROGRESS_POLL,
             enabled,
+            spinner,
         }
     }
 
     /// Redraw from the persisted daemon progress state.
     pub fn tick(&mut self, state_root: &Path) {
-        if !self.enabled || self.last_poll.elapsed() < PROGRESS_POLL {
+        if !self.enabled || self.spinner || self.last_poll.elapsed() < PROGRESS_POLL {
             return;
         }
         self.last_poll = Instant::now();
@@ -381,26 +390,26 @@ fn progress_style() -> ProgressStyle {
         .progress_chars("=> ")
 }
 
+fn spinner_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner:.green} {msg} ({elapsed})")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
-
     use super::{BuildPhase, BuildProgress, read};
 
-    fn scratch(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("eg-progress-{}-{stamp}-{name}", std::process::id()));
-        fs::create_dir_all(&root).expect("scratch dir");
-        root
+    fn scratch(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("eg-progress-{name}-"))
+            .tempdir()
+            .expect("scratch dir")
     }
 
     #[test]
     fn progress_round_trips_build_phase() {
-        let root = scratch("phase");
+        let root_guard = scratch("phase");
+        let root = root_guard.path().to_path_buf();
         let progress = BuildProgress::new(&root);
 
         progress.phase(BuildPhase::Walking);
@@ -412,7 +421,8 @@ mod tests {
 
     #[test]
     fn scan_progress_keeps_file_counts() {
-        let root = scratch("scan");
+        let root_guard = scratch("scan");
+        let root = root_guard.path().to_path_buf();
         let progress = BuildProgress::new(&root);
 
         progress.start_scan(10);
@@ -428,7 +438,8 @@ mod tests {
 
     #[test]
     fn walk_progress_keeps_entry_file_and_dir_counts() {
-        let root = scratch("walk");
+        let root_guard = scratch("walk");
+        let root = root_guard.path().to_path_buf();
         let progress = BuildProgress::new(&root);
 
         progress.update_walk(512, 400, 100);
@@ -442,7 +453,8 @@ mod tests {
 
     #[test]
     fn snapshot_progress_keeps_file_counts() {
-        let root = scratch("snapshot");
+        let root_guard = scratch("snapshot");
+        let root = root_guard.path().to_path_buf();
         let progress = BuildProgress::new(&root);
 
         progress.start_snapshot(1024);
@@ -456,7 +468,8 @@ mod tests {
 
     #[test]
     fn posting_progress_keeps_pair_and_run_counts() {
-        let root = scratch("postings");
+        let root_guard = scratch("postings");
+        let root = root_guard.path().to_path_buf();
         let progress = BuildProgress::new(&root);
 
         progress.start_postings(8, 2_000_000);
@@ -472,7 +485,8 @@ mod tests {
 
     #[test]
     fn progress_clear_removes_stale_snapshot() {
-        let root = scratch("clear");
+        let root_guard = scratch("clear");
+        let root = root_guard.path().to_path_buf();
         let progress = BuildProgress::new(&root);
         progress.phase(BuildPhase::Walking);
 

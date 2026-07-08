@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn open_rejects_corrupted_checksum() {
-        let path = scratch("summary-corrupt").join(SUMMARY_FILE_NAME);
+        let (_dir, path) = scratch("summary-corrupt");
         let record = SummaryRecord::new(0, SummaryStatus::Known(empty_summary()));
         let mut bytes = summary_file(&[record]);
         bytes[HEADER_SIZE + 8] ^= 0xFF;
@@ -632,21 +632,20 @@ mod tests {
 
     #[test]
     fn open_rejects_wrong_document_count() {
-        let path = scratch("summary-count").join(SUMMARY_FILE_NAME);
+        let (_dir, path) = scratch("summary-count");
         let record = SummaryRecord::new(0, SummaryStatus::Known(empty_summary()));
         fs::write(&path, summary_file(&[record])).unwrap();
 
         assert!(SummaryIndex::open(&path, 2).unwrap().is_none());
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("eg-summary-{name}-{stamp}"));
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn scratch(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("eg-summary-{name}-"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join(SUMMARY_FILE_NAME);
+        (dir, path)
     }
 
     fn summary_file(records: &[SummaryRecord]) -> Vec<u8> {

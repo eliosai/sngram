@@ -36,7 +36,12 @@ pub fn run(args: &HiArgs) -> anyhow::Result<()> {
     let mut build_timings = bench::BuildTimings::default();
     progress.phase(BuildPhase::Walking);
     let walk_started_at = std::time::Instant::now();
-    let collected = walk::collect_haystacks(args, &location.state_root, Some(&progress))?;
+    let collected = walk::collect_haystacks(
+        args,
+        &location.corpus_root,
+        &location.state_root,
+        Some(&progress),
+    )?;
     build_timings.set_walk_collect(walk_started_at);
     progress.phase(BuildPhase::Snapshot);
     progress.start_snapshot(collected.haystacks.len());
@@ -78,6 +83,7 @@ pub fn run(args: &HiArgs) -> anyhow::Result<()> {
         bench::write_build_timings(&location.state_root, &build_timings)?;
     }
     progress.phase(BuildPhase::Ready);
+    runtime::write_watch_dirs(&location.state_root, snapshot.dir_paths())?;
     runtime::mark_journal_clean(&location.state_root)?;
     Ok(())
 }

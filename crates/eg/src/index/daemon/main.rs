@@ -3,6 +3,7 @@
 mod watch;
 
 use std::{
+    collections::HashMap,
     env,
     ffi::OsString,
     fs,
@@ -22,6 +23,7 @@ const JOURNAL_CLEAN_FILE_NAME: &str = "journal-clean";
 const OWNER_FILE_NAME: &str = "daemon-owner";
 const LEASE_FILE_NAME: &str = "lease";
 const WAKE_FILE_NAME: &str = "wake";
+const WATCH_DIRS_FILE_NAME: &str = "watch-dirs";
 const INDEX_DIR_NAME: &str = "index";
 const POSTINGS_MANIFEST: &str = "postings-v9/manifest.bin";
 const POSTINGS_JSON_MANIFEST: &str = "postings-v9/manifest.json";
@@ -30,6 +32,7 @@ const LOCK_FILE_NAME: &str = "daemon.lock";
 const STARTUP_READY_FILE_NAME: &str = "startup-ready";
 const EG_BINARY_NAME: &str = "eg";
 const DAEMON_REFRESH_ENV: &str = "EG_INDEX_DAEMON_REFRESH";
+const RUNTIME_ROOT_ENV: &str = "EG_INDEXD_RUNTIME_ROOT";
 const LEASE_TTL_ENV: &str = "EG_INDEXD_LEASE_TTL_SECS";
 const DEFAULT_LEASE_TTL: Duration = Duration::from_hours(24);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -55,6 +58,7 @@ struct Daemon {
     runtime_root: PathBuf,
     owner: String,
     watcher: watch::Watcher,
+    watch_stamps: HashMap<PathBuf, SystemTime>,
 }
 
 impl Daemon {
@@ -63,11 +67,15 @@ impl Daemon {
             runtime_root,
             owner,
             watcher: watch::Watcher::new()?,
+            watch_stamps: HashMap::new(),
         })
     }
 
     fn serve(&mut self) -> anyhow::Result<()> {
         self.prepare_startup()?;
+        let requests = self.runtime_root.join(REQUESTS_DIR_NAME);
+        let _ = fs::create_dir_all(&requests);
+        self.watcher.watch_signal_dir(&requests)?;
         let started = std::time::Instant::now();
         loop {
             let requests = read_requests(&self.runtime_root)?;
@@ -118,19 +126,40 @@ impl Daemon {
     }
 
     fn watch_request(&mut self, request: &Request) -> anyhow::Result<()> {
-        if self
-            .watcher
-            .watch_tree(&request.index_root, &request.state_root)?
-        {
+        if self.sync_watches(request)? {
             mark_watcher_ready(&request.state_root)?;
         }
         mark_owner(&request.state_root, &self.owner)?;
         Ok(())
     }
 
+    /// Watch the walked directory set, or the whole tree before a first build
+    fn sync_watches(&mut self, request: &Request) -> anyhow::Result<bool> {
+        let path = request
+            .state_root
+            .join(RUNTIME_DIR_NAME)
+            .join(WATCH_DIRS_FILE_NAME);
+        let Ok(stamp) = fs::metadata(&path).and_then(|meta| meta.modified()) else {
+            return self
+                .watcher
+                .watch_tree(&request.index_root, &request.state_root);
+        };
+        if self.watch_stamps.get(&request.state_root) == Some(&stamp) {
+            return Ok(true);
+        }
+        let dirs = read_watch_dirs(&path, &request.index_root)?;
+        let watched = self
+            .watcher
+            .watch_dirs(&request.index_root, &dirs, &request.state_root)?;
+        if watched {
+            self.watch_stamps.insert(request.state_root.clone(), stamp);
+        }
+        Ok(watched)
+    }
+
     fn refresh_if_needed(&mut self, request: &Request) -> anyhow::Result<()> {
         if request.has_live_lease() && request.needs_refresh() {
-            if refresh_request(request).is_ok() {
+            if refresh_request(request, &self.runtime_root).is_ok() {
                 mark_lease_live(&request.state_root)?;
             }
             self.clear_dirty()?;
@@ -311,6 +340,19 @@ fn lease_ttl_from(value: Option<&str>) -> Duration {
         .map_or(DEFAULT_LEASE_TTL, Duration::from_secs)
 }
 
+fn read_watch_dirs(path: &Path, index_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let file = File::open(path)?;
+    let mut dirs = Vec::new();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.is_empty() {
+            continue;
+        }
+        dirs.push(index_root.join(path_from_hex(&line)?));
+    }
+    Ok(dirs)
+}
+
 fn read_requests(runtime_root: &Path) -> anyhow::Result<Vec<Request>> {
     let requests = runtime_root.join(REQUESTS_DIR_NAME);
     let Ok(entries) = fs::read_dir(requests) else {
@@ -433,7 +475,7 @@ fn mark_lease_live(state_root: &Path) -> std::io::Result<()> {
     file.sync_all()
 }
 
-fn refresh_request(request: &Request) -> anyhow::Result<()> {
+fn refresh_request(request: &Request, runtime_root: &Path) -> anyhow::Result<()> {
     clear_journal_clean(&request.state_root);
     let Some(binary) = request.configured_eg_binary().or_else(sibling_eg_binary) else {
         return Ok(());
@@ -442,6 +484,7 @@ fn refresh_request(request: &Request) -> anyhow::Result<()> {
         .args(&request.args)
         .current_dir(&request.cwd)
         .env(DAEMON_REFRESH_ENV, "1")
+        .env(RUNTIME_ROOT_ENV, runtime_root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -600,15 +643,11 @@ mod tests {
         time::Duration,
     };
 
-    fn scratch(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("eg-indexd-{}-{stamp}-{name}", std::process::id()));
-        fs::create_dir_all(&root).expect("scratch dir");
-        root
+    fn scratch(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("eg-indexd-{name}-"))
+            .tempdir()
+            .expect("scratch dir")
     }
 
     fn request_for(state_root: &Path) -> Request {
@@ -654,7 +693,8 @@ state_root={}
 
     #[test]
     fn request_decodes_cwd_and_replay_args() {
-        let root = scratch("request");
+        let root_guard = scratch("request");
+        let root = root_guard.path().to_path_buf();
         let request = root.join("entry.request");
         fs::write(
             &request,
@@ -694,7 +734,8 @@ arg=6e6565646c65
 
     #[test]
     fn mark_lease_live_updates_runtime_lease() {
-        let root = scratch("lease-live");
+        let root_guard = scratch("lease-live");
+        let root = root_guard.path().to_path_buf();
         let lease = root.join(RUNTIME_DIR_NAME).join(LEASE_FILE_NAME);
 
         mark_lease_live(&root).expect("mark lease");
@@ -704,7 +745,8 @@ arg=6e6565646c65
 
     #[test]
     fn configured_eg_binary_must_exist() {
-        let root = scratch("configured-eg");
+        let root_guard = scratch("configured-eg");
+        let root = root_guard.path().to_path_buf();
         let binary = root.join("eg");
         let mut request = request_for(&root);
         request.eg_binary = Some(binary.clone());
@@ -717,7 +759,8 @@ arg=6e6565646c65
 
     #[test]
     fn startup_adopts_live_rooted_requests() {
-        let root = scratch("adopt");
+        let root_guard = scratch("adopt");
+        let root = root_guard.path().to_path_buf();
         let request = request_for(&root);
         let runtime = root.join(RUNTIME_DIR_NAME);
         fs::create_dir_all(&runtime).expect("runtime");
@@ -735,7 +778,8 @@ arg=6e6565646c65
 
     #[test]
     fn startup_discards_requests_for_missing_roots() {
-        let root = scratch("discard-root");
+        let root_guard = scratch("discard-root");
+        let root = root_guard.path().to_path_buf();
         let mut request = request_for(&root);
         request.index_root = root.join("gone");
         let runtime = root.join(RUNTIME_DIR_NAME);
@@ -754,7 +798,8 @@ arg=6e6565646c65
 
     #[test]
     fn startup_discards_expired_leases() {
-        let root = scratch("discard-lease");
+        let root_guard = scratch("discard-lease");
+        let root = root_guard.path().to_path_buf();
         let request = request_for(&root);
 
         assert!(matches!(
@@ -765,7 +810,8 @@ arg=6e6565646c65
 
     #[test]
     fn wake_newer_than_clean_requests_refresh() {
-        let root = scratch("wake");
+        let root_guard = scratch("wake");
+        let root = root_guard.path().to_path_buf();
         let request = request_for(&root);
         let runtime = root.join("runtime");
         fs::create_dir_all(&runtime).expect("runtime");
@@ -778,7 +824,8 @@ arg=6e6565646c65
 
     #[test]
     fn clean_newer_than_wake_skips_refresh() {
-        let root = scratch("clean");
+        let root_guard = scratch("clean");
+        let root = root_guard.path().to_path_buf();
         let request = request_for(&root);
         let runtime = root.join("runtime");
         fs::create_dir_all(&runtime).expect("runtime");
@@ -791,7 +838,8 @@ arg=6e6565646c65
 
     #[test]
     fn malformed_request_is_quarantined_and_ignored() {
-        let root = scratch("bad-request");
+        let root_guard = scratch("bad-request");
+        let root = root_guard.path().to_path_buf();
         let requests = root.join("requests");
         fs::create_dir_all(&requests).expect("requests");
         let request = requests.join("bad.request");
@@ -819,7 +867,8 @@ arg=6e6565646c65
 
     #[test]
     fn dead_request_discard_removes_state_and_request_file() {
-        let root = scratch("startup-cleanup");
+        let root_guard = scratch("startup-cleanup");
+        let root = root_guard.path().to_path_buf();
         let state = root.join("state");
         let request_path = root.join("entry.request");
         fs::create_dir_all(state.join("index")).expect("index");
@@ -859,7 +908,8 @@ arg=6e6565646c65
 
     #[test]
     fn startup_discards_dead_requests_and_adopts_live_ones() {
-        let root = scratch("startup-all-clean");
+        let root_guard = scratch("startup-all-clean");
+        let root = root_guard.path().to_path_buf();
         fs::create_dir_all(root.join("requests")).expect("requests");
         let dead = corpus_with_index(&root, "dead", false);
         let live = corpus_with_index(&root, "live", true);
@@ -885,7 +935,8 @@ arg=6e6565646c65
     fn startup_survives_undeletable_state() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = scratch("startup-clean-fail");
+        let root_guard = scratch("startup-clean-fail");
+        let root = root_guard.path().to_path_buf();
         let requests = root.join("requests");
         let state = root.join("state");
         fs::create_dir_all(&requests).expect("requests");
@@ -903,7 +954,8 @@ arg=6e6565646c65
 
     #[test]
     fn graceful_cleanup_removes_index_markers_and_request_file() {
-        let root = scratch("graceful-cleanup");
+        let root_guard = scratch("graceful-cleanup");
+        let root = root_guard.path().to_path_buf();
         let state = root.join("state");
         let runtime = state.join("runtime");
         let request_path = root.join("entry.request");
@@ -932,7 +984,8 @@ arg=6e6565646c65
 
     #[test]
     fn child_consolidation_requires_clean_live_parent() {
-        let root = scratch("consolidate");
+        let root_guard = scratch("consolidate");
+        let root = root_guard.path().to_path_buf();
         let parent_root = root.join("repo");
         let child_root = parent_root.join("src");
         let parent_state = root.join("parent-state");
@@ -959,7 +1012,8 @@ arg=6e6565646c65
 
     #[test]
     fn child_consolidation_keeps_live_child_index() {
-        let root = scratch("consolidate-live-child");
+        let root_guard = scratch("consolidate-live-child");
+        let root = root_guard.path().to_path_buf();
         let parent_root = root.join("repo");
         let child_root = parent_root.join("src");
         let parent_state = root.join("parent-state");

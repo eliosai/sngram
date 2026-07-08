@@ -35,13 +35,15 @@ impl<'a> GenerationCatalog<'a> {
                 continue;
             }
             let state_root = location::local_state_root(index_root.path());
+            if !state_root.is_dir() {
+                continue;
+            }
             let Some(manifest_path) = self.manifest_path(&state_root) else {
                 continue;
             };
             if !self.manifest_is_compatible(&manifest_path)? {
                 continue;
             }
-            runtime::Lease::new(index_root.path(), &state_root).keep_alive_best_effort();
             if !runtime::daemon_freshness_proof(&state_root) {
                 continue;
             }
@@ -74,11 +76,10 @@ impl<'a> GenerationCatalog<'a> {
         if !self.manifest_is_compatible(&manifest_path)? {
             return Ok("missing");
         }
-        runtime::Lease::new(&location.corpus_root, &location.state_root).keep_alive_best_effort();
         if runtime::daemon_freshness_proof(&location.state_root) {
             Ok("hot")
         } else {
-            Ok("missing")
+            Ok("stale")
         }
     }
 

@@ -6,7 +6,8 @@
     clippy::cast_precision_loss,
     clippy::excessive_nesting,
     clippy::too_many_lines,
-    clippy::unwrap_used
+    clippy::unwrap_used,
+    clippy::expect_used
 )]
 
 use std::{hint::black_box, io::Cursor};

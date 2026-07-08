@@ -40,6 +40,19 @@ the detached renewal fails, nothing breaks now; the proof eventually goes
 stale and the next query takes the cold path, where registration is
 blocking and surfaces its error.
 
+Freshness is ordered by the watcher. Once the watcher notices a change it
+drops `journal-clean` and queries wait for the refresh; a query that races
+a write inside the watcher's reaction window (microseconds) may still be
+served by the previous generation, the same way a scan racing a write may
+read either version.
+
+A query that arrives while the daemon is refreshing does not wait for the
+tree to go fully quiet. It records the wake it registered and accepts the
+index as soon as the owning daemon's `journal-clean` passes that wake, so
+under continuous file churn a query waits for at most one refresh cycle
+instead of starving. The foreground renders that wait as a single spinner;
+the detailed phase bar only shows on a first build.
+
 Cold path: no index or no proof. The process writes a durable request,
 touches `wake`, spawns the daemon if none is live, and blocks polling for
 the freshness proof. The daemon walks the tree, builds the index in a

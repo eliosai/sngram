@@ -36,6 +36,7 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct HiArgs {
     binary: BinaryDetection,
+    index_walk_fingerprint: std::sync::OnceLock<u64>,
     binary_mode: BinaryMode,
     boundary: Option<BoundaryMode>,
     buffer: BufferMode,
@@ -315,6 +316,7 @@ impl HiArgs {
             quit_after_match,
             regex_size_limit: low.regex_size_limit,
             replace: low.replace,
+            index_walk_fingerprint: std::sync::OnceLock::new(),
             search_zip: low.search_zip,
             sort: low.sort,
             stats,
@@ -439,10 +441,26 @@ impl HiArgs {
     /// sparse lookup, so path roots are identity data on the generation, not on
     /// the filter semantics.
     pub(crate) fn index_walk_fingerprint(&self) -> u64 {
-        fn write_part(hash: &mut u64, part: impl std::fmt::Debug) {
-            for byte in format!("{part:?}\n").bytes() {
-                *hash = (*hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        *self
+            .index_walk_fingerprint
+            .get_or_init(|| self.compute_index_walk_fingerprint())
+    }
+
+    fn compute_index_walk_fingerprint(&self) -> u64 {
+        struct FnvWriter(u64);
+        impl std::fmt::Write for FnvWriter {
+            fn write_str(&mut self, part: &str) -> std::fmt::Result {
+                for byte in part.bytes() {
+                    self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                Ok(())
             }
+        }
+        fn write_part(hash: &mut u64, part: impl std::fmt::Debug) {
+            use std::fmt::Write;
+            let mut writer = FnvWriter(*hash);
+            let _ = writeln!(writer, "{part:?}");
+            *hash = writer.0;
         }
 
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
@@ -1011,6 +1029,21 @@ impl HiArgs {
         for path in self.paths.paths.iter().skip(1) {
             builder.add(path);
         }
+        self.configure_walk_builder(builder)
+    }
+
+    /// Walk builder covering one root instead of the requested paths
+    pub(crate) fn walk_builder_rooted(
+        &self,
+        root: &std::path::Path,
+    ) -> anyhow::Result<ignore::WalkBuilder> {
+        self.configure_walk_builder(ignore::WalkBuilder::new(root))
+    }
+
+    fn configure_walk_builder(
+        &self,
+        mut builder: ignore::WalkBuilder,
+    ) -> anyhow::Result<ignore::WalkBuilder> {
         if !self.no_ignore_files {
             for path in self.ignore_file.iter() {
                 if let Some(err) = builder.add_ignore(path) {
