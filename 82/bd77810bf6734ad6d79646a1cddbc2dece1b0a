@@ -1,0 +1,24 @@
+python/sngram/train/pipeline.py
+  s_a5d10ed6367e52::t_1a78b749ab5eb9 1612-1619
+  s_a5d10ed6367e52::t_7fc7258809013a 110-111
+  s_a5d10ed6367e52::t_24c608ca0620c1 1563
+  s_a5d10ed6367e52::t_480bf464881fe7 1383-1384,1389-1393
+  s_a5d10ed6367e52::t_8ed05d5e712499 76-81
+  s_a5d10ed6367e52::t_94db9608b03986 1475
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "82bd77810bf6734ad6d79646a1cddbc2dece1b0a",
+  "prompts": {},
+  "sessions": {
+    "s_a5d10ed6367e52": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "52ce1dcf-fce1-4bd8-834a-a8f05cce3275",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
