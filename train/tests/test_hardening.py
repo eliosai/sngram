@@ -13,12 +13,12 @@ import pyarrow.parquet as pq
 import pytest
 
 import sngram
-from sngram.train import checkpoint
-from sngram.train import pipeline as pl
-from sngram.train.config import Family, Source
-from sngram.train.events import EventLog
-from sngram.train.pipeline import Trainer, classify_error, err_text
-from sngram.train.units import parse_size
+from sngram_train import checkpoint
+from sngram_train import pipeline as pl
+from sngram_train.config import Family, Source
+from sngram_train.events import EventLog
+from sngram_train.pipeline import Trainer, classify_error, err_text
+from sngram_train.units import parse_size
 
 from test_pipeline import local_family, run_trainer, write_fixture  # noqa: E402
 
@@ -215,7 +215,7 @@ def test_planner_transient_retry_is_capped_not_starving(tmp_path: Path, monkeypa
 def test_crash_restart_loop_resumes_and_finishes(tmp_path: Path, monkeypatch):
     """cli._run_until_done must survive a mid-run crash: rebuild from the
     checkpoint and complete, without minting 'final' from the crashed pass."""
-    from sngram import cli
+    from sngram_train import cli
 
     monkeypatch.setattr(time, "sleep", lambda s: None)
     fam = local_family(tmp_path, "alpha", ["hello world"] * 20, files=4)
@@ -313,7 +313,7 @@ def test_watchdog_flags_and_clears_stalls(tmp_path: Path):
 
 def test_dashboard_renders_through_a_live_run(tmp_path: Path):
     """render() runs 4x/s for 10 days; it must never throw, in any state."""
-    from sngram.train.dashboard import render
+    from sngram_train.dashboard import render
 
     fam = local_family(tmp_path, "alpha", ["hello world"] * 50, files=6)
     renders = {"n": 0}

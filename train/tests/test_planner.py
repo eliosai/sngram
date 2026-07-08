@@ -9,15 +9,15 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from sngram.train.config import Family, Source
-from sngram.train.pipeline import (
+from sngram_train.config import Family, Source
+from sngram_train.pipeline import (
     Trainer,
     estimated_family_bytes,
     normalized_weights,
     pick_family,
     resume_dispatched,
 )
-from sngram.train.units import parse_size
+from sngram_train.units import parse_size
 
 
 def test_normalized_weights_sum_to_one():

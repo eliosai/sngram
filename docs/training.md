@@ -36,14 +36,14 @@ Do not relitigate these; the measurements are in
 ## The run
 
 ```sh
-cd python
+cd train
 uv sync
 uv run sngram train --limit 1TB
 uv run sngram train --mint-dir ./bins
 uv run sngram inspect bins/*.bin
 ```
 
-Credentials go in `python/.env`; the trainer needs a Hugging Face token
+Credentials go in `train/.env`; the trainer needs a Hugging Face token
 and Software Heritage S3 keys ([training-data.md](training-data.md)
 lists them). Minting defaults to tuning off.
 

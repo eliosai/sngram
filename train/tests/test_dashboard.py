@@ -10,10 +10,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from rich.console import Console
 
-from sngram.train import dashboard
-from sngram.train.config import Family, Source
-from sngram.train.pipeline import Trainer
-from sngram.train.units import parse_size
+from sngram_train import dashboard
+from sngram_train.config import Family, Source
+from sngram_train.pipeline import Trainer
+from sngram_train.units import parse_size
 
 
 def _run(tmp_path: Path) -> Trainer:

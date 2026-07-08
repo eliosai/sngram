@@ -48,14 +48,18 @@ Do not expose table internals, filenames, constants, or low-level lookup helpers
 
 ### `python`
 
-`python/` is the training and bindings project. It uses `uv`, `maturin`, and `pyo3`.
+`crates/python` is the standalone `sngram` Python library. It is a maturin project: the pyo3 bindings crate, the `sngram/` wrapper package, the pyproject, and the lib tests live together in that one directory. It exposes the scan/query core, the embedded production weight table, and the GIL-free training counters. It ships no CLI and no runtime dependencies. This is the package that goes to PyPI.
 
-The Python package exposes the scan/query core and GIL-free training counters. The training CLI streams blended corpora, counts byte pairs through Rust, checkpoints, mints weight tables, and resumes from saved state. Keep `.env` under `python/.env`; training uses Hugging Face credentials there.
+`train/` is the `sngram-train` project: the corpus training pipeline and the `sngram` training CLI. It depends on the library by path and streams blended corpora, counts byte pairs through Rust, checkpoints, mints weight tables, and resumes from saved state. Keep `.env` under `train/.env`; training uses Hugging Face credentials there.
 
 Useful commands:
 
 ```sh
-cd python
+cd crates/python
+uv sync
+uv run pytest
+
+cd train
 uv sync
 uv run pytest
 uv run sngram train --limit 1GB
@@ -108,8 +112,8 @@ cargo fmt --all -- --check
 Python:
 
 ```sh
-cd python
-uv run pytest
+cd crates/python && uv run pytest
+cd train && uv run pytest
 ```
 
 `eg` helper commands:

@@ -8,7 +8,7 @@ import math
 import pytest
 
 import sngram
-from sngram.train import metrics
+from sngram_train import metrics
 
 
 def test_kl_identical_is_zero():

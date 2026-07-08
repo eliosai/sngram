@@ -1,7 +1,7 @@
 import pytest
 from typer.testing import CliRunner
 
-from sngram.cli import _run_until_done, app
+from sngram_train.cli import _run_until_done, app
 
 
 def test_cli_does_not_expose_synthetic_ingest_benchmark():
@@ -28,10 +28,10 @@ def test_train_preflights_sources_before_running(monkeypatch, tmp_path):
         def describe_progress(self):
             return "ok"
 
-    monkeypatch.setattr("sngram.train.config.hf_token", lambda: "hf_test")
-    monkeypatch.setattr("sngram.train.config.default_families", lambda: [])
-    monkeypatch.setattr("sngram.train.pipeline.Trainer", FakeTrainer)
-    monkeypatch.setattr("sngram.train.pipeline.default_workers", lambda: 1)
+    monkeypatch.setattr("sngram_train.config.hf_token", lambda: "hf_test")
+    monkeypatch.setattr("sngram_train.config.default_families", lambda: [])
+    monkeypatch.setattr("sngram_train.pipeline.Trainer", FakeTrainer)
+    monkeypatch.setattr("sngram_train.pipeline.default_workers", lambda: 1)
 
     result = CliRunner().invoke(
         app,
@@ -67,10 +67,10 @@ def test_train_preflight_failure_exits_without_retrying(monkeypatch, tmp_path):
         def describe_progress(self):
             return "ok"
 
-    monkeypatch.setattr("sngram.train.config.hf_token", lambda: "hf_test")
-    monkeypatch.setattr("sngram.train.config.default_families", lambda: [])
-    monkeypatch.setattr("sngram.train.pipeline.Trainer", FakeTrainer)
-    monkeypatch.setattr("sngram.train.pipeline.default_workers", lambda: 1)
+    monkeypatch.setattr("sngram_train.config.hf_token", lambda: "hf_test")
+    monkeypatch.setattr("sngram_train.config.default_families", lambda: [])
+    monkeypatch.setattr("sngram_train.pipeline.Trainer", FakeTrainer)
+    monkeypatch.setattr("sngram_train.pipeline.default_workers", lambda: 1)
 
     result = CliRunner().invoke(
         app,

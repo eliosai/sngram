@@ -1,0 +1,42 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "sngram"
+version = "0.5.0"
+description = "Sparse n-gram extraction and regex query planning over trained byte-pair weight tables"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Joshua Smotritsky" }]
+keywords = ["ngram", "regex", "search", "code-search", "index"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Text Processing :: Indexing",
+]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/eliosai/sngram"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+module-name = "sngram._core"
+python-source = "."
+features = ["pyo3/extension-module"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "hypothesis>=6",
+    "numpy>=2",
+    "maturin>=1.7",
+    "pyarrow>=17",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

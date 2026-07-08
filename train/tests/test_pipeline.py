@@ -10,9 +10,9 @@ import pyarrow.parquet as pq
 import pytest
 
 import sngram
-from sngram.train.config import Family, Source
-from sngram.train.pipeline import Trainer
-from sngram.train.units import fmt_bytes, mint_label, parse_size
+from sngram_train.config import Family, Source
+from sngram_train.pipeline import Trainer
+from sngram_train.units import fmt_bytes, mint_label, parse_size
 
 
 def write_fixture(directory: Path, name: str, rows: list[str], files: int = 3) -> str:
@@ -96,7 +96,7 @@ def test_full_run_counts_everything_and_mints(tmp_path: Path):
 
     # the run is fully checkpointed at exit
     fresh = sngram.BigramCounter()
-    from sngram.train import checkpoint
+    from sngram_train import checkpoint
 
     state = checkpoint.load(tmp_path / "bins" / ".checkpoint", fresh)
     assert fresh.bytes_processed == expected
@@ -384,7 +384,7 @@ def test_mint_schedule_every_tb_after_bootstrap(tmp_path: Path):
 
 
 def test_classify_error_buckets():
-    from sngram.train.pipeline import classify_error
+    from sngram_train.pipeline import classify_error
 
     transient = [
         Exception("HTTP Error 429: Too Many Requests"),

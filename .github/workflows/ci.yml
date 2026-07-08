@@ -47,9 +47,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
-        working-directory: python
+        working-directory: crates/python
       - run: uv run pytest -q
-        working-directory: python
+        working-directory: crates/python
+      - run: uv sync
+        working-directory: train
+      - run: uv run pytest -q
+        working-directory: train
 
   semver:
     runs-on: ubuntu-latest

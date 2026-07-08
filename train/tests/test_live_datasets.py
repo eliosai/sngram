@@ -13,7 +13,7 @@ import os
 
 import pytest
 
-from sngram.train.config import STACK_V2_METADATA_REPO, STACK_V2_REQUIRED_COLUMNS
+from sngram_train.config import STACK_V2_METADATA_REPO, STACK_V2_REQUIRED_COLUMNS
 
 
 pytestmark = pytest.mark.skipif(

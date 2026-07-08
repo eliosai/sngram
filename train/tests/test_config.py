@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from sngram.train import config as train_config
-from sngram.train.config import (
+from sngram_train import config as train_config
+from sngram_train.config import (
     STACK_V2_CONTENT_PREFIX,
     STACK_V2_METADATA_REPO,
     STACK_V2_REQUIRED_COLUMNS,
@@ -14,7 +14,7 @@ from sngram.train.config import (
     stack_v2_bucket_for,
     stack_v2_skip_reason,
 )
-from sngram.train.pipeline import roster_hash
+from sngram_train.pipeline import roster_hash
 
 
 def all_sources():

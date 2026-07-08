@@ -43,9 +43,9 @@ def train(
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
     os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
 
-    from .train.config import default_families, hf_token
-    from .train.pipeline import Trainer, default_workers
-    from .train.units import parse_size
+    from .config import default_families, hf_token
+    from .pipeline import Trainer, default_workers
+    from .units import parse_size
 
     if hf_token() is None:
         typer.echo("error: HF_TOKEN is required for the production training roster")
@@ -87,7 +87,7 @@ def _run_until_done(build, resume: bool, dashboard: bool):
             raise
         try:
             if dashboard:
-                from .train.dashboard import Dashboard
+                from .dashboard import Dashboard
 
                 with Dashboard() as dash:
                     trainer.on_refresh = dash.refresh
@@ -140,8 +140,8 @@ def fs_histogram(
 ) -> None:
     """Measure the byte-pair distribution of a real filesystem (text files only,
     binaries skipped) — the empirical target a search table should match."""
-    from .train import fsvalidate
-    from .train.units import fmt_bytes, parse_size
+    from . import fsvalidate
+    from .units import fmt_bytes, parse_size
 
     counts, stats = fsvalidate.filesystem_histogram(
         [str(r) for r in roots], cap=parse_size(cap) if cap else None
@@ -172,8 +172,8 @@ def fs_validate(
     byte-pairs the corpus most under- and over-represents versus the disk."""
     import sngram
 
-    from .train import fsvalidate
-    from .train.units import fmt_bytes, parse_size
+    from . import fsvalidate
+    from .units import fmt_bytes, parse_size
 
     table = sngram.WeightTable.from_path(table_path)
     counts, stats = fsvalidate.filesystem_histogram(

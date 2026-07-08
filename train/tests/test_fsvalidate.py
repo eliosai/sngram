@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import sngram
-from sngram.train import fsvalidate, metrics
+from sngram_train import fsvalidate, metrics
 
 
 def test_is_binary_detects_nul():

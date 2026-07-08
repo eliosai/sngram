@@ -15,8 +15,8 @@ import gzip
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from sngram.train.config import Family, Source
-from sngram.train.pipeline import Trainer, WorkerState, _HeartbeatFile, _attach_read_heartbeat
+from sngram_train.config import Family, Source
+from sngram_train.pipeline import Trainer, WorkerState, _HeartbeatFile, _attach_read_heartbeat
 from tests.test_pipeline import run_trainer
 
 
@@ -115,8 +115,8 @@ def test_in_flight_bytes_settle_to_zero_after_midfile_retry(tmp_path: Path, monk
 
 
 def test_retry_log_keeps_incomplete_body_numbers(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr("sngram.train.pipeline.RETRY_BASE_S", 0.01)
-    monkeypatch.setattr("sngram.train.pipeline.RETRY_CAP_S", 0.02)
+    monkeypatch.setattr("sngram_train.pipeline.RETRY_BASE_S", 0.01)
+    monkeypatch.setattr("sngram_train.pipeline.RETRY_CAP_S", 0.02)
     rows = ["hello world"] * 12
     fam = _rg_family(tmp_path, rows, row_group_size=6)
     fired = {"x": False}

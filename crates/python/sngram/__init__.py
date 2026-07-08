@@ -1,7 +1,7 @@
 """Sparse n-gram extraction, regex query planning, and weight-table training.
 
-The compiled core does the work; this package re-exports it and adds the
-training pipeline (``sngram train``) on top.
+The compiled core does the work; this package re-exports it. The corpus
+training pipeline lives in the separate ``sngram-train`` project.
 
 Index side::
 

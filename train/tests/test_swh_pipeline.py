@@ -10,9 +10,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from sngram.train.config import Family, Source, STACK_V2_REQUIRED_COLUMNS
-from sngram.train.pipeline import Trainer
-from sngram.train.units import parse_size
+from sngram_train.config import Family, Source, STACK_V2_REQUIRED_COLUMNS
+from sngram_train.pipeline import Trainer
+from sngram_train.units import parse_size
 
 
 def _write_content(directory: Path, blob_id: str, content: bytes) -> None:

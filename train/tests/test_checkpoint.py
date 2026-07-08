@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import sngram
-from sngram.train import checkpoint
+from sngram_train import checkpoint
 
 
 def make_counter(rows: list[bytes]) -> sngram.BigramCounter:

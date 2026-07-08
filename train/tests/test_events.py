@@ -8,7 +8,7 @@ debug material — and the active file is always the base path.
 import json
 from pathlib import Path
 
-from sngram.train.events import EventLog
+from sngram_train.events import EventLog
 
 
 def _read_all(path: Path) -> list[dict]:
