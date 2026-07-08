@@ -1,0 +1,81 @@
+crates/eg/src/index/catalog.rs
+  s_f911a7f11fb798::t_c0c85661730024 88
+crates/types/src/query.rs
+  s_f911a7f11fb798::t_adf69ff2011b9a 5
+  s_f911a7f11fb798::t_69b155d3453e36 144-145
+  s_f911a7f11fb798::t_efa95787f5f7ae 491-498,511
+  s_f911a7f11fb798::t_56ef82b5ac0c19 409
+  s_f911a7f11fb798::t_1e8eec62fd00fb 430
+crates/eg/src/index/manifest.rs
+  s_f911a7f11fb798::t_f21dcd1f2858b4 618-623
+  s_f911a7f11fb798::t_ea71dd179fee59 166
+  s_f911a7f11fb798::t_ddca9672b6be9d 1256
+  s_f911a7f11fb798::t_2f879ac456d120 331,1234
+  s_f911a7f11fb798::t_61923396108072 791
+  s_f911a7f11fb798::t_2ad4397c08d661 776
+  s_f911a7f11fb798::t_9a2237a1d0dce6 21
+  s_f911a7f11fb798::t_49a4f8c629cc6b 26
+crates/eg/src/index/document.rs
+  s_f911a7f11fb798::t_4499995bf8632c 133,138,143,148-149,151,153-156,164,166-169,181-183
+  s_f911a7f11fb798::t_7cbd22fd427f72 240-242,246-253,257-260,262-263,268-272,281,286-296
+  s_f911a7f11fb798::t_ef2c6718974a4d 13
+crates/eg/src/index/postings.rs
+  s_f911a7f11fb798::t_b52e35312d6473 1663-1664,1673-1679,1681-1685,1688-1696,1698-1708,1710-1717,1721-1727,1731-1748,1750-1757,1763-1776,1821-1823,1825,1827,1832-1837,1842,1844,1848-1849
+  s_f911a7f11fb798::t_c99270b5523c7b 1136,1145-1150,1153-1154,1157
+  s_f911a7f11fb798::t_a2eaee662d2176 46,51-54
+  s_f911a7f11fb798::t_70789d5362203f 665
+  s_f911a7f11fb798::t_39e52c4a50d502 828-829,1005-1009,1661-1662
+  s_f911a7f11fb798::t_fbe6b30be58146 1551-1552,1554,1556
+  s_f911a7f11fb798::t_234dad53b795ca 708,710
+  s_f911a7f11fb798::t_aecaba2371976c 684
+  s_f911a7f11fb798::t_b3472d7b692612 959-960,971,977-990,1002-1004,1010,1013-1021,1023-1027,1032,1036-1039,1041,1043-1133
+  s_f911a7f11fb798::t_ee81feacbbbf64 768-827,830-853
+  s_f911a7f11fb798::t_b31e16377c7a13 1271
+crates/eg/src/index/daemon/main.rs
+  s_f911a7f11fb798::t_c0c85661730024 26-27,940,942,967,969
+docs/fp-optimization-plan.md
+  s_f911a7f11fb798::t_015e58e5ac2d32 155-181
+crates/eg/src/index/snapshot.rs
+  s_f911a7f11fb798::t_c0c85661730024 35
+crates/eg/tests/index_integration.rs
+  s_f911a7f11fb798::t_c0c85661730024 357,1270
+crates/eg/src/index/executor.rs
+  s_f911a7f11fb798::t_c879c531740c5a 493,582,594,606,618
+  s_f911a7f11fb798::t_702ffae522b16b 9,12-16
+  s_f911a7f11fb798::t_9f020b10a15478 230-238
+crates/eg/src/index/summary.rs
+  s_f911a7f11fb798::t_fa9abf191063e3 373-374
+  s_f911a7f11fb798::t_5b9f9aed43cbad 312-315
+  s_f911a7f11fb798::t_492d454c78fd18 536,539,542-543,564,568-586,592
+  s_f911a7f11fb798::t_6d1447fc2f267b 397-398,400,407,411,421-427,432-438,440,443,445-446,450-470
+  s_f911a7f11fb798::t_cdf9510f21d929 634-636,639
+  s_f911a7f11fb798::t_f296549aa3ee58 19,21
+  s_f911a7f11fb798::t_a7de4b53b7ac91 236-237,244,250-251
+  s_f911a7f11fb798::t_8cba68b5ad2bb1 471
+crates/lib/src/query/planner.rs
+  s_f911a7f11fb798::t_3a3957bb3271da 368-384
+  s_f911a7f11fb798::t_3b1dcff6085da7 136-137,146-156
+  s_f911a7f11fb798::t_4449641286f348 157-158
+docs/final-training-run.md
+  s_f911a7f11fb798::t_65bebc2a0bedec 1-51
+crates/eg/src/index/daemon_refresh.rs
+  s_f911a7f11fb798::t_c0c85661730024 58
+crates/eg/src/index/backend.rs
+  s_f911a7f11fb798::t_c0c85661730024 49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5fde48636d6a703034982088c20253d630d7e258",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
