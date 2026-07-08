@@ -9,6 +9,7 @@ mod daemon_refresh;
 mod document;
 mod executor;
 mod generation;
+mod huffman;
 mod location;
 mod manifest;
 mod planner;

@@ -23,6 +23,7 @@ use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed, 
 
 use crate::flags::HiArgs;
 
+use super::huffman::{CODE_TABLE_LEN, CodeLengths, Decoder, Encoder, HUFF_MIN_COUNT};
 use super::manifest::{
     CurrentFile, CurrentSnapshot, ManifestBackend, manifest_for, read_manifest, write_manifest,
     write_path_table,
@@ -43,7 +44,7 @@ const LOCK_SUFFIX: &str = ".lock";
 const TEMP_SUFFIX: &str = ".rebuilding";
 const OLD_SUFFIX: &str = ".old";
 const SECTION_HEADER_SIZE: usize = 32;
-const SECTION_FORMAT_VERSION: u32 = 9;
+const SECTION_FORMAT_VERSION: u32 = 10;
 const TABLE_MAGIC: [u8; 8] = *b"EGTABL1\0";
 const POSTINGS_MAGIC: [u8; 8] = *b"EGPOST2\0";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -64,6 +65,8 @@ const FORCED_CANDIDATE_HASH: u64 = u64::MAX;
 const BUILD_PROGRESS_EVERY: usize = 20_000;
 const POSTINGS_MERGE_PROGRESS_EVERY: u64 = 1_000_000;
 /// Allow one exact sparse lookup pass for mildly pessimistic estimates.
+/// Sweeping this to 4 admitted previously refused wide and gap queries at
+/// 90-100% FP for no wall win; refusal keeps them on the scan path.
 const SELECTIVITY_REFINE_MULTIPLIER: u64 = 2;
 
 pub fn refresh_index(
@@ -476,6 +479,7 @@ fn build_files(
     if let Some(progress) = progress {
         progress.start_postings(run_count, pairs_total);
     }
+    let code_lengths = CodeLengths::from_frequencies(&stats.mask_frequencies());
     merge_runs(
         &runs_dir,
         run_count,
@@ -483,6 +487,7 @@ fn build_files(
         &index_home.join(postings_name),
         progress,
         pairs_total,
+        &code_lengths,
     )?;
     let merge_elapsed = merge_started_at.elapsed();
     timings.set_write_postings(merge_started_at);
@@ -620,6 +625,11 @@ fn write_run(
             false
         }
     });
+    let mut local_freq = [0u64; 256];
+    for pair in pairs.iter() {
+        local_freq[usize::from(pair.mask)] += 1;
+    }
+    stats.add_mask_freq(&local_freq);
     let pair_count = pairs.len();
     let id = next_run.fetch_add(1, AtomicOrdering::Relaxed);
     let path = run_path(runs_dir, id);
@@ -661,9 +671,12 @@ fn merge_runs(
     postings_path: &Path,
     progress: Option<&BuildProgress>,
     pairs_total: u64,
+    code_lengths: &CodeLengths,
 ) -> anyhow::Result<()> {
     let mut table_builder = TableBuilder::create(table_path)?;
     let mut postings_writer = SectionWriter::create(postings_path, POSTINGS_MAGIC)?;
+    postings_writer.write_all(code_lengths.as_bytes())?;
+    let encoder = Encoder::new(code_lengths);
     let mut merge_progress = MergeProgress::new(progress, run_count, pairs_total);
     let mut readers = Vec::with_capacity(run_count);
     let mut heap = BinaryHeap::new();
@@ -681,7 +694,7 @@ fn merge_runs(
     while let Some(item) = heap.pop() {
         if current_hash != Some(item.pair.hash) {
             if let Some(hash) = current_hash {
-                table_builder.push(&mut postings_writer, hash, &docs)?;
+                table_builder.push(&mut postings_writer, hash, &docs, &encoder)?;
                 docs.clear();
             }
             current_hash = Some(item.pair.hash);
@@ -705,7 +718,7 @@ fn merge_runs(
         }
     }
     if let Some(hash) = current_hash {
-        table_builder.push(&mut postings_writer, hash, &docs)?;
+        table_builder.push(&mut postings_writer, hash, &docs, &encoder)?;
     }
     table_builder.finalize()?;
     postings_writer.finalize(1)?;
@@ -793,6 +806,7 @@ impl TableBuilder {
         postings_writer: &mut SectionWriter,
         hash: u32,
         docs: &[(u32, u8)],
+        encoder: &Encoder,
     ) -> anyhow::Result<()> {
         let gap = if self.block_records == 0 {
             self.begin_block(hash)?;
@@ -808,7 +822,7 @@ impl TableBuilder {
             push_uvarint(&mut record, *ord);
             record.push(*mask);
         } else {
-            let list = encode_posting_list(docs);
+            let list = encode_posting_list(docs, encoder);
             let size = u32::try_from(list.len()).context("posting list exceeds u32 bytes")?;
             push_uvarint(&mut record, size);
             postings_writer.write_all(&list)?;
@@ -840,16 +854,20 @@ impl TableBuilder {
     }
 }
 
-/// Posting list layout: ascending ordinal gaps as uvarints, then one mask
-/// byte per posting
-fn encode_posting_list(docs: &[(u32, u8)]) -> Vec<u8> {
+/// Posting list layout: ascending ordinal gaps as uvarints, then the mask
+/// column - raw bytes for short lists, a Huffman bitstream otherwise
+fn encode_posting_list(docs: &[(u32, u8)], encoder: &Encoder) -> Vec<u8> {
     let mut out = Vec::with_capacity(docs.len() * 3);
     let mut previous = 0u32;
     for (idx, &(doc, _)) in docs.iter().enumerate() {
         push_uvarint(&mut out, if idx == 0 { doc } else { doc - previous });
         previous = doc;
     }
-    out.extend(docs.iter().map(|&(_, mask)| mask));
+    if docs.len() < HUFF_MIN_COUNT {
+        out.extend(docs.iter().map(|&(_, mask)| mask));
+    } else {
+        encoder.encode_into(docs.iter().map(|&(_, mask)| mask), &mut out);
+    }
     out
 }
 
@@ -958,6 +976,7 @@ struct Segment {
     postings: Mmap,
     records_len: usize,
     block_count: usize,
+    decoder: Decoder,
 }
 
 impl Segment {
@@ -982,11 +1001,20 @@ impl Segment {
             );
             return Ok(None);
         };
+        let mask_table = postings.get(SECTION_HEADER_SIZE..).unwrap_or_default();
+        let Some(code_lengths) = CodeLengths::from_bytes(mask_table) else {
+            log::debug!(
+                "eg index: {} has a malformed mask code table",
+                postings_path.display()
+            );
+            return Ok(None);
+        };
         Ok(Some(Self {
             table,
             postings,
             records_len,
             block_count,
+            decoder: Decoder::new(&code_lengths),
         }))
     }
 
@@ -1006,7 +1034,9 @@ impl Segment {
                 offset,
                 count,
                 size,
-            }) => Ok(self.stored_list(offset, count, size)?.postings()),
+            }) => Ok(self
+                .stored_list(offset, count, size)?
+                .postings(&self.decoder)),
         }
     }
 
@@ -1020,7 +1050,10 @@ impl Segment {
 
     fn stored_list(&self, offset: u64, count: u32, size: u32) -> anyhow::Result<PostingList<'_>> {
         let postings = self.postings_body();
-        let start = usize::try_from(offset).context("posting offset does not fit in usize")?;
+        let start = usize::try_from(offset)
+            .ok()
+            .and_then(|at| at.checked_add(CODE_TABLE_LEN))
+            .context("posting offset does not fit in usize")?;
         let end = start
             .checked_add(size as usize)
             .context("posting end overflows usize")?;
@@ -1141,26 +1174,31 @@ struct PostingList<'a> {
 }
 
 impl<'a> PostingList<'a> {
-    fn postings(self) -> Vec<executor::Posting> {
+    fn postings(self, decoder: &Decoder) -> Vec<executor::Posting> {
         let count = self.count as usize;
-        let Some(split) = self.bytes.len().checked_sub(count) else {
-            return Vec::new();
-        };
-        let (gaps, masks) = self.bytes.split_at(split);
-        let mut out = Vec::with_capacity(count);
+        let mut ords = Vec::with_capacity(count);
         let mut pos = 0usize;
         let mut ord = 0u32;
-        for (idx, &mask) in masks.iter().enumerate() {
-            let Some(gap) = read_uvarint(gaps, &mut pos) else {
-                break;
+        for idx in 0..count {
+            let Some(gap) = read_uvarint(self.bytes, &mut pos) else {
+                return Vec::new();
             };
             ord = if idx == 0 { gap } else { ord.wrapping_add(gap) };
-            out.push(executor::Posting {
-                ord: ord as usize,
-                mask,
-            });
+            ords.push(ord as usize);
         }
-        out
+        let payload = self.bytes.get(pos..).unwrap_or_default();
+        let masks = if count < HUFF_MIN_COUNT {
+            payload.get(..count).map(<[u8]>::to_vec)
+        } else {
+            decoder.decode(payload, count)
+        };
+        let Some(masks) = masks else {
+            return Vec::new();
+        };
+        ords.into_iter()
+            .zip(masks)
+            .map(|(ord, mask)| executor::Posting { ord, mask })
+            .collect()
     }
 }
 
@@ -1594,6 +1632,7 @@ struct BuildStats {
     runs: AtomicUsize,
     run_bytes: AtomicUsize,
     summaries: Mutex<Vec<SummaryRecord>>,
+    mask_freq: Mutex<Vec<u64>>,
 }
 
 impl BuildStats {
@@ -1602,6 +1641,31 @@ impl BuildStats {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(record);
+    }
+
+    fn add_mask_freq(&self, local: &[u64; 256]) {
+        let mut freq = self
+            .mask_freq
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if freq.is_empty() {
+            freq.resize(256, 0);
+        }
+        for (total, &count) in freq.iter_mut().zip(local) {
+            *total += count;
+        }
+    }
+
+    fn mask_frequencies(&self) -> [u64; 256] {
+        let freq = self
+            .mask_freq
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut out = [0u64; 256];
+        for (slot, &count) in out.iter_mut().zip(freq.iter()) {
+            *slot = count;
+        }
+        out
     }
 
     fn take_summaries(&self) -> Vec<SummaryRecord> {
@@ -1657,11 +1721,12 @@ impl PartialOrd for HeapItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        FNV_OFFSET, IndexOpen, MAX_PAIRS_PER_RUN, MIN_PAIRS_PER_RUN, POSTINGS_MAGIC, Pair,
-        PostingList, RECORDS_PER_BLOCK, RUN_PAIR_SIZE, SECTION_HEADER_SIZE, SectionWriter, Segment,
-        TABLE_MAGIC, TableBuilder, encode_posting_list, executor::Posting, fnv1a_state,
-        pairs_per_run, push_uvarint, read_pair, read_uvarint, sampled_checksum, section_header,
-        suffixed_path, verify_section_with_checksum, write_pair,
+        CodeLengths, Decoder, Encoder, FNV_OFFSET, HUFF_MIN_COUNT, IndexOpen, MAX_PAIRS_PER_RUN,
+        MIN_PAIRS_PER_RUN, POSTINGS_MAGIC, Pair, PostingList, RECORDS_PER_BLOCK, RUN_PAIR_SIZE,
+        SECTION_HEADER_SIZE, SectionWriter, Segment, TABLE_MAGIC, TableBuilder,
+        encode_posting_list, executor::Posting, fnv1a_state, pairs_per_run, push_uvarint,
+        read_pair, read_uvarint, sampled_checksum, section_header, suffixed_path,
+        verify_section_with_checksum, write_pair,
     };
     use std::{
         fs,
@@ -1670,13 +1735,26 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    fn mask_lengths(lists: &[(u32, Vec<(u32, u8)>)]) -> CodeLengths {
+        let mut freq = [0u64; 256];
+        for (_, docs) in lists {
+            for &(_, mask) in docs {
+                freq[usize::from(mask)] += 1;
+            }
+        }
+        CodeLengths::from_frequencies(&freq)
+    }
+
     fn build_segment(dir: &Path, lists: &[(u32, Vec<(u32, u8)>)]) -> Segment {
         let table = dir.join("table.bin");
         let postings = dir.join("postings.bin");
+        let lengths = mask_lengths(lists);
+        let encoder = Encoder::new(&lengths);
         let mut builder = TableBuilder::create(&table).unwrap();
         let mut writer = SectionWriter::create(&postings, POSTINGS_MAGIC).unwrap();
+        writer.write_all(lengths.as_bytes()).unwrap();
         for (hash, docs) in lists {
-            builder.push(&mut writer, *hash, docs).unwrap();
+            builder.push(&mut writer, *hash, docs, &encoder).unwrap();
         }
         builder.finalize().unwrap();
         writer.finalize(1).unwrap();
@@ -1752,16 +1830,37 @@ mod tests {
     }
 
     #[test]
-    fn posting_list_splits_gaps_from_mask_column() {
+    fn short_posting_lists_keep_raw_mask_columns() {
         let docs = [(3u32, 0x01u8), (8, 0x20), (70_000, 0xFF)];
-        let bytes = encode_posting_list(&docs);
+        let lists = vec![(1u32, docs.to_vec())];
+        let lengths = mask_lengths(&lists);
+        let bytes = encode_posting_list(&docs, &Encoder::new(&lengths));
         let list = PostingList {
             bytes: &bytes,
             count: docs.len() as u32,
         };
 
-        assert_eq!(list.postings(), masked(&docs));
+        assert_eq!(list.postings(&Decoder::new(&lengths)), masked(&docs));
         assert_eq!(&bytes[bytes.len() - 3..], &[0x01, 0x20, 0xFF]);
+    }
+
+    #[test]
+    fn long_posting_lists_compress_skewed_mask_columns() {
+        let docs: Vec<(u32, u8)> = (0..4000u32)
+            .map(|ord| (ord * 2, if ord % 50 == 0 { 0xFF } else { 0x21 }))
+            .collect();
+        assert!(docs.len() >= HUFF_MIN_COUNT);
+        let lists = vec![(1u32, docs.clone())];
+        let lengths = mask_lengths(&lists);
+        let bytes = encode_posting_list(&docs, &Encoder::new(&lengths));
+        let list = PostingList {
+            bytes: &bytes,
+            count: docs.len() as u32,
+        };
+
+        assert_eq!(list.postings(&Decoder::new(&lengths)), masked(&docs));
+        let gap_bytes = docs.len() * 2;
+        assert!(bytes.len() < gap_bytes + docs.len() / 4);
     }
 
     #[test]

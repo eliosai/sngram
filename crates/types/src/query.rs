@@ -255,6 +255,7 @@ impl PlanExpr {
                 Self::sort_grams_by_df(grams, df);
                 Self::retain_selective_grams(grams, keep_first, df, stop_df);
                 Self::tune_children(children, df, stop_df);
+                Self::drop_weak_bags(grams, children, df, stop_df);
             },
             Self::AnyOf {
                 grams, children, ..
@@ -263,6 +264,45 @@ impl PlanExpr {
                 Self::tune_children(children, df, stop_df);
             },
         }
+    }
+
+    /// Drop pure-gram `AnyOf` children whose summed df cannot prune, as
+    /// long as a stronger sibling constraint remains
+    fn drop_weak_bags(
+        grams: &[GramNeedle],
+        children: &mut Vec<Self>,
+        df: &dyn DfStats,
+        stop_df: u64,
+    ) {
+        let weak: Vec<bool> = children
+            .iter()
+            .map(|child| Self::is_weak_bag(child, df, stop_df))
+            .collect();
+        let strong_left = grams.len() + weak.iter().filter(|&&flag| !flag).count();
+        if strong_left == 0 {
+            return;
+        }
+        let mut flags = weak.into_iter();
+        children.retain(|_| !flags.next().unwrap_or(false));
+    }
+
+    fn is_weak_bag(expr: &Self, df: &dyn DfStats, stop_df: u64) -> bool {
+        let Self::AnyOf {
+            grams,
+            needs,
+            children,
+        } = expr
+        else {
+            return false;
+        };
+        if !needs.is_empty() || !children.is_empty() {
+            return false;
+        }
+        grams
+            .iter()
+            .map(|gram| gram.estimate_candidates(df))
+            .fold(0u64, u64::saturating_add)
+            >= stop_df
     }
 
     fn retain_selective_grams(
@@ -524,6 +564,48 @@ mod tests {
                 GramNeedle::Key(key(4)),
             ]
         );
+    }
+
+    fn weak_bag() -> PlanExpr {
+        PlanExpr::AnyOf {
+            grams: vec![GramNeedle::Key(key(2)), GramNeedle::Key(key(3))],
+            needs: vec![],
+            children: vec![],
+        }
+    }
+
+    fn all_of_children(grams: Vec<GramNeedle>, children: Vec<PlanExpr>) -> QueryPlan {
+        QueryPlan::new(PlanExpr::AllOf {
+            grams,
+            needs: vec![],
+            children,
+        })
+    }
+
+    #[test]
+    fn tuning_drops_unselective_bags_beside_stronger_constraints() {
+        let df = df_of(&[(key(1), 5), (key(2), 600), (key(3), 700)], 1000);
+        let mut plan = all_of_children(vec![GramNeedle::Key(key(1))], vec![weak_bag()]);
+
+        plan.tune(&df, 300);
+
+        let PlanExpr::AllOf { children, .. } = plan.root() else {
+            panic!("tuned plan must stay AllOf");
+        };
+        assert!(children.is_empty(), "weak bag should drop: {plan}");
+    }
+
+    #[test]
+    fn tuning_keeps_a_weak_bag_that_is_the_last_constraint() {
+        let df = df_of(&[(key(2), 600), (key(3), 700)], 1000);
+        let mut lone = all_of_children(vec![], vec![weak_bag()]);
+
+        lone.tune(&df, 300);
+
+        let PlanExpr::AllOf { children, .. } = lone.root() else {
+            panic!("tuned plan must stay AllOf");
+        };
+        assert_eq!(children.len(), 1, "last constraint must survive: {lone}");
     }
 
     fn estimate_candidates(expr: &PlanExpr, df: &dyn DfStats) -> u64 {

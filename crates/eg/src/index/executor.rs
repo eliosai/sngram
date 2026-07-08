@@ -356,8 +356,19 @@ fn intersect_all(
     acc
 }
 
+/// List-length ratio past which intersection gallops through the longer side
+const GALLOP_RATIO: usize = 16;
+
 /// Keep ordinals present in both lists whose block masks overlap
 fn intersect_postings(left: &[Posting], right: &[Posting]) -> Vec<Posting> {
+    let (short, long) = if left.len() <= right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    if short.len().saturating_mul(GALLOP_RATIO) < long.len() {
+        return gallop_intersect(short, long);
+    }
     let mut out = Vec::new();
     let mut i = 0;
     let mut j = 0;
@@ -366,19 +377,40 @@ fn intersect_postings(left: &[Posting], right: &[Posting]) -> Vec<Posting> {
             std::cmp::Ordering::Less => i += 1,
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
-                let mask = left[i].mask & right[j].mask;
-                if mask & BLOCK_BITS != 0 {
-                    out.push(Posting {
-                        ord: left[i].ord,
-                        mask,
-                    });
-                }
+                push_overlap(&mut out, left[i], right[j]);
                 i += 1;
                 j += 1;
             },
         }
     }
     out
+}
+
+/// Binary-search each short-list ordinal inside the remaining long tail
+fn gallop_intersect(short: &[Posting], long: &[Posting]) -> Vec<Posting> {
+    let mut out = Vec::new();
+    let mut base = 0usize;
+    for &posting in short {
+        let tail = &long[base..];
+        match tail.binary_search_by_key(&posting.ord, |p| p.ord) {
+            Ok(at) => {
+                push_overlap(&mut out, posting, tail[at]);
+                base += at + 1;
+            },
+            Err(at) => base += at,
+        }
+        if base >= long.len() {
+            break;
+        }
+    }
+    out
+}
+
+fn push_overlap(out: &mut Vec<Posting>, a: Posting, b: Posting) {
+    let mask = a.mask & b.mask;
+    if mask & BLOCK_BITS != 0 {
+        out.push(Posting { ord: a.ord, mask });
+    }
 }
 
 pub fn union_postings(left: &[Posting], right: &[Posting]) -> Vec<Posting> {

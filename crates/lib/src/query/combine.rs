@@ -507,20 +507,38 @@ fn seam(x: &RegexpInfo, y: &RegexpInfo) -> Option<StringSet> {
     if x.exact.is_some() || y.exact.is_some() {
         return None;
     }
-    if x.suffix.len() > MAX_SET || y.prefix.len() > MAX_SET {
+    let left = seam_side(&x.suffix, Order::Suffix)?;
+    let right = seam_side(&y.prefix, Order::Prefix)?;
+    if left.min_len() + right.min_len() < QuerySettings::MIN_GRAM_LEN {
         return None;
     }
-    if x.suffix.min_len() + y.prefix.min_len() < QuerySettings::MIN_GRAM_LEN {
-        return None;
+    if left.len().saturating_mul(right.len()) <= MAX_SEAM_CROSS {
+        return Some(left.cross(&right, Order::Prefix));
     }
-    if x.suffix.len().saturating_mul(y.prefix.len()) <= MAX_SEAM_CROSS {
-        return Some(x.suffix.cross(&y.prefix, Order::Prefix));
-    }
-    let (left, right) = shrink_seam(x.suffix.clone(), y.prefix.clone())?;
+    let (left, right) = shrink_seam(left, right)?;
     if left.min_len() + right.min_len() < QuerySettings::MIN_GRAM_LEN {
         return None;
     }
     Some(left.cross(&right, Order::Prefix))
+}
+
+/// A seam side bounded to [`MAX_SET`] strings: an oversized side shrinks to
+/// its longest edge truncation instead of dropping the whole seam
+fn seam_side(set: &StringSet, order: Order) -> Option<StringSet> {
+    if set.len() <= MAX_SET {
+        return Some(set.clone());
+    }
+    let mut edge = set.clone();
+    let mut keep = edge.max_len().saturating_sub(1);
+    while keep >= 1 {
+        truncate_to(&mut edge, order, keep);
+        edge.clean(order);
+        if edge.len() <= MAX_SET {
+            return Some(edge);
+        }
+        keep -= 1;
+    }
+    None
 }
 
 /// Truncate the larger seam side, one byte at a time, until the cross product
@@ -708,6 +726,22 @@ mod tests {
         set.as_slice()
             .iter()
             .any(|member| member.as_bytes() == bytes)
+    }
+
+    #[test]
+    fn seam_side_shrinks_oversized_sets_instead_of_dropping() {
+        let mut wide = StringSet::new();
+        for a in b'a'..=b'z' {
+            for b in b'a'..=b'z' {
+                wide.push(Gram::from(&[a, b, b'q'][..]));
+            }
+        }
+        wide.clean(Order::Suffix);
+        assert!(wide.len() > MAX_SET);
+
+        let side = seam_side(&wide, Order::Suffix).expect("side should shrink");
+        assert!(side.len() <= MAX_SET);
+        assert!(side.min_len() >= 1);
     }
 
     #[test]
