@@ -6,6 +6,7 @@ from sngram_train import config as train_config
 from sngram_train.config import (
     STACK_V2_CONTENT_PREFIX,
     STACK_V2_METADATA_REPO,
+    STACK_V2_MIN_BYTES,
     STACK_V2_REQUIRED_COLUMNS,
     STACK_V2_TARGET_BYTES,
     TRAIN_TARGET_BYTES,
@@ -106,7 +107,7 @@ def test_stack_v2_metadata_filter_skips_before_s3_fetch():
         "path": "/src/app.py",
         "is_vendor": False,
         "is_generated": False,
-        "length_bytes": 1024,
+        "length_bytes": STACK_V2_MIN_BYTES,
     }
     assert stack_v2_skip_reason(good) is None
 
@@ -116,6 +117,8 @@ def test_stack_v2_metadata_filter_skips_before_s3_fetch():
     assert stack_v2_skip_reason(bad) == "generated"
     bad = dict(good, length_bytes=0)
     assert stack_v2_skip_reason(bad) == "empty"
+    bad = dict(good, length_bytes=STACK_V2_MIN_BYTES - 1)
+    assert stack_v2_skip_reason(bad) == "small"
     bad = dict(good, length_bytes=2 * 1024 * 1024 + 1)
     assert stack_v2_skip_reason(bad) == "oversize"
     bad = dict(good, language="Markdown", length_bytes=4 * 1024 * 1024)
@@ -137,6 +140,10 @@ def test_source_ids_unique():
 def test_hf_token_uses_environment(monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "hf_test_token")
     assert hf_token() == "hf_test_token"
+
+
+def test_project_env_path_points_to_train_project():
+    assert train_config._project_env_path().parent.name == "train"
 
 
 def test_hf_token_reads_project_env(monkeypatch, tmp_path):

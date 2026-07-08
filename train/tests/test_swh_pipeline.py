@@ -12,7 +12,12 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from sngram_train.config import Family, Source, STACK_V2_REQUIRED_COLUMNS
+from sngram_train.config import (
+    Family,
+    Source,
+    STACK_V2_MIN_BYTES,
+    STACK_V2_REQUIRED_COLUMNS,
+)
 from sngram_train.pipeline import Trainer
 from sngram_train.units import parse_size
 
@@ -60,7 +65,7 @@ def _row(
         "extension": extension,
         "is_vendor": is_vendor,
         "is_generated": is_generated,
-        "length_bytes": len(content),
+        "length_bytes": max(len(content), STACK_V2_MIN_BYTES),
     }
 
 
@@ -225,6 +230,136 @@ def test_swh_objects_fetch_concurrently_inside_one_shard(
 
     assert trainer.durable_bytes() == len(content) * len(rows)
     assert max_active >= 4
+
+
+def test_remote_swh_preflight_does_not_resolve_every_config(
+    tmp_path: Path, monkeypatch
+):
+    _write_metadata(tmp_path / "metadata", [_row("blob", b"abc")])
+    metadata_path = str(next((tmp_path / "metadata").glob("*.parquet")))
+    sources = (
+        Source(
+            "stack-core",
+            "example/stack",
+            "blob_id",
+            config="Python",
+            format="swh",
+            content_prefix="s3://softwareheritage/content/",
+            metadata_fields=STACK_V2_REQUIRED_COLUMNS,
+            bucket="core-programming",
+        ),
+        Source(
+            "stack-core",
+            "example/stack",
+            "blob_id",
+            config="Rust",
+            format="swh",
+            content_prefix="s3://softwareheritage/content/",
+            metadata_fields=STACK_V2_REQUIRED_COLUMNS,
+            bucket="core-programming",
+        ),
+    )
+    family = Family(id="stack-core", sources=sources)
+    trainer = Trainer(
+        families=[family],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    resolved: list[str | None] = []
+
+    def fake_load(self, source):
+        resolved.append(source.config)
+        return [metadata_path]
+
+    def fake_configs(repo, token=None):
+        assert repo == "example/stack"
+        return ["Python", "Rust"]
+
+    monkeypatch.setattr(Trainer, "_load_source", fake_load)
+    monkeypatch.setattr("datasets.get_dataset_config_names", fake_configs)
+
+    trainer.preflight_sources()
+    trainer.events.close()
+    events = _events(tmp_path)
+
+    assert resolved == ["Python"]
+    assert next(e for e in events if e["kind"] == "preflight_done")["sources"] == 2
+
+
+def test_swh_metadata_files_use_direct_hf_glob(tmp_path: Path, monkeypatch):
+    source = Source(
+        "stack-core",
+        "example/stack",
+        "blob_id",
+        config="Python",
+        format="swh",
+        content_prefix="s3://softwareheritage/content/",
+        metadata_fields=STACK_V2_REQUIRED_COLUMNS,
+        bucket="core-programming",
+    )
+    trainer = Trainer(
+        families=[Family(id="stack-core", sources=(source,))],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    trainer.state.revisions["example/stack"] = "abc123"
+    patterns: list[str] = []
+
+    def fake_glob(pattern):
+        patterns.append(pattern)
+        return [f"hf://{pattern.replace('*', '00000-of-00001')}"]
+
+    monkeypatch.setattr(trainer, "_glob_hf_files", fake_glob)
+
+    assert trainer._load_source(source)
+    assert patterns == ["datasets/example/stack@abc123/data/Python/train-*.parquet"]
+    trainer.events.close()
+
+
+def test_default_swh_metadata_source_globs_all_language_shards(
+    tmp_path: Path, monkeypatch
+):
+    source = Source(
+        "stack-long-tail",
+        "example/stack",
+        "blob_id",
+        config="default",
+        format="swh",
+        content_prefix="s3://softwareheritage/content/",
+        metadata_fields=STACK_V2_REQUIRED_COLUMNS,
+        bucket="long-tail",
+    )
+    trainer = Trainer(
+        families=[Family(id="stack-long-tail", sources=(source,))],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    trainer.state.revisions["example/stack"] = "abc123"
+    patterns: list[str] = []
+    monkeypatch.setattr(
+        trainer,
+        "_glob_hf_files",
+        lambda pattern: patterns.append(pattern) or [f"hf://{pattern}"],
+    )
+
+    assert trainer._load_source(source)
+    assert patterns == ["datasets/example/stack@abc123/data/*/train-*.parquet"]
+    trainer.events.close()
 
 
 def test_swh_preflight_requires_stack_v2_metadata_columns(tmp_path: Path):

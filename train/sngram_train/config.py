@@ -48,6 +48,7 @@ STACK_V2_BUCKET_CAPS = {
 
 STACK_V2_MAX_BYTES = 2 * MIB
 STACK_V2_DOC_MAX_BYTES = 4 * MIB
+STACK_V2_MIN_BYTES = int(os.environ.get("SNG_STACK_MIN_BYTES", 16 * 1024))
 
 CORE_LANGUAGES = {
     "C", "C++", "C#", "Java", "JavaScript", "TypeScript", "Python", "PHP",
@@ -237,6 +238,8 @@ def stack_v2_skip_reason(row: dict[str, object]) -> str | None:
         return "bad_length"
     if length <= 0:
         return "empty"
+    if length < STACK_V2_MIN_BYTES:
+        return "small"
     bucket = stack_v2_bucket_for(
         _norm(row.get("language")),
         _norm(row.get("extension")),
@@ -252,7 +255,7 @@ def stack_v2_skip_reason(row: dict[str, object]) -> str | None:
 
 
 def _project_env_path() -> Path:
-    return Path(__file__).resolve().parents[2] / ".env"
+    return Path(__file__).resolve().parents[1] / ".env"
 
 
 def _env_file_token(paths: Iterable[Path]) -> str | None:

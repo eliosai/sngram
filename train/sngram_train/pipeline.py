@@ -30,7 +30,14 @@ from urllib.parse import urlparse
 import sngram
 
 from . import checkpoint, metrics
-from .config import Family, Source, hf_token, stack_v2_bucket_for, stack_v2_skip_reason
+from .config import (
+    STACK_V2_MIN_BYTES,
+    Family,
+    Source,
+    hf_token,
+    stack_v2_bucket_for,
+    stack_v2_skip_reason,
+)
 from .events import EventLog
 from .units import fmt_bytes, mint_label
 
@@ -146,6 +153,16 @@ def _latency_ms(values: list[float], q: float) -> int:
 
 def _stats_skip(stats: dict[str, int], reason: str) -> None:
     stats[f"skipped_{reason}"] = stats.get(f"skipped_{reason}", 0) + 1
+
+
+def _disable_datasets_progress() -> None:
+    os.environ.setdefault("HF_DATASETS_DISABLE_PROGRESS_BARS", "1")
+    try:
+        from datasets import disable_progress_bars
+
+        disable_progress_bars()
+    except Exception:
+        return
 
 
 def default_workers() -> int:
@@ -573,6 +590,10 @@ class Trainer:
             int(os.environ.get("SNG_HF_STREAMS", min(DEFAULT_REMOTE_STREAMS, workers))),
         )
         self._remote_sem = threading.BoundedSemaphore(self.remote_streams)
+        self.swh_metadata_streams = max(
+            1, int(os.environ.get("SNG_SWH_METADATA_STREAMS", workers))
+        )
+        self._swh_metadata_sem = threading.BoundedSemaphore(self.swh_metadata_streams)
         self.swh_fetchers = max(
             1, int(os.environ.get("SNG_SWH_FETCHERS", DEFAULT_SWH_FETCHERS))
         )
@@ -840,9 +861,6 @@ class Trainer:
                     break
                 fid = pick_family(live, weights, est)
                 task = ahead[fid]
-                ahead[fid] = next(gens[fid], None)  # refill the prefetch slot
-                if ahead[fid] is None:
-                    self.events.log("family_done", family=fid)
                 dispatched[fid] += 1  # count it now so the next pick sees in-flight
                 source_dispatched[task.source.id] += 1
                 while not self.stop.is_set():
@@ -851,6 +869,9 @@ class Trainer:
                         break
                     except queue.Full:
                         continue
+                ahead[fid] = next(gens[fid], None)  # refill the prefetch slot
+                if ahead[fid] is None:
+                    self.events.log("family_done", family=fid)
         except Exception as e:  # noqa: BLE001 - planner death must be loud, not silent
             self._bump("errors")
             self.events.log("error", stage="planner", error=err_text(e))
@@ -943,11 +964,10 @@ class Trainer:
         """Resolve a source to its ordered list of parquet file URLs, pinned at
         its revision, and cache it.
 
-        We let `datasets` do the hard resolution (config → split → revision →
-        file glob) but then read the files ourselves (see `_run_shard`), so we
-        extract the resolved, revision-stamped URL list rather than keeping the
-        streaming dataset. The list order is the shard order — stable across
-        restarts because the revision is pinned — so shard index == file index.
+        We read files ourselves (see `_run_shard`), so this returns the resolved,
+        revision-stamped URL list rather than keeping a streaming dataset. The
+        list order is stable across restarts because the revision is pinned, so
+        shard index == file index.
         """
         with self._ds_lock:
             cached = self._ds_cache.get(source.id)
@@ -962,6 +982,13 @@ class Trainer:
                 self._ds_cache[source.id] = urls
             return urls
 
+        if source.format == "swh" and source.data_files is None:
+            urls = self._swh_metadata_files(source)
+            with self._ds_lock:
+                self._ds_cache[source.id] = urls
+            return urls
+
+        _disable_datasets_progress()
         from datasets import load_dataset
 
         rev = self._source_revision(source)
@@ -1002,6 +1029,16 @@ class Trainer:
             self._ds_cache[source.id] = urls
         return urls
 
+    def _swh_metadata_files(self, source: Source) -> list[str]:
+        rev = self._source_revision(source)
+        config = source.config or "default"
+        shard_glob = "*" if config == "default" else config
+        pattern = f"datasets/{source.repo}@{rev}/data/{shard_glob}/train-*.parquet"
+        urls = self._glob_hf_files(pattern)
+        if not urls:
+            raise FileNotFoundError(f"{source.id}: no SWH metadata shards matched {pattern!r}")
+        return urls
+
     def _remote_fs(self):
         if self._fs is not None:
             return self._fs
@@ -1034,34 +1071,93 @@ class Trainer:
         if self._preflight_done:
             return
         checked = 0
+        deferred_swh: list[tuple[Family, Source]] = []
         self.events.log("preflight_start")
         for family in self.families:
             for source in family.sources:
-                try:
-                    urls = self._load_source(source)
-                    if not urls:
-                        raise RuntimeError("no shards resolved")
-                    self._preflight_source_schema(source, urls[0])
-                except Exception as e:  # noqa: BLE001 - fail before counting anything
-                    self.events.log(
-                        "error", stage="preflight", source=source.id,
-                        error=err_text(e), **error_debug_fields(e),
-                    )
-                    raise RuntimeError(f"preflight failed for {source.id}: {e}") from e
-                checked += 1
-                self.events.log(
-                    "preflight_source",
-                    family=family.id,
-                    source=source.id,
-                    repo=source.repo,
-                    config=source.config,
-                    format=source.format,
-                    text_field=source.text_field,
-                    cap_bytes=source.cap_bytes,
-                    shards=len(urls),
-                )
+                if self._defer_swh_preflight(source):
+                    deferred_swh.append((family, source))
+                    continue
+                checked += self._preflight_one_source(family, source)
+        checked += self._preflight_swh_sources(deferred_swh)
         self._preflight_done = True
         self.events.log("preflight_done", sources=checked)
+
+    def _defer_swh_preflight(self, source: Source) -> bool:
+        return source.format == "swh" and source.data_files is None
+
+    def _preflight_one_source(self, family: Family, source: Source) -> int:
+        try:
+            urls = self._load_source(source)
+            if not urls:
+                raise RuntimeError("no shards resolved")
+            self._preflight_source_schema(source, urls[0])
+        except Exception as e:  # noqa: BLE001 - fail before counting anything
+            self.events.log(
+                "error", stage="preflight", source=source.id,
+                error=err_text(e), **error_debug_fields(e),
+            )
+            raise RuntimeError(f"preflight failed for {source.id}: {e}") from e
+        self._log_preflight_source(family, source, len(urls))
+        return 1
+
+    def _log_preflight_source(
+        self, family: Family, source: Source, shards: int | None
+    ) -> None:
+        self.events.log(
+            "preflight_source",
+            family=family.id,
+            source=source.id,
+            repo=source.repo,
+            config=source.config,
+            format=source.format,
+            text_field=source.text_field,
+            cap_bytes=source.cap_bytes,
+            shards=shards,
+        )
+
+    def _preflight_swh_sources(self, items: list[tuple[Family, Source]]) -> int:
+        if not items:
+            return 0
+        for repo in sorted({source.repo for _, source in items}):
+            group = [(family, source) for family, source in items if source.repo == repo]
+            self._preflight_swh_repo(repo, group)
+        return len(items)
+
+    def _preflight_swh_repo(
+        self, repo: str, items: list[tuple[Family, Source]]
+    ) -> None:
+        try:
+            self._validate_swh_configs(repo, [source for _, source in items])
+            _, schema_source = items[0]
+            urls = self._load_source(schema_source)
+            if not urls:
+                raise RuntimeError("no shards resolved")
+            self._preflight_source_schema(schema_source, urls[0])
+        except Exception as e:  # noqa: BLE001
+            source_id = items[0][1].id
+            self.events.log("error", stage="preflight", source=source_id, error=err_text(e))
+            raise RuntimeError(f"preflight failed for {source_id}: {e}") from e
+        self.events.log(
+            "preflight_swh_repo",
+            repo=repo,
+            sources=len(items),
+            schema_source=schema_source.id,
+            schema_shards=len(urls),
+        )
+        for family, source in items:
+            shards = len(urls) if source is schema_source else None
+            self._log_preflight_source(family, source, shards)
+
+    def _validate_swh_configs(self, repo: str, sources: list[Source]) -> None:
+        _disable_datasets_progress()
+        from datasets import get_dataset_config_names
+
+        available = set(get_dataset_config_names(repo, token=self.token))
+        wanted = {source.config for source in sources if source.config is not None}
+        missing = sorted(wanted - available)
+        if missing:
+            raise RuntimeError(f"{repo}: missing Stack v2 configs {missing[:20]}")
 
     def _preflight_source_schema(self, source: Source, url: str) -> None:
         if source.format == "swh":
@@ -1155,20 +1251,43 @@ class Trainer:
             self._source_failed[source] = self._source_failed.get(source, 0) + 1
 
     def _acquire_remote_stream(self, url: str, ws: WorkerState, sid: str) -> bool:
+        return self._acquire_stream(self._remote_sem, url, ws, sid, "remote stream")
+
+    def _acquire_swh_metadata_stream(
+        self, url: str, ws: WorkerState, sid: str
+    ) -> bool:
+        return self._acquire_stream(
+            self._swh_metadata_sem, url, ws, sid, "SWH metadata stream"
+        )
+
+    def _acquire_stream(
+        self,
+        sem: threading.BoundedSemaphore,
+        url: str,
+        ws: WorkerState,
+        sid: str,
+        label: str,
+    ) -> bool:
         if "://" not in url:
             return False
         while not self.stop.is_set():
-            ws.task = f"{sid} (waiting remote stream)"
+            ws.task = f"{sid} (waiting {label})"
             ws.last_progress = time.monotonic()
-            if self._remote_sem.acquire(timeout=1.0):
+            if sem.acquire(timeout=1.0):
                 ws.task = sid
                 ws.last_progress = time.monotonic()
                 return True
         return False
 
     def _release_remote_stream(self, acquired: bool) -> None:
+        self._release_stream(self._remote_sem, acquired)
+
+    def _release_swh_metadata_stream(self, acquired: bool) -> None:
+        self._release_stream(self._swh_metadata_sem, acquired)
+
+    def _release_stream(self, sem: threading.BoundedSemaphore, acquired: bool) -> None:
         if acquired:
-            self._remote_sem.release()
+            sem.release()
 
     def _note_worker_progress(self, ws: WorkerState, sid: str) -> None:
         now = time.monotonic()
@@ -1409,13 +1528,7 @@ class Trainer:
             pool.shutdown(wait=True, cancel_futures=True)
 
     def _swh_unsigned(self) -> bool:
-        if os.environ.get("SNG_SWH_ANONYMOUS") == "1":
-            return True
-        if os.environ.get("AWS_PROFILE"):
-            return False
-        return not (
-            os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")
-        )
+        return os.environ.get("SNG_SWH_ANONYMOUS", "1") != "0"
 
     def _s3_client(self):
         with self._s3_client_lock:
@@ -1463,6 +1576,17 @@ class Trainer:
         if "://" not in url:
             with gzip.open(url, "rb") as fh:
                 return fh.read()
+        if url.startswith("s3://"):
+            parsed = urlparse(url)
+            response = self._s3_client().get_object(
+                Bucket=parsed.netloc, Key=parsed.path.lstrip("/")
+            )
+            stream = response["Body"]
+            try:
+                body = stream.read()
+            finally:
+                stream.close()
+            return gzip.decompress(body)
 
         try:
             from smart_open import open as smart_open
@@ -1543,7 +1667,7 @@ class Trainer:
                     content_prefix=task.source.content_prefix,
                     metadata_fields=list(task.source.metadata_fields or ()),
                 )
-                remote_acquired = self._acquire_remote_stream(url, ws, sid)
+                remote_acquired = self._acquire_swh_metadata_stream(url, ws, sid)
                 if self.stop.is_set():
                     self._drop_in_flight(ws)
                     return
@@ -1714,12 +1838,12 @@ class Trainer:
                 finally:
                     if fh is not None:
                         fh.close()
-                    self._release_remote_stream(remote_acquired)
+                    self._release_swh_metadata_stream(remote_acquired)
                     remote_acquired = False
                     _release_arrow_pool()
                     self._maybe_trim_memory("swh_shard", sid)
             except Exception as e:  # noqa: BLE001 - metadata shard read failure
-                self._release_remote_stream(remote_acquired)
+                self._release_swh_metadata_stream(remote_acquired)
                 self._drop_in_flight(ws)
                 self._bump("errors")
                 kind = classify_error(e)
@@ -1994,9 +2118,11 @@ class Trainer:
             shard_cache_type=SHARD_CACHE_TYPE,
             shard_block_size=SHARD_BLOCK_SIZE,
             remote_streams=self.remote_streams,
+            swh_metadata_streams=self.swh_metadata_streams,
             swh_fetchers=self.swh_fetchers,
             swh_pending=self.swh_pending,
             swh_unsigned=self._swh_unsigned(),
+            stack_min_bytes=STACK_V2_MIN_BYTES,
             cap_warmup_inflight=self.cap_warmup_inflight,
             memory_soft_limit=MEMORY_SOFT_LIMIT_BYTES,
             memory_trim_interval_s=MEMORY_TRIM_INTERVAL_S,
