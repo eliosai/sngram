@@ -1,0 +1,81 @@
+crates/python/sngram/__init__.py
+  s_f911a7f11fb798::t_e05d10d39c7061 13
+  s_f911a7f11fb798::t_2afc4c17b679db 43,46-47
+  s_f911a7f11fb798::t_002f3764f2b891 9-12,19-21,26,33-35,41-42,44-45,48-49,55-57
+crates/python/tests/test_core.py
+  s_f911a7f11fb798::t_8efcca9c726c22 35-36,39,42
+  s_f911a7f11fb798::t_98f4a1ef9830e6 83
+  s_f911a7f11fb798::t_002f3764f2b891 41,43-44,51-63,66,70,73,102-119,134,137-155
+  s_f911a7f11fb798::t_18639f638b1e78 156-158
+crates/python/pyproject.toml
+  s_f911a7f11fb798::t_2afc4c17b679db 8,18,30
+crates/python/Cargo.toml
+  s_f911a7f11fb798::t_002f3764f2b891 23-25
+  s_f911a7f11fb798::t_2afc4c17b679db 26-27
+  s_f911a7f11fb798::t_4175d838cd9eeb 28
+crates/python/README.md
+  s_f911a7f11fb798::t_f18c5450b0ba09 106
+  s_f911a7f11fb798::t_0dc96d52e58da7 24-26
+  s_f911a7f11fb798::t_7a6142893d0800 1,3-23,27-105,107-131
+crates/python/src/table.rs
+  s_f911a7f11fb798::t_2afc4c17b679db 118-119
+  s_f911a7f11fb798::t_098ca0b95ad115 1-117,120-123
+crates/lib/Cargo.toml
+  s_f911a7f11fb798::t_c16708265aa938 13,30-31
+  s_f911a7f11fb798::t_2afc4c17b679db 21-22
+  s_f911a7f11fb798::t_3946384e1b927c 32
+crates/lib/src/weights.rs
+  s_f911a7f11fb798::t_94f81ef30844d0 5-7,9-15,17-21,26,36-38,40-42
+  s_f911a7f11fb798::t_c4fd938cbbd026 1-4,8,16,22-25,27-35,39
+crates/lib/src/lib.rs
+  s_f911a7f11fb798::t_27e53bb674c712 31
+  s_f911a7f11fb798::t_2afc4c17b679db 25,30
+  s_f911a7f11fb798::t_a49970d7707d93 41-42
+crates/lib/build.rs
+  s_f911a7f11fb798::t_e2f1710b1e289b 1-27
+.github/workflows/ci.yml
+  s_f911a7f11fb798::t_2afc4c17b679db 40
+  s_f911a7f11fb798::t_002f3764f2b891 58-78
+  s_f911a7f11fb798::t_dd9f5f3080f50d 88
+crates/python/src/lib.rs
+  s_f911a7f11fb798::t_2afc4c17b679db 33
+  s_f911a7f11fb798::t_002f3764f2b891 1,3-7,16-19,25-32,34
+crates/python/src/scanning.rs
+  s_f911a7f11fb798::t_72e40bb64ae2f6 9
+  s_f911a7f11fb798::t_df62a8b3c931b7 25,34,40,46,52,58,64,70,77,94,96-106,109
+  s_f911a7f11fb798::t_a5287f82e77fd3 1-8,10-24,26-33,35-39,41-45,47-51,53-57,59-63,65-69,71-76,78-93,95,107-108,110-140
+crates/lib/README.md
+  s_f911a7f11fb798::t_1f1ed9b7552ad6 38
+  s_f911a7f11fb798::t_345ad886dbc297 3-4,14-15,17-22,24-28,34,56-60,71-77,79-81,83,85-88,97-100
+  s_f911a7f11fb798::t_0dc96d52e58da7 91-93
+Cargo.lock
+  s_f911a7f11fb798::t_bd9752e3cae50b 540
+Cargo.toml
+  s_f911a7f11fb798::t_8ceac9b98b19e3 3
+crates/eg/src/index/daemon_refresh.rs
+  s_f911a7f11fb798::t_9cc35b91577569 23
+crates/eg/src/index/mod.rs
+  s_f911a7f11fb798::t_ddbde48ba803e6 126
+crates/python/src/counter.rs
+  s_f911a7f11fb798::t_8dba6d599d60e3 1-104
+crates/python/src/plan.rs
+  s_f911a7f11fb798::t_b69137d8e30c91 1-168
+crates/python/tests/test_index_soundness.py
+  s_f911a7f11fb798::t_076c14466c637f 1-121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2af1b0f6ae3cc078b4f845d017ffc8d074b7e904",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
