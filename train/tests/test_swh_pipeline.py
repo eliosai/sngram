@@ -5,12 +5,19 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import threading
+import time
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from sngram_train.config import Family, Source, STACK_V2_REQUIRED_COLUMNS
+from sngram_train.config import (
+    Family,
+    Source,
+    STACK_V2_MIN_BYTES,
+    STACK_V2_REQUIRED_COLUMNS,
+)
 from sngram_train.pipeline import Trainer
 from sngram_train.units import parse_size
 
@@ -58,7 +65,7 @@ def _row(
         "extension": extension,
         "is_vendor": is_vendor,
         "is_generated": is_generated,
-        "length_bytes": len(content),
+        "length_bytes": max(len(content), STACK_V2_MIN_BYTES),
     }
 
 
@@ -192,6 +199,167 @@ def test_swh_object_errors_are_logged_and_do_not_stop_the_shard(tmp_path: Path):
     assert batch["fetch_errors"] == 1
     assert batch["decode_errors"] == 1
     assert batch["accepted_objects"] == 1
+
+
+def test_swh_objects_fetch_concurrently_inside_one_shard(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("SNG_SWH_FETCHERS", "8")
+    monkeypatch.setenv("SNG_SWH_PENDING", "8")
+    content_dir = tmp_path / "content"
+    content = b"print('ok')\n"
+    rows = [_row(f"blob-{i}", content) for i in range(32)]
+    metadata = _write_metadata(tmp_path / "metadata", rows)
+    family = _swh_family(metadata, content_dir, "core-programming", len(content) * len(rows))
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_read(self, url, ws, sid):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return content, 0.02
+
+    monkeypatch.setattr(Trainer, "_read_swh_content", fake_read)
+    trainer = _run(tmp_path, family, target=len(content) * len(rows))
+
+    assert trainer.durable_bytes() == len(content) * len(rows)
+    assert max_active >= 4
+
+
+def test_remote_swh_preflight_does_not_resolve_every_config(
+    tmp_path: Path, monkeypatch
+):
+    _write_metadata(tmp_path / "metadata", [_row("blob", b"abc")])
+    metadata_path = str(next((tmp_path / "metadata").glob("*.parquet")))
+    sources = (
+        Source(
+            "stack-core",
+            "example/stack",
+            "blob_id",
+            config="Python",
+            format="swh",
+            content_prefix="s3://softwareheritage/content/",
+            metadata_fields=STACK_V2_REQUIRED_COLUMNS,
+            bucket="core-programming",
+        ),
+        Source(
+            "stack-core",
+            "example/stack",
+            "blob_id",
+            config="Rust",
+            format="swh",
+            content_prefix="s3://softwareheritage/content/",
+            metadata_fields=STACK_V2_REQUIRED_COLUMNS,
+            bucket="core-programming",
+        ),
+    )
+    family = Family(id="stack-core", sources=sources)
+    trainer = Trainer(
+        families=[family],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    resolved: list[str | None] = []
+
+    def fake_load(self, source):
+        resolved.append(source.config)
+        return [metadata_path]
+
+    def fake_configs(repo, token=None):
+        assert repo == "example/stack"
+        return ["Python", "Rust"]
+
+    monkeypatch.setattr(Trainer, "_load_source", fake_load)
+    monkeypatch.setattr("datasets.get_dataset_config_names", fake_configs)
+
+    trainer.preflight_sources()
+    trainer.events.close()
+    events = _events(tmp_path)
+
+    assert resolved == ["Python"]
+    assert next(e for e in events if e["kind"] == "preflight_done")["sources"] == 2
+
+
+def test_swh_metadata_files_use_direct_hf_glob(tmp_path: Path, monkeypatch):
+    source = Source(
+        "stack-core",
+        "example/stack",
+        "blob_id",
+        config="Python",
+        format="swh",
+        content_prefix="s3://softwareheritage/content/",
+        metadata_fields=STACK_V2_REQUIRED_COLUMNS,
+        bucket="core-programming",
+    )
+    trainer = Trainer(
+        families=[Family(id="stack-core", sources=(source,))],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    trainer.state.revisions["example/stack"] = "abc123"
+    patterns: list[str] = []
+
+    def fake_glob(pattern):
+        patterns.append(pattern)
+        return [f"hf://{pattern.replace('*', '00000-of-00001')}"]
+
+    monkeypatch.setattr(trainer, "_glob_hf_files", fake_glob)
+
+    assert trainer._load_source(source)
+    assert patterns == ["datasets/example/stack@abc123/data/Python/train-*.parquet"]
+    trainer.events.close()
+
+
+def test_default_swh_metadata_source_globs_all_language_shards(
+    tmp_path: Path, monkeypatch
+):
+    source = Source(
+        "stack-long-tail",
+        "example/stack",
+        "blob_id",
+        config="default",
+        format="swh",
+        content_prefix="s3://softwareheritage/content/",
+        metadata_fields=STACK_V2_REQUIRED_COLUMNS,
+        bucket="long-tail",
+    )
+    trainer = Trainer(
+        families=[Family(id="stack-long-tail", sources=(source,))],
+        mint_dir=tmp_path / "bins",
+        target=parse_size("1GB"),
+        mint_every=parse_size("1GB"),
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    trainer.state.revisions["example/stack"] = "abc123"
+    patterns: list[str] = []
+    monkeypatch.setattr(
+        trainer,
+        "_glob_hf_files",
+        lambda pattern: patterns.append(pattern) or [f"hf://{pattern}"],
+    )
+
+    assert trainer._load_source(source)
+    assert patterns == ["datasets/example/stack@abc123/data/*/train-*.parquet"]
+    trainer.events.close()
 
 
 def test_swh_preflight_requires_stack_v2_metadata_columns(tmp_path: Path):

@@ -3,6 +3,7 @@
 import asyncio
 import builtins
 import json
+import time
 from pathlib import Path
 
 import pyarrow as pa
@@ -11,7 +12,7 @@ import pytest
 
 import sngram
 from sngram_train.config import Family, Source
-from sngram_train.pipeline import Trainer
+from sngram_train.pipeline import ShardTask, Trainer
 from sngram_train.units import fmt_bytes, mint_label, parse_size
 
 
@@ -114,6 +115,68 @@ def test_mint_thresholds_hit_in_order(tmp_path: Path):
         assert (bins / label).exists() or True  # labels checked below
     assert trainer.state.mints_done[:1] == [mint_label(100_000)]
     assert "final" in trainer.state.mints_done
+
+
+def test_mint_fires_from_in_flight_preview(tmp_path: Path):
+    trainer = Trainer(
+        families=[],
+        mint_dir=tmp_path / "bins",
+        target=200,
+        mint_every=100,
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    ws = trainer.worker_state[0]
+    batch = sngram.BigramCounter()
+    batch.process(b"ab" * 75)
+
+    trainer._publish_batch(ws, "manual#0", batch, batch.bytes_processed)
+    trainer._mint_if_due()
+    mint = next(e for e in trainer.events.tail if e["kind"] == "mint")
+    trainer.events.close()
+
+    assert trainer.durable_bytes() == 0
+    assert trainer.state.mints_done == ["100b"]
+    assert (tmp_path / "bins" / "100b_weights.bin").exists()
+    assert mint["bytes"] == batch.bytes_processed
+    assert mint["durable_bytes"] == 0
+    assert mint["in_flight_bytes"] == batch.bytes_processed
+
+
+def test_committed_shard_clears_mint_preview(tmp_path: Path):
+    source = Source("alpha", "local", "content")
+    family = Family(id="alpha", sources=(source,))
+    trainer = Trainer(
+        families=[family],
+        mint_dir=tmp_path / "bins",
+        target=200,
+        mint_every=200,
+        workers=1,
+        limit=None,
+        checkpoint_every_s=3600.0,
+        resume=False,
+    )
+    trainer.thresholds = [200]
+    ws = trainer.worker_state[0]
+    ws.started = time.monotonic()
+    batch = sngram.BigramCounter()
+    batch.process(b"ab" * 100)
+    trainer._publish_batch(ws, "alpha/local#0", batch, batch.bytes_processed)
+
+    task = ShardTask(source, shard=0, n_shards=1, revision=None)
+    trainer._commit_counter(ws, task, "alpha/local#0", batch, batch.bytes_processed)
+    trainer._mint_if_due()
+    mint = next(e for e in trainer.events.tail if e["kind"] == "mint")
+    trainer.events.close()
+
+    assert trainer.durable_bytes() == batch.bytes_processed
+    assert trainer.in_flight_bytes == 0
+    assert ws.mint_bytes == 0
+    assert mint["bytes"] == batch.bytes_processed
+    assert mint["durable_bytes"] == batch.bytes_processed
+    assert mint["in_flight_bytes"] == 0
 
 
 def test_mints_log_kl_convergence_signal(tmp_path: Path):

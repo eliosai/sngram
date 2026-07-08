@@ -641,11 +641,26 @@ def test_json_shard_attempts_memory_trim_after_close(tmp_path: Path, monkeypatch
 def test_remote_stream_limit_defaults_and_env(tmp_path: Path, monkeypatch):
     trainer = make_trainer(tmp_path, [], workers=16)
     assert trainer.remote_streams == 4
+    assert trainer.swh_metadata_streams == 16
+    assert trainer.swh_fetchers == 128
+    assert trainer.swh_pending == 256
+    assert trainer._swh_unsigned() is True
+    assert trainer.cap_warmup_inflight == 16
     trainer.events.close()
 
+    monkeypatch.setenv("SNG_SWH_ANONYMOUS", "0")
     monkeypatch.setenv("SNG_HF_STREAMS", "3")
+    monkeypatch.setenv("SNG_SWH_METADATA_STREAMS", "14")
+    monkeypatch.setenv("SNG_SWH_FETCHERS", "64")
+    monkeypatch.setenv("SNG_SWH_PENDING", "96")
+    monkeypatch.setenv("SNG_CAP_WARMUP_INFLIGHT", "12")
     limited = make_trainer(tmp_path, [], workers=16)
     assert limited.remote_streams == 3
+    assert limited.swh_metadata_streams == 14
+    assert limited.swh_fetchers == 64
+    assert limited.swh_pending == 96
+    assert limited._swh_unsigned() is False
+    assert limited.cap_warmup_inflight == 12
     limited.events.close()
 
 
