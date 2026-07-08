@@ -1,0 +1,39 @@
+README.md
+  s_96c5e027d2f6bb::t_ebfe57274812c8 30-31
+Cargo.toml
+  s_96c5e027d2f6bb::t_78f2e2ee5a8cdb 6,21-22
+crates/lib/README.md
+  s_96c5e027d2f6bb::t_ebfe57274812c8 8-9
+crates/types/README.md
+  s_96c5e027d2f6bb::t_ebfe57274812c8 8
+Cargo.lock
+  s_96c5e027d2f6bb::t_c9866537175cdc 519-526,1508,1520,1531,1542
+AGENTS.md
+  s_96c5e027d2f6bb::t_76db4b717514fd 107-108
+CLAUDE.md
+  s_96c5e027d2f6bb::t_08eb0af54c0aa2 107-108
+crates/eg/Cargo.toml
+  s_96c5e027d2f6bb::t_fa84635d41ba01 2,6,9,11-12
+crates/eg/README.md
+  s_96c5e027d2f6bb::t_4512758e65d8df 1,3-6,8,14-16,18-21,28-50,53-54
+crates/eg/tests/index_perf.rs
+  s_96c5e027d2f6bb::t_7b70c22f858abb 58
+justfile
+  s_96c5e027d2f6bb::t_ca43d6135ee73b 16-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3cab40d323d51e60424944f0822f3c9d53c8fd86",
+  "prompts": {},
+  "sessions": {
+    "s_96c5e027d2f6bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4352-8dfb-72b3-8cac-454d470e7910",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
