@@ -1,0 +1,52 @@
+train/sngram_train/config.py
+  s_382aea99198977::t_8d925701c6126b 51
+  s_382aea99198977::t_21064e92e989cd 241-242
+  s_382aea99198977::t_b21cc92d7000f5 258
+train/tests/test_config.py
+  s_382aea99198977::t_35b435ac71a6c5 9,110,120-121
+  s_382aea99198977::t_f2920f0f064559 145-148
+train/tests/test_swh_pipeline.py
+  s_382aea99198977::t_af948b55df2f0c 294-364
+  s_382aea99198977::t_dd256b7984c1c5 15-20,68
+  s_382aea99198977::t_431dd18f523f9f 235-293
+train/tests/test_hardening.py
+  s_382aea99198977::t_b09179df50582b 647,651,662
+  s_382aea99198977::t_ff14fec215e3e0 644,653,659
+train/sngram_train/pipeline.py
+  s_382aea99198977::t_d8077cec61a2ad 1254-1270,1274,1276,1283-1288,1290
+  s_382aea99198977::t_941d56a343c29b 1581,1583-1588
+  s_382aea99198977::t_5f0ffa23a4c4ae 1846
+  s_382aea99198977::t_58f28ac9ff3dea 33-40,1531,1579-1580,1582,1589,2125
+  s_382aea99198977::t_23a6b9ce225d16 2121
+  s_382aea99198977::t_f07d32f1a7c5b0 967-970,985-990,1032-1039
+  s_382aea99198977::t_38dbe93c808aab 1132,1149-1150
+  s_382aea99198977::t_15e415ef5d32c4 1670,1841
+  s_382aea99198977::t_eb0eb138544582 158-167,991,1074,1078-1082,1086-1131,1133-1148,1151-1160
+  s_382aea99198977::t_a025638bcfca3e 593-596
+  s_382aea99198977::t_cda88fa3234ce2 872-874
+  s_f911a7f11fb798::t_646c8eb3d591ce 1040-1041,1161
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "11d02d0b7d41fabe807d74ef7c93661ddf822c10",
+  "prompts": {},
+  "sessions": {
+    "s_382aea99198977": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f427b-9bea-75c2-bcc5-7f24c7edfaf8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    },
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
