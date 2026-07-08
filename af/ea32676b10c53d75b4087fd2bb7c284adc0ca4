@@ -1,0 +1,26 @@
+crates/lib/src/query/combine.rs
+  s_f911a7f11fb798::t_fdedf710fb8cfd 257-259
+  s_f911a7f11fb798::t_9dfa0eec5901ba 557-566,584
+  s_f911a7f11fb798::t_bb2ef263849f69 167,173-189,567-583
+  s_f911a7f11fb798::t_8a39a8a2c0e34f 190
+  s_f911a7f11fb798::t_edd0f4f1690c79 585
+crates/lib/tests/precision.rs
+  s_f911a7f11fb798::t_6561c7e5a36a1c 234-246
+  s_f911a7f11fb798::t_a125e927a8bc92 247-256
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "afea32676b10c53d75b4087fd2bb7c284adc0ca4",
+  "prompts": {},
+  "sessions": {
+    "s_f911a7f11fb798": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e596a666-1c82-432d-9ef3-a7b2b02766cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
