@@ -1,0 +1,52 @@
+crates/eg/src/index/manifest.rs
+  s_96c5e027d2f6bb::t_f9dd2409024a20 494-497
+  s_96c5e027d2f6bb::t_e213c224883770 21,29,31,475,481,498,513-515,1056-1059,1148,1181-1183,1197,1225,1233,1248-1252
+crates/eg/src/index/mod.rs
+  s_96c5e027d2f6bb::t_f2419542cec003 376-377
+  s_96c5e027d2f6bb::t_e6308ec606c82a 224-230,371,375
+crates/eg/src/index/summary.rs
+  s_96c5e027d2f6bb::t_d5b42286eb07d4 19-20,70,89,96,109,114,136,186,203,212,244-250,278-281,285,339,346-348,350,355-356,383,388,396-398,400,403,410,414-423
+  s_96c5e027d2f6bb::t_faa4b9bd39a734 87-88
+  s_96c5e027d2f6bb::t_1d066ff304a54a 688-691,695
+  s_382aea99198977::t_bc5b00805400ae 424
+crates/eg/src/index/verify.rs
+  s_96c5e027d2f6bb::t_7db6647e997240 20
+  s_96c5e027d2f6bb::t_7b904089eb4162 168-169
+  s_96c5e027d2f6bb::t_c1a341c0d8481a 170
+  s_96c5e027d2f6bb::t_93f37cd7164d33 231
+  s_96c5e027d2f6bb::t_d5b42286eb07d4 92,117-118,123,125-132,158-167,174-195,197-216,266-272
+  s_96c5e027d2f6bb::t_e9967bc12ba67a 124,171-173,196
+  s_96c5e027d2f6bb::t_c53e4b49b3fccc 217
+crates/eg/src/index/roots.rs
+  s_96c5e027d2f6bb::t_f2419542cec003 53,55-59,61-62
+  s_96c5e027d2f6bb::t_e6308ec606c82a 54,60
+crates/types/src/table.rs
+  s_96c5e027d2f6bb::t_dad81001cbbc9e 26,33,37-40,68,101-102,118
+crates/eg/src/index/postings.rs
+  s_96c5e027d2f6bb::t_8006f210a64847 153-159,174
+  s_96c5e027d2f6bb::t_b2c4ac01b06cce 203,206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6ba3bf2d8990745a863078de5e54eb9c988b0bf2",
+  "prompts": {},
+  "sessions": {
+    "s_382aea99198977": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f427b-9bea-75c2-bcc5-7f24c7edfaf8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    },
+    "s_96c5e027d2f6bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4352-8dfb-72b3-8cac-454d470e7910",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
