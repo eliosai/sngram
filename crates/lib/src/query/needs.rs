@@ -8,6 +8,7 @@ const MAX_ANY_BYTE_SET_LEN: u32 = 128;
 
 pub struct RootNeeds {
     min_len: u64,
+    single_line: bool,
     byte_counts: ByteCountNeed,
     any_byte_sets: Vec<ByteSet256>,
     line_start: Option<ByteSet256>,
@@ -20,6 +21,7 @@ impl RootNeeds {
     pub fn from_hir(hir: &Hir) -> Self {
         Self {
             min_len: min_match_len(hir),
+            single_line: !can_match_newline(hir),
             byte_counts: ByteCountNeed::from_hir(hir),
             any_byte_sets: required_class_sets(hir),
             line_start: line_anchor_bytes(hir, Edge::Start),
@@ -33,6 +35,10 @@ impl RootNeeds {
         let mut needs = Vec::new();
         if self.min_len > 0 {
             needs.push(ScanNeed::MinByteLen(self.min_len));
+        }
+        if self.single_line && self.min_len > 1 {
+            let len = u32::try_from(self.min_len).unwrap_or(u32::MAX);
+            needs.push(ScanNeed::MinLongestLineLen(len));
         }
         if let Some(need) = self.byte_counts.into_scan_need() {
             needs.push(need);
@@ -393,6 +399,30 @@ fn repeat_count(count: u8, times: u32) -> u8 {
     u8::try_from(product).unwrap_or(u8::MAX)
 }
 
+fn can_match_newline(hir: &Hir) -> bool {
+    match hir.kind() {
+        HirKind::Empty | HirKind::Look(_) => false,
+        HirKind::Literal(lit) => lit.0.contains(&b'\n'),
+        HirKind::Class(class) => class_has_newline(class),
+        HirKind::Repetition(rep) => rep.max != Some(0) && can_match_newline(&rep.sub),
+        HirKind::Capture(capture) => can_match_newline(&capture.sub),
+        HirKind::Concat(subs) | HirKind::Alternation(subs) => subs.iter().any(can_match_newline),
+    }
+}
+
+fn class_has_newline(class: &Class) -> bool {
+    match class {
+        Class::Bytes(bytes) => bytes
+            .ranges()
+            .iter()
+            .any(|r| r.start() <= b'\n' && b'\n' <= r.end()),
+        Class::Unicode(chars) => chars
+            .ranges()
+            .iter()
+            .any(|r| r.start() <= '\n' && '\n' <= r.end()),
+    }
+}
+
 fn min_match_len(hir: &Hir) -> u64 {
     match hir.kind() {
         HirKind::Empty | HirKind::Look(_) => 0,
@@ -555,6 +585,38 @@ mod tests {
             need,
             ScanNeed::EndsWith(edge) if edge.as_slice() == b"return 0;"
         )));
+    }
+
+    fn longest_line_need(needs: &[ScanNeed]) -> Option<u32> {
+        needs.iter().find_map(|need| match need {
+            ScanNeed::MinLongestLineLen(n) => Some(*n),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn single_line_literal_demands_longest_line() {
+        assert_eq!(longest_line_need(&root_needs("hello world")), Some(11));
+    }
+
+    #[test]
+    fn single_line_gap_pattern_demands_longest_line() {
+        assert_eq!(longest_line_need(&root_needs("static.*return")), Some(12));
+    }
+
+    #[test]
+    fn newline_capable_dot_emits_no_longest_line() {
+        assert!(longest_line_need(&root_needs("(?s)static.*return")).is_none());
+    }
+
+    #[test]
+    fn newline_literal_emits_no_longest_line() {
+        assert!(longest_line_need(&root_needs("foo\nbar")).is_none());
+    }
+
+    #[test]
+    fn newline_class_emits_no_longest_line() {
+        assert!(longest_line_need(&root_needs("foo[\n;]bar")).is_none());
     }
 
     #[test]

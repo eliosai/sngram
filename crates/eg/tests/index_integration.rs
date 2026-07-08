@@ -646,7 +646,7 @@ fn index_bench_reports_structured_errors() {
 fn index_bench_reports_false_positive_counts_on_controlled_corpus() {
     let fixture = Fixture::new();
     fs::write(fixture.path("hit.txt"), "foo123bar\n").unwrap();
-    fs::write(fixture.path("false-positive.txt"), "foo\nbar\n").unwrap();
+    fs::write(fixture.path("false-positive.txt"), "bar then foo\n").unwrap();
 
     let output = eg(&["--bench", r"foo.*bar", fixture.root.to_str().unwrap()]);
     let stdout = String::from_utf8(output.stdout).unwrap();
