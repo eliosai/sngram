@@ -8,10 +8,13 @@ from sngram_train.config import (
     STACK_V2_METADATA_REPO,
     STACK_V2_MIN_BYTES,
     STACK_V2_REQUIRED_COLUMNS,
+    STACK_V2_SOURCE_MAX_SHARE,
     STACK_V2_TARGET_BYTES,
     TRAIN_TARGET_BYTES,
     default_families,
     hf_token,
+    stack_v2_bucket_source_capacity,
+    stack_v2_bucket_source_caps,
     stack_v2_bucket_for,
     stack_v2_skip_reason,
 )
@@ -51,6 +54,19 @@ def test_source_caps_roll_up_to_family_caps():
         assert family.sources
         assert all(source.family == family.id for source in family.sources)
         assert all(source.cap_bytes == family.cap_bytes for source in family.sources)
+
+
+def test_runtime_source_caps_limit_each_type_without_underfilling_area():
+    for family in default_families():
+        caps = stack_v2_bucket_source_caps(family)
+        capacity = stack_v2_bucket_source_capacity(family)
+        assert capacity is None or capacity >= family.cap_bytes
+        if len(family.sources) <= 1:
+            assert list(caps.values()) == [family.cap_bytes]
+            continue
+        source_cap = int(family.cap_bytes * STACK_V2_SOURCE_MAX_SHARE)
+        assert all(cap == source_cap for cap in caps.values())
+        assert source_cap < family.cap_bytes
 
 
 def test_stack_v2_sources_use_language_configs_for_dense_reads():

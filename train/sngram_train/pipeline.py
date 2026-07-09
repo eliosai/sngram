@@ -36,6 +36,7 @@ from .config import (
     Source,
     hf_token,
     stack_v2_bucket_for,
+    stack_v2_bucket_source_caps,
     stack_v2_skip_reason,
 )
 from .events import EventLog
@@ -532,7 +533,11 @@ class Trainer:
     ) -> None:
         self.families = families
         self._families = {f.id: f for f in families}
-        self._source_caps = {s.id: s.cap_bytes for f in families for s in f.sources}
+        self._source_caps = {
+            sid: cap
+            for family in families
+            for sid, cap in stack_v2_bucket_source_caps(family).items()
+        }
         self.mint_dir = mint_dir
         self.target = target
         self.limit = limit
@@ -671,7 +676,7 @@ class Trainer:
                     s.id: {
                         "bytes": int(source_bytes.get(s.id, 0)),
                         "done": int(source_done.get(s.id, 0)),
-                        "cap": int(s.cap_bytes or 0),
+                        "cap": int(self._source_caps.get(s.id) or 0),
                     }
                     for s in f.sources
                 },
