@@ -1,0 +1,26 @@
+train/sngram_train/config.py
+  s_382aea99198977::t_6d9186583c821d 66,196-225
+  s_382aea99198977::t_c91cc631a5347a 226-227
+train/sngram_train/pipeline.py
+  s_382aea99198977::t_98ec0493ee6f80 39,536-540
+  s_382aea99198977::t_9eb8fb26719a84 679
+train/tests/test_config.py
+  s_382aea99198977::t_e0964846f4392a 11,16-17,59-69
+  s_382aea99198977::t_332d03e8549fcb 70-71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "26c2d7bdd98bf0bf5676f4f8937f4506740e86fe",
+  "prompts": {},
+  "sessions": {
+    "s_382aea99198977": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f427b-9bea-75c2-bcc5-7f24c7edfaf8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
