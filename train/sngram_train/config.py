@@ -63,6 +63,7 @@ DOC_LANGUAGES = {
     "Org", "Wikitext", "AsciiDoc", "RMarkdown", "Jupyter Notebook", "BibTeX",
     "Textile", "RDoc", "Pod", "Pod 6", "Texinfo",
 }
+STACK_V2_SOURCE_MAX_SHARE = float(os.environ.get("SNG_STACK_SOURCE_MAX_SHARE", "0.06"))
 
 CONFIG_LANGUAGES = {
     "JSON", "JSON with Comments", "JSON5", "YAML", "TOML", "XML", "INI",
@@ -190,6 +191,38 @@ def default_families() -> list[Family]:
         )
         for bucket, cap in STACK_V2_BUCKET_CAPS.items()
     ]
+
+
+def stack_v2_source_cap(source: Source, source_count: int = 1) -> int | None:
+    if not _stack_v2_cap_applies(source, source_count):
+        return source.cap_bytes
+    share_cap = int((source.cap_bytes or 0) * STACK_V2_SOURCE_MAX_SHARE)
+    return min(source.cap_bytes or share_cap, share_cap)
+
+
+def _stack_v2_cap_applies(source: Source, source_count: int) -> bool:
+    if source_count <= 1:
+        return False
+    if source.format != "swh":
+        return False
+    if source.bucket not in STACK_V2_BUCKET_CAPS:
+        return False
+    return source.cap_bytes is not None
+
+
+def stack_v2_bucket_source_caps(family: Family) -> dict[str, int | None]:
+    source_count = len(family.sources)
+    return {
+        source.id: stack_v2_source_cap(source, source_count)
+        for source in family.sources
+    }
+
+
+def stack_v2_bucket_source_capacity(family: Family) -> int | None:
+    caps = stack_v2_bucket_source_caps(family).values()
+    if any(cap is None for cap in caps):
+        return None
+    return sum(int(cap or 0) for cap in caps)
 
 
 def _norm(value: object) -> str:
