@@ -1,0 +1,175 @@
+train/sngram_train/events.py
+  s_4dfbf3b7dc2ca8::t_ec2147cf5a47a4 11,16,52,57,72
+docs/training-debug-issues.md
+  s_382aea99198977::t_2078509b9eee7f 1-303
+train/sngram_train/cli.py
+  s_4dfbf3b7dc2ca8::t_1486e34af9a6c2 81,106-107,109-122,126-131,142-145
+  s_4dfbf3b7dc2ca8::t_a2ee36273002b5 80,90-98
+  s_4dfbf3b7dc2ca8::t_cdb99593a555ce 123-125,132-133
+  s_4dfbf3b7dc2ca8::t_29a121c67b82ae 85,99-101,108,134-141
+  s_4dfbf3b7dc2ca8::t_4f09e6ce6e65fa 51,55-57,149,153,155,166-167,170
+  s_4dfbf3b7dc2ca8::t_0560709c35ac0d 224-225,227-230
+  s_4dfbf3b7dc2ca8::t_bc1aafbca3689e 1,6,12-13,23-30,32-33,36-38,40,42-50,61-77,79,82-84,86,102-105,146,159-161,163,168,171-172,174-175,180-181,183-184,189,192-193,195-196,200,205-207,209-210,215,222-223,226,231,236-239,241-242,246,249-250,253-261
+  s_4dfbf3b7dc2ca8::t_ad8b271050ad9a 87-89
+  s_4dfbf3b7dc2ca8::t_17dfd07a66da20 78
+  s_4dfbf3b7dc2ca8::t_96f49c86b1920c 147
+docs/training.md
+  s_4dfbf3b7dc2ca8::t_3e294025b939f3 3-5,7-9,11,13-14,19,23-38,42,45-46,49-50,52-55,57-59
+train/tests/test_content.py
+  s_4dfbf3b7dc2ca8::t_a05e8ef3dfabcd 14-28
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 1-13
+train/sngram_train/stack.py
+  s_4dfbf3b7dc2ca8::t_d16a43805638a7 38
+  s_4dfbf3b7dc2ca8::t_c199bf29d24cd9 142
+  s_4dfbf3b7dc2ca8::t_8e2c1a8921fc05 1,5,11-15,20-21,23,26-27,44,46-48,57-59,61-63,113,128-134,137,189-203,207-208,210-216,218-235,237-238,240,247-248,250,268,272-276,278,294-314,316,330-363
+  s_4dfbf3b7dc2ca8::t_5f248ba749571b 116
+  s_4dfbf3b7dc2ca8::t_dc7797bff3b776 117,122,135,141,146
+  s_4dfbf3b7dc2ca8::t_abaffd41d6e575 236,239,249,251-258,263,266-267
+  s_4dfbf3b7dc2ca8::t_509768a756bbc4 9,34-37,42,56,124-125,138-140
+  s_4dfbf3b7dc2ca8::t_12aefae92c6422 260-261,264-265
+  s_4dfbf3b7dc2ca8::t_477c9668f10e9c 29-31,99,104,115,118-121,123,126-127,148
+  s_4dfbf3b7dc2ca8::t_ecba315082672f 241-246,269-271,279-293,315,317-329
+  s_4dfbf3b7dc2ca8::t_5b38a5f39a6fc9 259,262
+  s_4dfbf3b7dc2ca8::t_ec530ad1b7b5b8 277,364-369
+  s_4dfbf3b7dc2ca8::t_c6ce394dcb8637 7,18-19,39-41,43,45,49-55,60,64-98,100,102-103,105-112,114,136,143-145,147,149,151-152,154-157,159-165,169-188
+train/sngram_train/distribution.py
+  s_4dfbf3b7dc2ca8::t_c66fdec3a6e7c2 1-70
+train/sngram_train/content.py
+  s_4dfbf3b7dc2ca8::t_57dbbf365d2d47 1,6-17,20,28-30,32-33,37,46-47,50-53,58-72
+  s_4dfbf3b7dc2ca8::t_a05e8ef3dfabcd 21,31,48-49,73-79
+  s_4dfbf3b7dc2ca8::t_5b38a5f39a6fc9 18-19,22-27,34-36,38-45,54-57,80-85
+train/sngram_train/config.py
+  s_4dfbf3b7dc2ca8::t_76981b402fbd1d 88
+  s_4dfbf3b7dc2ca8::t_f32f69c63b2768 1,13-14,17-20,59-61,101,103,114-121,124-125,127-133,142-144,147-150
+train/tests/test_distribution.py
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 1-53
+train/sngram_train/manifest.py
+  s_4dfbf3b7dc2ca8::t_d8e62e58a5148a 333
+  s_4dfbf3b7dc2ca8::t_b51373c3a70af6 42,84-85,90,135,137-148,169,172,200-206,210,212-213,226-227,234-235,239-241,266,270-285,319-320
+  s_4dfbf3b7dc2ca8::t_074411c79faa4e 47,91-95,159-164,168,170-171,175,310-314
+  s_4dfbf3b7dc2ca8::t_4f09e6ce6e65fa 12,14,83,269
+  s_4dfbf3b7dc2ca8::t_71ccd89302a932 43,45,104,106,116-117,131-132,149-150,154,176,220-225,233,250,265,267,315-318,325,327
+  s_4dfbf3b7dc2ca8::t_dd338384e70b10 290-294,296
+  s_4dfbf3b7dc2ca8::t_503a98b0e371c4 46,58,69-75,77,79-82,86-89,151-153,155-158,165-167,173-174,184-185,197,209,211,214-215,306-308
+  s_4dfbf3b7dc2ca8::t_a6a438e4efa76a 44,96-98,107-114,120-128,246-249,252-254,289,295,299-304,321-324,329-330
+  s_4dfbf3b7dc2ca8::t_b5626cba804fb4 7,37-38,51-57,59-67,182,189-195
+  s_4dfbf3b7dc2ca8::t_bc603d286421a9 1,5-6,8-9,13,15-36,39-41,48-50,68,78,101-103,105,115,118-119,129,177-181,183,186-188,196,198-199,207-208,218,229-231,236-238,242-245,251,255,257-264,268,297-298,305,309,326,328,331-332,334-335
+  s_4dfbf3b7dc2ca8::t_8e2c1a8921fc05 130,133-134,136
+  s_4dfbf3b7dc2ca8::t_070fdf1c25dab4 219,228,232,256
+train/sngram_train/sampling.py
+  s_4dfbf3b7dc2ca8::t_f9a360f948bda5 1-23,32-68,84-87,105-119,122-124,129-150
+  s_4dfbf3b7dc2ca8::t_070fdf1c25dab4 24-31,69-83,88-104
+  s_4dfbf3b7dc2ca8::t_a05e8ef3dfabcd 120-121,125-128
+train/tests/test_pipeline.py
+  s_4dfbf3b7dc2ca8::t_29a121c67b82ae 39
+  s_4dfbf3b7dc2ca8::t_a05e8ef3dfabcd 16,26,30
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 2,7-15,17-25,27-29,31-38,40-50,52-55,58,61-63,65-66,70-71,73,75-79,82-83,85,87-89,92-96,98-99,101-106,108-110,112-114
+docs/training-data.md
+  s_4dfbf3b7dc2ca8::t_3e294025b939f3 1,3,5-8,10,12-14,16-19,21,23-30,32-36,38,40-41,43-44,46-50,52-56,58,60-63,65-68,70,72-80,82-84,86-89,91,93-95,97-99,101-111
+train/sngram_train/resources.py
+  s_4dfbf3b7dc2ca8::t_13aa0741acf8d7 1,3,5-8,10,12-13,16-19,21-23,26-29,31-36,39-43
+train/tests/test_config.py
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 2-3,9-11,14,17-18,22-24
+train/tests/test_units.py
+  s_4dfbf3b7dc2ca8::t_d2c13fa9926d66 1-6
+train/sngram_train/metrics.py
+  s_4dfbf3b7dc2ca8::t_ec2147cf5a47a4 1,9,13,28,35,40,47
+train/sngram_train/__init__.py
+  s_4dfbf3b7dc2ca8::t_3c25c0edf86ef9 1
+train/tests/test_checkpoint.py
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 5-53
+train/tests/test_dashboard.py
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 5,9-12,14-15,17-21
+  s_4dfbf3b7dc2ca8::t_7b67f2781f5c9d 6
+train/tests/test_manifest.py
+  s_4dfbf3b7dc2ca8::t_9c28712e9222a3 4-5,57-58,67-71,73-77,79-86
+  s_4dfbf3b7dc2ca8::t_bb72f02a980f50 1,25-43
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 2-3,6-24,44-56
+  s_4dfbf3b7dc2ca8::t_e839b4df3ff0a3 59-66
+  s_4dfbf3b7dc2ca8::t_eb4c08a9917e71 72,78
+train/sngram_train/fsvalidate.py
+  s_4dfbf3b7dc2ca8::t_ec2147cf5a47a4 1,19,24,57,101,103
+train/sngram_train/dashboard.py
+  s_4dfbf3b7dc2ca8::t_bc1aafbca3689e 1,5,13-14,18-30,32-67,70-86,88-89,92-93,96-98
+  s_4dfbf3b7dc2ca8::t_0560709c35ac0d 68-69
+  s_4dfbf3b7dc2ca8::t_b6e8dcd6894864 94-95
+train/sngram_train/errors.py
+  s_4dfbf3b7dc2ca8::t_4f09e6ce6e65fa 1-9
+train/sngram_train/units.py
+  s_4dfbf3b7dc2ca8::t_d2c13fa9926d66 5-15,21
+train/tests/test_catalog.py
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 1-32
+train/tests/test_stack_manifest.py
+  s_4dfbf3b7dc2ca8::t_cdb59c21269062 9-11,13-15,141-143,145-152,154-157,159-161
+  s_4dfbf3b7dc2ca8::t_d16a43805638a7 70-71
+  s_4dfbf3b7dc2ca8::t_2c9e5e095f00b5 6,169-173,175-191,193-197,200-203
+  s_4dfbf3b7dc2ca8::t_eb4c08a9917e71 24,26,28-32,118,120,198-199
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 8,16-23,25,27,33-61,63,67,69,72-74,77-78,80-85,89-104,106,108-109
+  s_4dfbf3b7dc2ca8::t_509768a756bbc4 64,66
+  s_4dfbf3b7dc2ca8::t_ecba315082672f 123-126
+  s_4dfbf3b7dc2ca8::t_d496781e168939 112-115,117,119,121-122,128-130,132-134,136-138
+  s_4dfbf3b7dc2ca8::t_ec47fa3c241669 204-216,218-228,230-235
+  s_4dfbf3b7dc2ca8::t_ec530ad1b7b5b8 7,12,164-166
+train/tests/test_sampling.py
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 1-35
+train/sngram_train/catalog.py
+  s_4dfbf3b7dc2ca8::t_76981b402fbd1d 17,95
+  s_4dfbf3b7dc2ca8::t_b51373c3a70af6 52,54
+  s_4dfbf3b7dc2ca8::t_bc603d286421a9 1-13,15-16,18-51,53,55-77,81-94,96
+  s_4dfbf3b7dc2ca8::t_5f248ba749571b 14,78-80
+train/sngram_train/checkpoint.py
+  s_4dfbf3b7dc2ca8::t_4f09e6ce6e65fa 13-14,69
+  s_4dfbf3b7dc2ca8::t_b6e8dcd6894864 84,97
+  s_4dfbf3b7dc2ca8::t_e9cf35c9b2a5de 1,7-8,15-20,22-25,30-33,35-68,70-83,85-90,92-96,98-115
+  s_4dfbf3b7dc2ca8::t_070fdf1c25dab4 21
+train/sngram_train/pipeline.py
+  s_4dfbf3b7dc2ca8::t_bc1aafbca3689e 146-147,164,169-171,331-332,336
+  s_4dfbf3b7dc2ca8::t_070fdf1c25dab4 1,7-10,16-19,22-23,27,31-38,41-45,48-53,69-73,76-80,82,84-86,90,92-95,97-101,104-105,107-109,111-118,120,122-127,129,131-137,139-145,149-163,165,167-168,172-187,189-219,222-225,227-233,235-240,250-252,254,257,260,263-271,274,276-278,280-282,284,286-292,305-312,314,317-320,322-326,328-329,341-353
+  s_4dfbf3b7dc2ca8::t_ec530ad1b7b5b8 226
+  s_4dfbf3b7dc2ca8::t_b6e8dcd6894864 56-63,241,249,253,255-256,258-259,354-360,363,365-369,371-385,388-389
+  s_4dfbf3b7dc2ca8::t_ffa7dd94bf12e6 275,295-304
+  s_4dfbf3b7dc2ca8::t_0560709c35ac0d 339-340
+  s_4dfbf3b7dc2ca8::t_c1aa9885343c3b 361-362,364,370,386-387
+  s_4dfbf3b7dc2ca8::t_4f09e6ce6e65fa 21
+  s_4dfbf3b7dc2ca8::t_76981b402fbd1d 12,74
+  s_4dfbf3b7dc2ca8::t_a05e8ef3dfabcd 28,188,221
+  s_4dfbf3b7dc2ca8::t_dab4158b5369fe 242,244-247
+  s_4dfbf3b7dc2ca8::t_29a121c67b82ae 83
+train/tests/test_cli.py
+  s_4dfbf3b7dc2ca8::t_ad6579c0960efe 63-64,67
+  s_4dfbf3b7dc2ca8::t_1eef44c6d34ae1 5,45-46,49-50,52-57,59-61,66
+  s_4dfbf3b7dc2ca8::t_7fdacdb848e572 4,8-9,12-13,16,18-23,26-27,31-33,36-37,39-42
+train/README.md
+  s_4dfbf3b7dc2ca8::t_3e294025b939f3 3-13
+train/pyproject.toml
+  s_4dfbf3b7dc2ca8::t_abaffd41d6e575 16-17
+train/tests/test_resources.py
+  s_4dfbf3b7dc2ca8::t_d94f5372f758e6 2,13
+  s_4dfbf3b7dc2ca8::t_13aa0741acf8d7 1,3-12,14-20
+train/uv.lock
+  s_4dfbf3b7dc2ca8::t_9ac2b6769995b6 103,716-719,734-735
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.11",
+  "base_commit_sha": "f7e4751b9c5d8336a50483714ef023ef66b0bb1e",
+  "prompts": {},
+  "sessions": {
+    "s_382aea99198977": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f427b-9bea-75c2-bcc5-7f24c7edfaf8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    },
+    "s_4dfbf3b7dc2ca8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f49b8-70f5-7bb1-ba58-2bea86f4c6ca",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
