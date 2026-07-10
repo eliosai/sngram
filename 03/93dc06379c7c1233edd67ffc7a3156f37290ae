@@ -1,0 +1,33 @@
+train/tests/test_stack_manifest.py
+  s_4dfbf3b7dc2ca8::t_f14f6350c199d1 1,240-275
+  s_4dfbf3b7dc2ca8::t_1e70e361922339 165-197
+  s_4dfbf3b7dc2ca8::t_3416415dfc1636 276-277
+train/tests/test_cli.py
+  s_4dfbf3b7dc2ca8::t_8b9ccd6f2ef628 45-67
+train/sngram_train/stack.py
+  s_4dfbf3b7dc2ca8::t_60cddc14dcd481 57-80,91-120
+  s_4dfbf3b7dc2ca8::t_449b78577fb721 6-7,10-11,39-56,129,143,168,175-187,189-190,208-209,214-220,223-277
+  s_4dfbf3b7dc2ca8::t_891f3b36748504 81-90,565-576
+  s_4dfbf3b7dc2ca8::t_7b9cbe831907d0 300,341
+  s_4dfbf3b7dc2ca8::t_bebd7f501760ef 28,465-470
+  s_4dfbf3b7dc2ca8::t_e0dbea86c65426 191-207,210-213,221-222
+train/sngram_train/cli.py
+  s_4dfbf3b7dc2ca8::t_204b6a468aee01 36-37
+  s_4dfbf3b7dc2ca8::t_6d343cf5981d9b 102-108,116-118,125-126,135-136,138-139,147-150,160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.11",
+  "base_commit_sha": "0393dc06379c7c1233edd67ffc7a3156f37290ae",
+  "prompts": {},
+  "sessions": {
+    "s_4dfbf3b7dc2ca8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f49b8-70f5-7bb1-ba58-2bea86f4c6ca",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
