@@ -42,6 +42,29 @@ def test_cli_keeps_table_inspection_and_validation_commands():
     assert "fs-validate" in result.output
 
 
+def test_train_bounds_hugging_face_request_time(monkeypatch, tmp_path):
+    class FakeTrainer:
+        def run(self):
+            pass
+
+        def describe_progress(self):
+            return "complete"
+
+    monkeypatch.delenv("HF_HUB_DOWNLOAD_TIMEOUT", raising=False)
+    monkeypatch.delenv("HF_HUB_ETAG_TIMEOUT", raising=False)
+    monkeypatch.setattr(cli, "hf_token", lambda: "token")
+    monkeypatch.setattr(cli, "_production_trainer", lambda **_kwargs: FakeTrainer())
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["train", "--mint-dir", str(tmp_path / "bins"), "--no-dashboard"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert cli.os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "30"
+    assert cli.os.environ["HF_HUB_ETAG_TIMEOUT"] == "30"
+
+
 def test_startup_transport_failure_retries_but_configuration_error_does_not(monkeypatch):
     calls = 0
 

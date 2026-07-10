@@ -33,6 +33,8 @@ def train(
 
     from .units import parse_size
 
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
     token = hf_token()
     if token is None:
         typer.echo("error: HF_TOKEN is required for the production corpus")
@@ -97,7 +99,13 @@ def _production_trainer(
             f"have {budget.free_bytes} bytes"
         )
     manifest = _prepare_manifest(
-        path, catalog, rows, roster_hash, target, STACK_V2_BUCKET_CAPS
+        path,
+        catalog,
+        rows,
+        roster_hash,
+        target,
+        STACK_V2_BUCKET_CAPS,
+        min(workers, 4),
     )
     config = TrainerConfig(
         mint_dir, target, mint_cadence, workers, checkpoint_interval, resume
@@ -105,14 +113,17 @@ def _production_trainer(
     return Trainer(catalog, manifest, SwhContent(workers=workers), config, STACK_V2_BUCKET_CAPS)
 
 
-def _prepare_manifest(path, catalog, rows, roster_hash, target, area_weights):
+def _prepare_manifest(
+    path, catalog, rows, roster_hash, target, area_weights, workers
+):
     from .events import EventLog
     from .manifest import open_manifest
     from .stack import build_stack_manifest
 
     if path.exists():
         return open_manifest(path, roster_hash)
-    typer.echo(f"building sampled manifest for {len(catalog.configs)} Stack formats")
+    total = len(catalog.configs)
+    typer.echo(f"building sampled manifest for {total} Stack formats ({workers} readers)")
     events = EventLog(path.parent / "train-events.jsonl")
     events.log(
         "manifest_start",
@@ -121,13 +132,21 @@ def _prepare_manifest(path, catalog, rows, roster_hash, target, area_weights):
         formats=len(catalog.formats),
     )
 
+    completed = 0
+
     def report(fields):
+        nonlocal completed
+        completed += 1
         events.log(
             "manifest_config",
             config=fields[0],
             candidates=fields[1],
             effective_bytes=fields[2],
             seconds=round(fields[3], 3),
+        )
+        typer.echo(
+            f"manifest {completed}/{total}: {fields[0]} "
+            f"({fields[1]} objects, {fields[3]:.1f}s)"
         )
 
     try:
@@ -138,6 +157,7 @@ def _prepare_manifest(path, catalog, rows, roster_hash, target, area_weights):
             report,
             target=target,
             area_weights=area_weights,
+            workers=workers,
         )
         events.log("manifest_done", bytes=path.stat().st_size)
     finally:

@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import pyarrow as pa
@@ -161,6 +162,39 @@ def test_stack_file_tree_is_resolved_once_for_all_configs():
     assert len(rows._fs.calls) == 1
 
 
+def test_stack_rows_use_bounded_readahead_for_remote_parquet(tmp_path: Path):
+    parquet_path = tmp_path / "rows.parquet"
+    batch = pa.table(
+        {
+            "blob_id": ["blob"],
+            "content_id": ["content"],
+            "src_encoding": ["utf-8"],
+            "language": ["Rust"],
+            "path": ["/src/main.rs"],
+            "extension": ["rs"],
+            "is_vendor": [False],
+            "is_generated": [False],
+            "length_bytes": [20_000],
+        }
+    )
+    import pyarrow.parquet as pq
+
+    pq.write_table(batch, parquet_path)
+
+    class RemoteFileSystem:
+        def open(self, _path, _mode, **options):
+            if options != {"cache_type": "readahead", "block_size": 64 * 1024 * 1024}:
+                raise RuntimeError(f"unbounded remote read: {options}")
+            return parquet_path.open("rb")
+
+    rows = HuggingFaceRows.__new__(HuggingFaceRows)
+    rows.revision = "rev"
+    rows._fs = RemoteFileSystem()
+    rows._files = {"Rust": ["datasets/repo@rev/data/Rust/train-0.parquet"]}
+
+    assert [item["blob_id"] for item in rows.iter_rows("Rust")] == ["blob"]
+
+
 def test_stack_schema_failure_is_a_configuration_error():
     with pytest.raises(ConfigurationError, match="src_encoding"):
         _validate_columns(["blob_id", "content_id"])
@@ -201,6 +235,44 @@ def test_inventory_extends_live_formats_without_materializing_all_caps(tmp_path:
     assert manifest.capacity("b") == 60
     assert manifest.capacity("c") == 60
     assert sum(manifest.capacity(item.id) for item in formats) < 3_000
+
+
+def test_manifest_scans_independent_configs_concurrently(tmp_path: Path):
+    formats = (
+        FormatSpec("a", "code", "a", 100),
+        FormatSpec("b", "code", "b", 100),
+    )
+    catalog = Catalog(formats, ("a", "b"))
+
+    class ConcurrentRows(FakeRows):
+        def __init__(self):
+            super().__init__(
+                {
+                    "a": [row("a", path="/a", extension="a", length_bytes=20)],
+                    "b": [row("b", path="/b", extension="b", length_bytes=20)],
+                }
+            )
+            self.barrier = threading.Barrier(2)
+
+        def iter_rows(self, config, cursor=(0, 0)):
+            self.barrier.wait(timeout=1)
+            yield from super().iter_rows(config, cursor)
+
+    path = tmp_path / "manifest.sqlite3"
+    rows = ConcurrentRows()
+
+    roster_hash = build_stack_manifest(
+        path,
+        catalog,
+        rows,
+        target=40,
+        area_weights={"code": 1},
+        workers=2,
+    )
+    manifest = open_manifest(path, roster_hash)
+
+    assert manifest.capacity("a") == 20
+    assert manifest.capacity("b") == 20
 
 
 def test_target_bounded_text_inventory_stops_at_route_goals(tmp_path: Path):

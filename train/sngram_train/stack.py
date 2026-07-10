@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
+import tempfile
 import time
 from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -21,6 +25,7 @@ from .manifest import Candidate, ManifestBuilder
 from .sampling import SAMPLE_FLOOR, sample_weight
 
 METADATA_BATCH_ROWS = 16_384
+METADATA_BLOCK_BYTES = 64 * 1024 * 1024
 
 
 class StackRows(Protocol):
@@ -31,6 +36,88 @@ class StackRows(Protocol):
     ) -> Iterator[dict[str, object]]: ...
 
 
+class Inventory(Protocol):
+    def add(self, candidate: Candidate) -> None: ...
+    def capacity(self, format_id: str) -> int: ...
+    def is_exhausted(self, format_id: str) -> bool: ...
+    def cursor(self, config: str) -> tuple[int, int]: ...
+
+
+@dataclass(frozen=True)
+class _ScanResult:
+    config: str
+    path: Path
+    accepted: int
+    effective: int
+    exhausted: set[str]
+    cursor: tuple[int, int]
+    seconds: float
+
+
+class _ScanSpool:
+    """Bounded-memory candidate spool owned by one metadata worker."""
+
+    def __init__(
+        self,
+        directory: Path,
+        capacities: Mapping[str, int],
+        exhausted: Mapping[str, bool],
+        cursor: tuple[int, int],
+    ) -> None:
+        handle = tempfile.NamedTemporaryFile(
+            prefix=".manifest-scan-", suffix=".sqlite3", dir=directory, delete=False
+        )
+        self.path = Path(handle.name)
+        handle.close()
+        self._connection = sqlite3.connect(self.path)
+        self._connection.execute(_SPOOL_SCHEMA)
+        self._capacities = dict(capacities)
+        self._exhausted = dict(exhausted)
+        self._cursor = cursor
+        self._sequence = 0
+        self._buffer: list[tuple[object, ...]] = []
+
+    def add(self, candidate: Candidate) -> None:
+        self._buffer.append(
+            (
+                self._sequence,
+                candidate.format_id,
+                candidate.blob_id,
+                candidate.encoding,
+                candidate.length,
+                candidate.weight,
+            )
+        )
+        self._sequence += 1
+        self._capacities[candidate.format_id] += candidate.length * candidate.weight
+        if len(self._buffer) >= 8192:
+            self._flush()
+
+    def capacity(self, format_id: str) -> int:
+        return self._capacities.get(format_id, 0)
+
+    def is_exhausted(self, format_id: str) -> bool:
+        return self._exhausted.get(format_id, False)
+
+    def cursor(self, _config: str) -> tuple[int, int]:
+        return self._cursor
+
+    def close(self) -> None:
+        self._flush()
+        self._connection.commit()
+        self._connection.close()
+
+    def abort(self) -> None:
+        self._connection.close()
+        self.path.unlink(missing_ok=True)
+
+    def _flush(self) -> None:
+        self._connection.executemany(
+            "INSERT INTO candidates VALUES (?, ?, ?, ?, ?, ?)", self._buffer
+        )
+        self._buffer.clear()
+
+
 def build_stack_manifest(
     path: Path,
     catalog: Catalog,
@@ -39,6 +126,7 @@ def build_stack_manifest(
     *,
     target: int | None = None,
     area_weights: Mapping[str, int] | None = None,
+    workers: int = 1,
 ) -> str:
     """Build a sampled manifest up to exact adaptive format goals."""
 
@@ -52,7 +140,7 @@ def build_stack_manifest(
             if area_weights is None:
                 raise ValueError("area weights are required for target-bounded inventory")
             _adaptive_inventory(
-                builder, catalog, rows, target, area_weights, on_config
+                builder, catalog, rows, target, area_weights, on_config, workers
             )
     return roster_hash
 
@@ -77,14 +165,116 @@ def _adaptive_inventory(
     target: int,
     area_weights: Mapping[str, int],
     on_config: Callable[[tuple[str, int, int, float]], None] | None,
+    workers: int,
 ) -> None:
     while True:
         goals = _inventory_goals(builder, catalog, target, area_weights)
         configs = _pending_configs(builder, catalog, goals)
         if not configs:
             return
+        _scan_configs(builder, catalog, rows, configs, goals, on_config, workers)
+
+
+def _scan_configs(
+    builder: ManifestBuilder,
+    catalog: Catalog,
+    rows: StackRows,
+    configs: list[str],
+    limits: Mapping[str, int],
+    on_config: Callable[[tuple[str, int, int, float]], None] | None,
+    workers: int,
+) -> None:
+    if workers <= 1 or len(configs) == 1:
         for config in configs:
-            _scan_and_commit(builder, catalog, rows, config, goals, on_config)
+            _scan_and_commit(builder, catalog, rows, config, limits, on_config)
+        return
+    failure: BaseException | None = None
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = _submit_scans(pool, builder, catalog, rows, configs, limits)
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if failure is None:
+                    _merge_scan(builder, result, on_config)
+                else:
+                    result.path.unlink(missing_ok=True)
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+                    for pending in futures:
+                        pending.cancel()
+    if failure is not None:
+        raise failure
+
+
+def _submit_scans(pool, builder, catalog, rows, configs, limits):
+    capacities = {item.id: builder.capacity(item.id) for item in catalog.formats}
+    exhausted = {item.id: builder.is_exhausted(item.id) for item in catalog.formats}
+    return [
+        pool.submit(
+            _scan_to_spool,
+            builder.path.parent,
+            catalog,
+            rows,
+            config,
+            limits,
+            capacities,
+            exhausted,
+            builder.cursor(config),
+        )
+        for config in configs
+    ]
+
+
+def _scan_to_spool(
+    directory: Path,
+    catalog: Catalog,
+    rows: StackRows,
+    config: str,
+    limits: Mapping[str, int],
+    capacities: Mapping[str, int],
+    exhausted: Mapping[str, bool],
+    cursor: tuple[int, int],
+) -> _ScanResult:
+    started = time.monotonic()
+    spool = _ScanSpool(directory, capacities, exhausted, cursor)
+    try:
+        accepted, effective, done, final_cursor = _scan_config(
+            spool, catalog, rows, config, limits
+        )
+        spool.close()
+    except BaseException:
+        spool.abort()
+        raise
+    return _ScanResult(
+        config,
+        spool.path,
+        accepted,
+        effective,
+        done,
+        final_cursor,
+        time.monotonic() - started,
+    )
+
+
+def _merge_scan(builder, result, on_config) -> None:
+    try:
+        with sqlite3.connect(result.path) as connection:
+            rows = connection.execute(
+                "SELECT format_id, blob_id, encoding, length, weight "
+                "FROM candidates ORDER BY sequence"
+            )
+            for row in rows:
+                builder.add(Candidate(*row))
+        for format_id in result.exhausted:
+            builder.set_exhausted(format_id)
+        builder.finish_config(result.config, result.cursor)
+    finally:
+        result.path.unlink(missing_ok=True)
+    if on_config is not None:
+        on_config(
+            (result.config, result.accepted, result.effective, result.seconds)
+        )
 
 
 def _scan_and_commit(
@@ -107,7 +297,7 @@ def _scan_and_commit(
 
 
 def _scan_config(
-    builder: ManifestBuilder,
+    builder: Inventory,
     catalog: Catalog,
     rows: StackRows,
     config: str,
@@ -148,7 +338,7 @@ def _scan_config(
     return accepted, effective, exhausted, cursor
 
 
-def _reached(builder: ManifestBuilder, format_id: str, limit: int) -> bool:
+def _reached(builder: Inventory, format_id: str, limit: int) -> bool:
     return builder.is_exhausted(format_id) or builder.capacity(format_id) >= limit
 
 
@@ -272,7 +462,12 @@ class HuggingFaceRows:
         import pyarrow.parquet as pq
 
         url = path if path.startswith("hf://") else f"hf://{path}"
-        with self._fs.open(url, "rb", cache_type="none") as handle:
+        with self._fs.open(
+            url,
+            "rb",
+            cache_type="readahead",
+            block_size=METADATA_BLOCK_BYTES,
+        ) as handle:
             parquet = pq.ParquetFile(handle, pre_buffer=False)
             _validate_columns(parquet.schema_arrow.names)
             seed = int.from_bytes(_digest(f"{self.revision}:{path}"), "little")
@@ -367,3 +562,15 @@ def _validate_columns(columns: list[str]) -> None:
     missing = sorted(set(STACK_V2_REQUIRED_COLUMNS) - set(columns))
     if missing:
         raise ConfigurationError(f"Stack metadata is missing columns: {missing}")
+
+
+_SPOOL_SCHEMA = """
+CREATE TABLE candidates (
+    sequence INTEGER PRIMARY KEY,
+    format_id TEXT NOT NULL,
+    blob_id TEXT NOT NULL,
+    encoding TEXT NOT NULL,
+    length INTEGER NOT NULL,
+    weight INTEGER NOT NULL
+)
+"""
