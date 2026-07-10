@@ -1,17 +1,4 @@
-"""Validate a minted weight table against a real filesystem.
-
-The ideal byte-pair distribution for regex search over a Linux filesystem is the
-distribution of the files you actually grep. So measure it directly: walk real
-roots, skip binary files (as ripgrep/git do — a NUL byte in the head), and
-histogram the byte pairs of the text files. KL-divergence between that histogram
-and a minted table's implied distribution scores how well the corpus mix matches
-reality; a per-pair diff shows which pairs the corpus over- or under-weights, so
-the mix weights can be tuned toward the measured target.
-
-Skipping whole binary files is corpus *definition*, not byte filtering: those
-files are never searched, so they are not part of the distribution. Within a
-text file every byte is counted, odd bytes included.
-"""
+"""Validate a minted table against searchable filesystem text."""
 
 from __future__ import annotations
 
@@ -29,14 +16,12 @@ DEFAULT_MAX_FILE = 20_000_000
 
 
 def is_binary(head: bytes) -> bool:
-    """Treat a file as binary (not searched) if its head holds a NUL — the same
-    cheap heuristic git and ripgrep use to skip non-text files."""
+    """Treat a file with a NUL in its head as binary."""
     return b"\x00" in head
 
 
 def byte_pair_counts(chunks: Iterable[bytes]) -> list[int]:
-    """Byte-pair counts over a sequence of documents, per document (no pair
-    straddles a document boundary), indexed `(c1 << 8) | c2`."""
+    """Count byte pairs without crossing document boundaries."""
     counter = sngram.BigramCounter()
     for chunk in chunks:
         counter.process(chunk)
@@ -69,11 +54,7 @@ def filesystem_histogram(
     head_bytes: int = HEAD_BYTES,
     cap: int | None = None,
 ) -> tuple[list[int], FsStats]:
-    """Byte-pair counts of the searchable (text) files under `roots`, plus stats.
-
-    Symlinks, empty/oversized files, and binaries (NUL in the head) are skipped.
-    `cap` bounds the total bytes read, for sampling a huge tree.
-    """
+    """Count searchable files under roots up to an optional cap."""
     counter = sngram.BigramCounter()
     stats = FsStats()
     for path in _walk_files(roots):
@@ -112,25 +93,14 @@ def _pair(index: int) -> tuple[int, int]:
 @dataclass
 class ValidationReport:
     kl: float
-    # (pair, fs_freq, table_freq, divergence_contribution); under = fs has more
-    # than the corpus produced (corpus under-represents); over = the reverse
     under_weighted: list[tuple[tuple[int, int], float, float, float]]
     over_weighted: list[tuple[tuple[int, int], float, float, float]]
 
 
 def validate(fs_counts: list[int], table, top: int = 20) -> ValidationReport:
-    """Score a minted table against a filesystem byte-pair histogram.
-
-    KL(filesystem || table) summarizes the mismatch. Pairs are ranked by their
-    *contribution to the divergence* — `p·log(p/q)` for under-represented pairs,
-    `q·log(q/p)` for over-represented ones — NOT by raw log-ratio. Raw log-ratio
-    is dominated by pairs the table never saw (q at the floor), which surface
-    rare, single-occurrence noise as if it were actionable; weighting by the
-    frequency on the side that has the mass ranks the pairs that actually move
-    the table first.
-    """
+    """Compare filesystem counts with a table using KL contribution."""
     p = metrics.probs_from_counts(fs_counts, eps=1.0)
-    q = metrics.table_frequencies(table)  # KL-safe: strictly positive
+    q = metrics.table_frequencies(table)
     kl = metrics.kl(p, q)
     under: list[tuple[tuple[int, int], float, float, float]] = []
     over: list[tuple[tuple[int, int], float, float, float]] = []

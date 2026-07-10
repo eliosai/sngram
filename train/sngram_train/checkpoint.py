@@ -1,156 +1,115 @@
-"""Atomic checkpoint of counts + completed shards, so a run resumes exactly.
-
-One JSON file, written tmp+rename, holding the counts (base64) *and* the
-completed-shard state together — a kill at any instant leaves either the old
-checkpoint or the new one, never a torn pair. The caller must serialize
-`save` against concurrent merges/mark_done (the trainer's merge lock); under
-that lock the snapshot is a true consistent cut: the counter holds exactly
-the recorded completed shards.
-"""
+"""Atomic durable state for one balanced training run."""
 
 from __future__ import annotations
 
-import base64
 import json
 import os
-import struct
-from dataclasses import dataclass, field
+import sqlite3
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import sngram
 
-_PAIR_COUNT = 256 * 256
+from .errors import ConfigurationError
+
+VERSION = 3
+
+
+@dataclass(frozen=True)
+class FormatProgress:
+    cursor: int = 0
+    offset: int = 0
+    effective_bytes: int = 0
+    fetched_bytes: int = 0
+    objects: int = 0
+    exhausted: bool = False
 
 
 @dataclass
 class RunState:
-    """Everything a resumed run needs besides the raw counts."""
-
-    roster_hash: str | None = None
-    # source id -> {"n_shards": int, "revision": str|None, "done": [int, ...]}
-    completed: dict[str, dict] = field(default_factory=dict)
+    roster_hash: str
+    revision: str
+    target: int
+    formats: dict[str, FormatProgress] = field(default_factory=dict)
     mints_done: list[str] = field(default_factory=list)
-    # repo -> pinned commit sha, fixed for the whole run (and its restarts)
-    revisions: dict[str, str] = field(default_factory=dict)
-    # weighted-planner feedback: durable bytes + completed shards per family,
-    # so a resumed run keeps balancing the blend against the WHOLE run, not just
-    # the post-resume increment
-    family_bytes: dict[str, int] = field(default_factory=dict)
-    family_done: dict[str, int] = field(default_factory=dict)
-    source_bytes: dict[str, int] = field(default_factory=dict)
-    source_done: dict[str, int] = field(default_factory=dict)
-    # the previous mint's count vector, so the first post-resume mint can still
-    # report KL(mint_n || mint_{n-1}) — the convergence/early-stop signal
-    last_mint_counts: list[int] | None = None
+    last_mint_counts: bytes | None = None
 
-    def is_done(
-        self, source_id: str, n_shards: int, shard: int, revision: str | None
-    ) -> bool:
-        entry = self.completed.get(source_id)
-        if not entry or entry["n_shards"] != n_shards:
-            return False
-        if entry.get("revision") != revision:
-            return False  # the data behind the shard indices changed
-        return shard in entry["_done_set"]
-
-    def mark_done(
-        self, source_id: str, n_shards: int, shard: int, revision: str | None
-    ) -> None:
-        entry = self.completed.get(source_id)
-        if not entry or entry["n_shards"] != n_shards or entry.get("revision") != revision:
-            entry = {
-                "n_shards": n_shards,
-                "revision": revision,
-                "done": [],
-                "_done_set": set(),
-            }
-            self.completed[source_id] = entry
-        if shard not in entry["_done_set"]:
-            entry["_done_set"].add(shard)
-            entry["done"].append(shard)
+    def progress(self, format_id: str) -> FormatProgress:
+        return self.formats.get(format_id, FormatProgress())
 
 
-def _attach_sets(state: RunState) -> RunState:
-    for entry in state.completed.values():
-        entry["_done_set"] = set(entry["done"])
-    return state
+def save(path: Path, counter: sngram.BigramCounter, state: RunState) -> None:
+    """Replace the checkpoint with one complete SQLite snapshot."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.unlink(missing_ok=True)
+    with sqlite3.connect(temporary) as connection:
+        connection.execute(_SCHEMA)
+        connection.execute(
+            "INSERT INTO checkpoint VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            _record(counter, state),
+        )
+    os.replace(temporary, path)
 
 
-def save(directory: Path, counter: sngram.BigramCounter, state: RunState) -> None:
-    """Write one atomic checkpoint file (caller holds the merge lock)."""
-    directory.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "version": 2,
-        "roster_hash": state.roster_hash,
-        "counts_b64": base64.b64encode(counter.snapshot()).decode(),
-        "pairs": counter.pairs_processed,
-        "bytes": counter.bytes_processed,
-        "files": counter.files_processed,
-        "completed": {
-            sid: {
-                "n_shards": e["n_shards"],
-                "revision": e.get("revision"),
-                "done": sorted(e["_done_set"]),
-            }
-            for sid, e in state.completed.items()
-        },
-        "mints_done": list(state.mints_done),
-        "revisions": dict(state.revisions),
-        "family_bytes": dict(state.family_bytes),
-        "family_done": dict(state.family_done),
-        "source_bytes": dict(state.source_bytes),
-        "source_done": dict(state.source_done),
-        "last_mint_counts_b64": (
-            base64.b64encode(
-                struct.pack(f"<{_PAIR_COUNT}Q", *state.last_mint_counts)
-            ).decode()
-            if state.last_mint_counts is not None
-            else None
-        ),
-    }
-    tmp = directory / "state.json.tmp"
-    tmp.write_text(json.dumps(payload))
-    os.replace(tmp, directory / "state.json")
+def load(
+    path: Path,
+    roster_hash: str,
+    target: int,
+    revision: str = "",
+) -> tuple[sngram.BigramCounter, RunState]:
+    """Load a matching checkpoint or return a fresh run."""
+
+    if not path.exists():
+        return sngram.BigramCounter(), RunState(roster_hash, revision, target)
+    with sqlite3.connect(path) as connection:
+        row = connection.execute("SELECT * FROM checkpoint").fetchone()
+    if row is None or row[0] != VERSION or row[1] != roster_hash or row[3] != target:
+        raise ConfigurationError("checkpoint does not match this roster and target")
+    counter = sngram.BigramCounter()
+    counter.restore(row[5], row[6], row[7], row[8])
+    state = _state(row[1], row[2], row[3], row[4], row[9])
+    state.last_mint_counts = row[10]
+    return counter, state
 
 
-def load(directory: Path, counter: sngram.BigramCounter) -> RunState | None:
-    """Restore a checkpoint into a fresh `counter`; None when there is none."""
-    state_path = directory / "state.json"
-    if not state_path.exists():
-        return None
-    if counter.pairs_processed != 0 or counter.bytes_processed != 0:
-        raise ValueError("checkpoint restore requires a fresh counter")
-
-    payload = json.loads(state_path.read_text())
-    if "counts_b64" in payload:
-        counts = base64.b64decode(payload["counts_b64"])
-    else:
-        # legacy v1 layout: counts in a sibling counts.bin
-        counts_path = directory / "counts.bin"
-        if not counts_path.exists():
-            return None
-        counts = counts_path.read_bytes()
-    counter.restore(counts, payload["pairs"], payload["bytes"], payload["files"])
-    state = RunState(
-        roster_hash=payload.get("roster_hash"),
-        completed={
-            sid: {
-                "n_shards": e["n_shards"],
-                "revision": e.get("revision"),
-                "done": list(e["done"]),
-            }
-            for sid, e in payload["completed"].items()
-        },
-        mints_done=list(payload["mints_done"]),
-        revisions=dict(payload.get("revisions", {})),
-        family_bytes=dict(payload.get("family_bytes", {})),
-        family_done=dict(payload.get("family_done", {})),
-        source_bytes=dict(payload.get("source_bytes", {})),
-        source_done=dict(payload.get("source_done", {})),
-        last_mint_counts=(
-            list(struct.unpack(f"<{_PAIR_COUNT}Q", base64.b64decode(lmc)))
-            if (lmc := payload.get("last_mint_counts_b64"))
-            else None
-        ),
+def _record(counter: sngram.BigramCounter, state: RunState) -> tuple[object, ...]:
+    formats = {key: asdict(value) for key, value in state.formats.items()}
+    return (
+        VERSION,
+        state.roster_hash,
+        state.revision,
+        state.target,
+        json.dumps(formats),
+        counter.snapshot(),
+        counter.pairs_processed,
+        counter.bytes_processed,
+        counter.files_processed,
+        json.dumps(state.mints_done),
+        state.last_mint_counts,
     )
-    return _attach_sets(state)
+
+
+def _state(
+    roster_hash: str, revision: str, target: int, payload: str, mints: str
+) -> RunState:
+    formats = {key: FormatProgress(**value) for key, value in json.loads(payload).items()}
+    return RunState(roster_hash, revision, target, formats, list(json.loads(mints)))
+
+
+_SCHEMA = """
+CREATE TABLE checkpoint (
+    version INTEGER NOT NULL,
+    roster_hash TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    target INTEGER NOT NULL,
+    state_json TEXT NOT NULL,
+    counts BLOB NOT NULL,
+    pairs INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    files INTEGER NOT NULL,
+    mints_json TEXT NOT NULL,
+    last_mint_counts BLOB
+)
+"""

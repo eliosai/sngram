@@ -1,71 +1,59 @@
 # Training
 
-The weight table is the one artifact left to produce. The index format,
-the planner, and the crate surface froze at postings-v9; after the final
-training run the table freezes too.
+Training produces a 256 by 256 byte-pair count distribution and serializes it as
+a `WeightTable`. The scanner uses those weights to choose sparse gram borders.
+Rare byte pairs create more selective grams.
 
-## What training produces
+The Python project in `train/` owns the production run. Rust's
+`sngram::learn::BigramCounter` owns counting and table serialization. See
+[training-data.md](training-data.md) for the corpus and distribution contract.
 
-A 256×256 byte-pair count table, minted into a `WeightTable` binary. The
-scanner keeps a gram when its border bigram weights beat every interior
-bigram weight, so the table decides where gram borders land. Rare pairs
-make selective grams.
+## Canonical Run
 
-The Python trainer is the production path: it streams the corpus
-([training-data.md](training-data.md) is the data contract), counts
-byte pairs through the GIL-free Rust counter, checkpoints, and mints a
-table every terabyte. `sngram::learn::BigramCounter` serves local
-experiments.
-
-## Verdicts already measured
-
-Do not relitigate these; the measurements are in
-[fp-optimization-plan.md](fp-optimization-plan.md).
-
-- **Mint untuned.** A sweep of boundary discounts 1/4/16/64 from the same
-  counts lost to `Tuning::OFF` on aggregate false positives (32.50
-  against 33.47/33.85/34.45). Discounting aligns gram borders with
-  identifier vocabulary, which raises document frequency and weakens
-  plans.
-- **Scale has flat returns.** A 100GB table nearly matched the 12TB tier
-  (32.50 against 31.82). Train to ~1TB for margin and stop; the
-  distribution contract's 12TB cap is an upper bound, not a target.
-- **The blend stays.** The Stack v2 / Software Heritage bucket
-  distribution is the one the released tiers trained on.
-
-## The run
+The canonical target is 10 TB of effective bytes. It mints balanced tables at
+100 GB, 500 GB, and each terabyte through 10 TB.
 
 ```sh
 cd train
 uv sync
-uv run sngram train --limit 1TB
+uv run pytest
 uv run sngram train --mint-dir ./bins
-uv run sngram inspect bins/*.bin
 ```
 
-Credentials go in `train/.env`; the trainer needs a Hugging Face token
-and Software Heritage S3 keys ([training-data.md](training-data.md)
-lists them). Minting defaults to tuning off.
+Use `--limit` for a smoke run without changing the production default:
+
+```sh
+uv run sngram train --mint-dir ./smoke --limit 1GB --no-dashboard
+```
+
+Resume uses the manifest and checkpoint under the same mint directory. Do not
+reuse that directory after changing the target, pinned revision, area roster, or
+format assignment.
+
+## Measured Context
+
+Earlier false-positive measurements showed small gains after roughly 1 TB. The
+10 TB canonical run prioritizes stable coverage across every live format and
+produces comparable balanced tiers. Minting remains untuned because boundary
+discount sweeps performed worse than `Tuning::OFF`.
 
 ## Acceptance
 
-Replace `crates/weights/data/final_weights.bin` with the minted table,
-rebuild, and run both corpora:
+Inspect the resulting tiers before replacing the embedded table:
+
+```sh
+uv run sngram inspect bins/10tb_weights.bin
+uv run sngram fs-validate bins/10tb_weights.bin ~/ripos/linux
+```
+
+After replacing `crates/weights/data/final_weights.bin`, rebuild and run both
+corpora:
 
 ```sh
 just suite ~/ripos/linux
 just guard
 ```
 
-Gates, each against the frozen-table endline recorded in
-[fp-optimization-plan.md](fp-optimization-plan.md):
-
-- `false_negative_rows=0` on both corpora, unconditionally.
-- Linux aggregate false positives at or below 27.76%.
-- Guard false positives at or below 35.51%.
-- `index_ratio` at or below 0.90 on Linux.
-- Suite speedups at or above 2x.
-
-A table that fails a gate does not ship; the embedded table only moves
-forward. Record the new endline numbers next to the old ones before
-committing the swap.
+The release table must keep zero false negatives, meet the frozen false-positive
+and index-ratio gates in [fp-optimization-plan.md](fp-optimization-plan.md), and
+avoid a speed regression on either corpus.

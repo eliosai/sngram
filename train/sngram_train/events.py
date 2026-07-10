@@ -8,22 +8,12 @@ import time
 from collections import deque
 from pathlib import Path
 
-# events worth surfacing in the dashboard's recent-events panel. checkpoint is
-# deliberately absent: its status is pinned in the header, so it never crowds
-# out errors/warnings/mints in the tail.
+# Dashboard event kinds
 TAIL_KINDS = frozenset({"error", "warn", "mint", "stall", "stall_end"})
 
 
 class EventLog:
-    """Append-only JSONL, split into small sequential segments.
-
-    The active file is always the base path (e.g. ``train-events.jsonl``).
-    When it grows past ``segment_bytes`` it is rolled to a numbered archive
-    (``train-events.0001.jsonl``, ``…0002.jsonl``, …) and a fresh active file
-    is opened. Every segment is retained — a multi-day run leaves a trail of
-    small, individually grep-able files instead of one unbounded log. A
-    restarted run continues the numbering rather than clobbering archives.
-    """
+    """Append-only JSONL split into numbered segments."""
 
     def __init__(
         self, path: Path, tail: int = 50, segment_bytes: int = 16 * 10**6
@@ -33,7 +23,6 @@ class EventLog:
         self._segment_bytes = segment_bytes
         self._lock = threading.Lock()
         self.tail: deque[dict] = deque(maxlen=tail)
-        # continue past any archives a prior run left behind
         self._seq = self._last_archive_seq(path)
         self._fh = path.open("a", encoding="utf-8")
 
@@ -58,16 +47,14 @@ class EventLog:
         with self._lock:
             self._fh.close()
 
-    # ----------------------------------------------------------- segments
-
     @staticmethod
     def _archive_path(path: Path, seq: int) -> Path:
-        """Numbered archive name: ``train-events.0001.jsonl``."""
+        """Build one numbered archive path."""
         return path.with_name(f"{path.stem}.{seq:04d}{path.suffix}")
 
     @classmethod
     def _archives(cls, path: Path) -> list[tuple[int, Path]]:
-        """(seq, file) for every numbered archive of ``path``, unsorted."""
+        """List numbered archives without sorting."""
         out: list[tuple[int, Path]] = []
         for p in path.parent.glob(f"{path.stem}.*{path.suffix}"):
             middle = p.name[len(path.stem) + 1 : -len(path.suffix)]
@@ -82,11 +69,7 @@ class EventLog:
 
     @classmethod
     def segment_paths(cls, path: Path) -> list[Path]:
-        """Every segment for ``path``, oldest first: archives then the active file.
-
-        The reader's entry point — concatenating these in order reconstructs
-        the full event stream across all splits and restarts.
-        """
+        """List every segment from oldest to active."""
         archives = sorted(cls._archives(path))
         out = [p for _, p in archives]
         if path.exists():

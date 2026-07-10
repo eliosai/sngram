@@ -1,1 +1,1 @@
-"""The sngram training pipeline: stream HF datasets, count bigrams, mint tables."""
+"""Build balanced sngram weight tables from pinned Stack metadata."""

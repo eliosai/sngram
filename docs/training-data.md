@@ -1,97 +1,111 @@
-# Stack v2 / SWH Distribution Contract
+# Training Data Contract
 
-Decision date: 2026-07-03.
+Decision date: 2026-07-09.
 
-Target run size: **12 TB counted UTF-8 text bytes**.
+The canonical run trains on **10 TB of effective UTF-8 bytes**. The available
+Stack v2 roster has a 12 TB capacity envelope. Effective bytes include the
+inverse weights applied to sampled small files; fetched bytes measure content
+read from object storage.
 
-Only production data source:
+## Sources
 
-- Metadata: `bigcode/the-stack-v2-dedup`, pinned to one Hugging Face revision.
-- Content: `s3://softwareheritage/content/{blob_id}`, decoded with each row's
-  `src_encoding`.
+- Metadata: `bigcode/the-stack-v2-dedup` at one pinned revision
+- Content: `s3://softwareheritage/content/{blob_id}`
+- Encoding: each row's `src_encoding`, normalized to UTF-8 before counting
 
-No CodeClippy, GitHub2025, FineWeb, FinePDFs, Wikipedia, Stack v1, or cloned
-Stack subset sources are part of this run.
+The trainer lists the pinned repository tree once. Each dataset config becomes
+one format and gets scanned once. Unknown configs become separate long-tail
+formats. `Text` rows split into docs, config, and data formats by path and
+extension without rescanning the physical config.
 
-## Enforced Buckets
+## Areas
 
-| Bucket | Cap | Share | Row routing |
-| --- | ---: | ---: | --- |
-| Core programming | 5.20 TB | 43.33% | C, C++, C#, Java, JavaScript, TypeScript, Python, PHP, Go, Rust, Ruby, Swift, Kotlin, Scala, Dart, Shell, Lua, R, Perl, Objective-C, Fortran, Pascal, Visual Basic, F#, Haskell, Clojure, Elixir, Erlang, OCaml, Julia, MATLAB, PowerShell |
-| Docs / prose / markup | 2.30 TB | 19.17% | `Text`, Markdown, reStructuredText, TeX, Roff/manpages, Org, Wikitext, AsciiDoc, RMarkdown, Jupyter Notebook, BibTeX, docs/readme path overrides |
-| Config / build / infra | 1.50 TB | 12.50% | JSON, YAML, XML, TOML, INI, Dockerfile, Makefile, CMake, Gradle, Maven POM, HCL, Nix, Git config/attrs/ignore, EditorConfig, lockfiles, workflow/config path overrides |
-| Web / UI / templates | 1.20 TB | 10.00% | HTML, CSS, SCSS, Sass, Less, Vue, Svelte, Blade, EJS, JSP, ERB, Razor, Twig, Liquid, Handlebars, Pug, Haml, Astro, TSX |
-| Data / query / schema | 1.00 TB | 8.33% | SQL, CSV, TSV, GraphQL, Protocol Buffer, Thrift, ASN.1, Avro IDL, Turtle/RDF/OWL, SPARQL, PLpgSQL, TSQL, data extension overrides |
-| Long-tail floor | 0.80 TB | 6.67% | Every Stack v2 language not matched above |
+| Area | Capacity | Share |
+| --- | ---: | ---: |
+| Core programming | 5.20 TB | 43.33% |
+| Docs / prose / markup | 2.30 TB | 19.17% |
+| Config / build / infra | 1.50 TB | 12.50% |
+| Web / UI / templates | 1.20 TB | 10.00% |
+| Data / query / schema | 1.00 TB | 8.33% |
+| Long-tail floor | 0.80 TB | 6.67% |
 
-Total hard cap: **12.00 TB**. The trainer does not mint `final` if the capped
-roster exhausts below 12 TB.
+Every mint applies these shares to its cumulative effective-byte threshold with
+exact integer apportionment. Format allocation inside each area uses max-min
+fairness. All live formats advance at the same byte level. When a format
+exhausts, the trainer redistributes its missing bytes equally among the remaining
+formats in that area. One format cannot exceed 6% of its area's 12 TB capacity.
 
-## Row Filters
+## Row Admission
 
-Rows are rejected before S3 fetch when:
+The inventory rejects vendor, generated, empty, incomplete, and oversized rows.
+The size ceiling is 2 MiB, or 4 MiB for docs. It has no minimum file size.
 
-- `is_vendor == true`
-- `is_generated == true`
-- required metadata fields are missing:
-  `blob_id`, `content_id`, `src_encoding`, `language`
-- `length_bytes <= 0`
-- `length_bytes > 2 MiB`, except docs/prose rows which allow `4 MiB`
-- classifier bucket does not match the active bucket source
+Files below 16 KiB use deterministic inverse-probability sampling. For a file
+of size `n`, the trainer computes:
 
-The Stack v2 dedup dataset supplies near-deduplicated metadata. Runtime does not
-keep a global `content_id` set because that would grow linearly across a 12 TB
-run; distribution is enforced by source revision, bucket caps, row filters, and
-exact counted-byte caps.
-
-## Runtime Algorithm
-
-1. Pin the Hugging Face metadata revision once and store it in checkpoints.
-2. Resolve the default Stack v2 metadata parquet files. Bucket names are local
-   distribution buckets, not Hugging Face dataset configs.
-3. Planner round-robins the six bucket families by byte deficit.
-4. Each bucket scans metadata shards, classifies rows by `language`,
-   `extension`, and `path`, and fetches SWH content only for matching rows.
-5. Content is gz-read from SWH, decoded with `src_encoding`, counted as UTF-8,
-   and trimmed on the final row prefix if needed to land exactly on the cap.
-6. Completed metadata shards and counted bytes are checkpointed with the roster
-   hash, so resume cannot switch distribution or revision silently.
-7. Object-level S3/fetch/decode failures are logged and skipped; metadata shard
-   read failures use the existing shard retry path.
-
-## Required Environment
-
-- `HF_TOKEN`: Hugging Face token with access to `bigcode/the-stack-v2-dedup`.
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: Software Heritage S3 access.
-- `AWS_SESSION_TOKEN`: only if the issued SWH credentials are temporary.
-- `AWS_REGION` / `AWS_DEFAULT_REGION`: optional; boto3 default chain applies.
-
-Run command:
-
-```bash
-uv run --project python sngram train --mint-dir ../bins/
+```text
+w = next_power_of_two(ceil(16 KiB / n))
+inclusion probability = 1 / w
+effective counts = sampled counts * w
 ```
 
-Defaults are `--target 12TB` and `--mint-every 1TB`.
+Files at least 16 KiB have weight one. This estimator gives every eligible byte
+the correct expected contribution while avoiding hundreds of millions of small
+S3 reads. A format containing only small files keeps its effective-byte target.
+If its full eligible corpus is smaller than that target, normal exhaustion
+redistribution applies.
 
-## Telemetry
+## Inventory
 
-JSONL events emitted for SWH debugging:
+The trainer writes `.manifest.sqlite3` under the mint directory. The manifest
+stores sampled object references, weights, per-format capacity, the pinned
+revision, and the roster hash. Buffered integer-key inserts keep its memory and
+disk overhead bounded.
 
-- `swh_manifest_start`: source, bucket, metadata URL, pinned revision, content
-  prefix, metadata field contract.
-- `swh_manifest_done`: scanned metadata rows and seconds per shard.
-- `swh_bucket_progress`: accepted bytes/objects, scanned rows, fetched and
-  decoded bytes, skip counts by reason, fetch/decode errors.
-- `s3_batch`: object counts, accepted bytes, decoded/fetched bytes, skip/error
-  counts, latency p50/p95/max.
-- `s3_object_error`: blob id, bucket, fetch/decode stage, error kind, bounded
-  error text.
-- `s3_slow_object`: sampled blobs slower than `SNG_SWH_SLOW_OBJECT_S`
-  (default 15s).
+Each physical config commits in one SQLite transaction. An interrupted build
+keeps completed configs and rolls back the current partial config. Resume starts
+at the first incomplete config. A changed revision or format roster requires a
+new mint directory.
 
-References:
+## Counting
 
-- Stack v2 dedup: https://huggingface.co/datasets/bigcode/the-stack-v2-dedup
-- Stack v2 / StarCoder2 paper: https://arxiv.org/abs/2402.19173
-- Software Heritage content prefix: `s3://softwareheritage/content/`
+The canonical mint schedule is 100 GB, 500 GB, then every 1 TB through 10 TB.
+For each threshold the trainer:
+
+1. Computes exact cumulative area targets
+2. Computes max-min cumulative format targets
+3. Fetches at most one object per worker
+4. Decodes and counts one bounded round through the Rust `BigramCounter`
+5. Commits counts, format cursors, and progress as one durable cut
+6. Mints only after every area and format reaches the barrier
+
+No preview or in-flight counter enters a mint. A transient content failure aborts
+the uncommitted round and resumes from the prior checkpoint. Missing objects,
+invalid encodings, and empty decoded content are logged and skipped.
+
+Gzip decompression stops at each row's declared length. With 64 workers and the
+4 MiB document ceiling, fetched content occupies at most 256 MiB before the
+bounded Arrow counting buffer. The trainer does not depend on allocator trimming
+or an after-the-fact RSS soft limit.
+
+## State And Telemetry
+
+`.checkpoint.sqlite3` atomically stores the Rust count snapshot, effective and
+fetched totals, format cursors, partial-object offsets, exhaustion state, mint
+history, and the previous mint distribution for KL comparison.
+
+Each `mint` event records its exact durable area and format composition. Summary
+events separate fetched bytes from effective bytes. The dashboard shows both,
+plus area targets, format deficits, RSS, rate, and KL from the previous mint.
+
+## Environment
+
+- `HF_TOKEN`: access to `bigcode/the-stack-v2-dedup`
+- AWS credentials: optional when the Software Heritage bucket permits anonymous reads
+- `SNG_SWH_ANONYMOUS=0`: force the boto credential chain
+
+```sh
+cd train
+uv sync
+uv run sngram train --mint-dir ./bins
+```
