@@ -4,9 +4,36 @@ from __future__ import annotations
 
 import math
 import struct
+import time
+from collections import deque
 
 PAIR_COUNT = 256 * 256
 _UNSEEN_WEIGHT = 2**32 - 1
+
+
+class RateMeter:
+    """Average and windowed byte rates for one run."""
+
+    def __init__(self, window_s: float = 30.0) -> None:
+        self.started_at = time.monotonic()
+        self._window_s = window_s
+        self._samples: deque[tuple[float, int]] = deque()
+
+    def sample(self, processed: int) -> None:
+        now = time.monotonic()
+        self._samples.append((now, processed))
+        while len(self._samples) > 2 and now - self._samples[0][0] > self._window_s:
+            self._samples.popleft()
+
+    def rate_avg(self, processed: int) -> float:
+        elapsed = max(time.monotonic() - self.started_at, 1e-6)
+        return processed / elapsed
+
+    def rate_now(self, processed: int) -> float:
+        if len(self._samples) < 2:
+            return self.rate_avg(processed)
+        first, last = self._samples[0], self._samples[-1]
+        return (last[1] - first[1]) / max(last[0] - first[0], 1e-6)
 
 
 def counts_from_snapshot(snapshot: bytes) -> list[int]:
@@ -41,6 +68,11 @@ def kl_divergence(p_counts: list[int], q_counts: list[int], eps: float = 1.0) ->
     if len(p_counts) != len(q_counts):
         raise ValueError("count vectors must be the same length")
     return kl(probs_from_counts(p_counts, eps), probs_from_counts(q_counts, eps))
+
+
+def snapshot_kl(current: bytes, previous: bytes) -> float:
+    """Compute smoothed KL between two counter snapshots."""
+    return kl_divergence(counts_from_snapshot(current), counts_from_snapshot(previous))
 
 
 def table_frequencies(table, floor: float = 1e-15) -> list[float]:

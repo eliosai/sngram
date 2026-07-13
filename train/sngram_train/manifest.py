@@ -79,7 +79,8 @@ class ManifestBuilder:
     def _restore(self) -> None:
         assert self._connection is not None
         metadata = dict(self._connection.execute("SELECT key, value FROM metadata"))
-        if metadata != {"revision": self.revision, "roster_hash": self.roster_hash}:
+        identity = (metadata.get("revision"), metadata.get("roster_hash"))
+        if identity != (self.revision, self.roster_hash):
             raise ConfigurationError("partial manifest does not match this roster")
         for key, format_id, count, capacity, exhausted in self._connection.execute(
             "SELECT format_key, id, candidates, capacity, exhausted FROM formats"
@@ -153,6 +154,13 @@ class ManifestBuilder:
         )
         self._buffer.clear()
 
+    def set_effective_target(self, value: int) -> None:
+        assert self._connection is not None
+        self._connection.execute(
+            "INSERT OR REPLACE INTO metadata VALUES ('effective_target', ?)",
+            (str(value),),
+        )
+
     def is_complete(self, config: str) -> bool:
         return config in self._completed
 
@@ -225,6 +233,7 @@ class Manifest:
         keys: dict[str, int],
         exhausted: dict[str, bool],
         roster_hash: str,
+        effective_target: int | None = None,
     ) -> None:
         self.path = path
         self.revision = revision
@@ -233,28 +242,35 @@ class Manifest:
         self._keys = keys
         self._exhausted = exhausted
         self.roster_hash = roster_hash
+        self.effective_target = effective_target
+        self._connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
     def capacity(self, format_id: str) -> int:
         return self._capacities.get(format_id, 0)
+
+    def candidates(self, format_id: str) -> int:
+        return self._counts.get(format_id, 0)
 
     def exhausted(self, format_id: str) -> bool:
         return self._exhausted.get(format_id, False)
 
     def read(self, format_id: str, cursor: int, limit: int) -> ManifestBatch:
-        with sqlite3.connect(self.path) as connection:
-            rows = connection.execute(
-                "SELECT c.blob_id, e.name, c.length, c.weight "
-                "FROM candidates c JOIN encodings e ON e.key = c.encoding_key "
-                "WHERE c.format_key = ? AND c.sequence >= ? "
-                "ORDER BY c.sequence LIMIT ?",
-                (self._keys[format_id], cursor, limit),
-            ).fetchall()
+        rows = self._connection.execute(
+            "SELECT c.blob_id, e.name, c.length, c.weight "
+            "FROM candidates c JOIN encodings e ON e.key = c.encoding_key "
+            "WHERE c.format_key = ? AND c.sequence >= ? "
+            "ORDER BY c.sequence LIMIT ?",
+            (self._keys[format_id], cursor, limit),
+        ).fetchall()
         items = tuple(
             Candidate(format_id, _unpack_blob_id(row[0]), *row[1:]) for row in rows
         )
         next_cursor = cursor + len(items)
         count = self._counts.get(format_id, 0)
         return ManifestBatch(items, next_cursor, next_cursor >= count)
+
+    def close(self) -> None:
+        self._connection.close()
 
 
 def open_manifest(path: Path, roster_hash: str) -> Manifest:
@@ -267,22 +283,16 @@ def open_manifest(path: Path, roster_hash: str) -> Manifest:
         ).fetchall()
     if metadata.get("roster_hash") != roster_hash:
         raise ConfigurationError("manifest roster does not match this training run")
-    capacities = {
-        format_id: capacity for _key, format_id, _count, capacity, _done in rows
-    }
-    counts = {format_id: count for _key, format_id, count, _capacity, _done in rows}
-    keys = {format_id: key for key, format_id, _count, _capacity, _done in rows}
-    exhausted = {
-        format_id: bool(done) for _key, format_id, _count, _capacity, done in rows
-    }
+    effective = metadata.get("effective_target")
     return Manifest(
         path,
         metadata["revision"],
-        capacities,
-        counts,
-        keys,
-        exhausted,
+        {format_id: capacity for _k, format_id, _n, capacity, _d in rows},
+        {format_id: count for _k, format_id, count, _c, _d in rows},
+        {format_id: key for key, format_id, _n, _c, _d in rows},
+        {format_id: bool(done) for _k, format_id, _n, _c, done in rows},
         metadata["roster_hash"],
+        int(effective) if effective is not None else None,
     )
 
 

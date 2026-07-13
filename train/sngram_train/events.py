@@ -9,7 +9,19 @@ from collections import deque
 from pathlib import Path
 
 # Dashboard event kinds
-TAIL_KINDS = frozenset({"error", "warn", "mint", "stall", "stall_end"})
+TAIL_KINDS = frozenset(
+    {
+        "error",
+        "warn",
+        "mint",
+        "stall",
+        "stall_end",
+        "content_skips",
+        "target_clamped",
+        "manifest_extend",
+        "format_depleted",
+    }
+)
 
 
 class EventLog:

@@ -7,13 +7,9 @@ import pytest
 from sngram_train.catalog import Catalog, FormatSpec, build_catalog
 from sngram_train.errors import ConfigurationError
 from sngram_train.manifest import open_manifest
-from sngram_train.stack import (
-    HuggingFaceRows,
-    _sampled_rows,
-    _validate_columns,
-    build_stack_manifest,
-    skip_reason,
-)
+from sngram_train.scanning import skip_reason
+from sngram_train.stack import build_stack_manifest, extend_manifest
+from sngram_train.stackrows import HuggingFaceRows, _sampled_rows, _validate_columns
 
 
 class FakeRows:
@@ -31,6 +27,21 @@ class FakeRows:
             item = dict(value)
             item["_source_cursor"] = (0, index + 1)
             yield item
+
+
+class Recorder:
+    def __init__(self):
+        self.finished_configs = []
+        self.started_configs = []
+
+    def started(self, config):
+        self.started_configs.append(config)
+
+    def scanned(self, config, rows, accepted_bytes):
+        pass
+
+    def finished(self, config, accepted, effective, seconds):
+        self.finished_configs.append((config, accepted, effective, seconds))
 
 
 def row(name: str, *, path: str, extension: str, **changes):
@@ -62,14 +73,14 @@ def test_builder_scans_text_once_and_routes_each_row(tmp_path: Path):
         }
     )
     path = tmp_path / "manifest.sqlite3"
-    updates = []
+    recorder = Recorder()
 
-    roster_hash = build_stack_manifest(path, catalog, rows, updates.append)
+    roster_hash = build_stack_manifest(path, catalog, rows, recorder)
     manifest = open_manifest(path, roster_hash)
 
     assert rows.calls == ["Text"]
-    assert updates[0][:3] == ("Text", 3, 60_000)
-    assert updates[0][3] >= 0
+    assert recorder.finished_configs[0][:3] == ("Text", 3, 60_000)
+    assert recorder.started_configs == ["Text"]
     assert manifest.read("docs-prose-markup/Text", 0, 10).items[0].blob_id == "docs"
     assert manifest.read("config-build-infra/Text", 0, 10).items[0].blob_id == "config"
     assert manifest.read("data-query-schema/Text", 0, 10).items[0].blob_id == "data"
@@ -202,39 +213,59 @@ def test_stack_schema_failure_is_a_configuration_error():
 
 def test_inventory_extends_live_formats_without_materializing_all_caps(tmp_path: Path):
     formats = (
-        FormatSpec("a", "code", "a", 1_000),
-        FormatSpec("b", "code", "b", 1_000),
-        FormatSpec("c", "code", "c", 1_000),
+        FormatSpec("a", "code", "a", 1_000_000),
+        FormatSpec("b", "code", "b", 1_000_000),
+        FormatSpec("c", "code", "c", 1_000_000),
     )
     catalog = Catalog(formats, ("a", "b", "c"))
     values = {
-        "a": [row("a-0", path="/a", extension="a", length_bytes=10)],
+        "a": [row("a-0", path="/a", extension="a", length_bytes=10_000)],
         "b": [
-            row(f"b-{index}", path="/b", extension="b", length_bytes=20)
-            for index in range(10)
+            row(f"b-{index}", path="/b", extension="b", length_bytes=20_000)
+            for index in range(100)
         ],
         "c": [
-            row(f"c-{index}", path="/c", extension="c", length_bytes=20)
-            for index in range(10)
+            row(f"c-{index}", path="/c", extension="c", length_bytes=20_000)
+            for index in range(100)
         ],
     }
     rows = FakeRows(values)
     path = tmp_path / "manifest.sqlite3"
 
     roster_hash = build_stack_manifest(
-        path, catalog, rows, target=100, area_weights={"code": 1}
+        path, catalog, rows, target=400_000, area_weights={"code": 1}
     )
     manifest = open_manifest(path, roster_hash)
 
     assert rows.calls.count("a") == 1
-    assert rows.calls.count("b") == 2
-    assert rows.calls.count("c") == 2
-    assert ("b", (0, 2)) in rows.cursors
-    assert ("c", (0, 2)) in rows.cursors
-    assert manifest.capacity("a") == 10
-    assert manifest.capacity("b") == 60
-    assert manifest.capacity("c") == 60
-    assert sum(manifest.capacity(item.id) for item in formats) < 3_000
+    assert rows.calls.count("b") >= 2
+    assert manifest.capacity("a") == 10_000
+    assert manifest.capacity("b") == manifest.capacity("c")
+    assert manifest.capacity("b") >= 195_000
+    assert sum(manifest.capacity(item.id) for item in formats) < 3_000_000
+    assert manifest.effective_target == 400_000
+
+
+def test_infeasible_target_clamps_to_corpus_supply(tmp_path: Path):
+    formats = (
+        FormatSpec("a", "code", "a", 1_000_000),
+        FormatSpec("b", "code", "b", 1_000_000),
+    )
+    catalog = Catalog(formats, ("a", "b"))
+    values = {
+        "a": [row("a-0", path="/a", extension="a", length_bytes=30_000)],
+        "b": [row("b-0", path="/b", extension="b", length_bytes=50_000)],
+    }
+    path = tmp_path / "manifest.sqlite3"
+
+    roster_hash = build_stack_manifest(
+        path, catalog, FakeRows(values), target=1_000_000, area_weights={"code": 1}
+    )
+    manifest = open_manifest(path, roster_hash)
+
+    assert manifest.effective_target == 80_000
+    assert manifest.capacity("a") == 30_000
+    assert manifest.capacity("b") == 50_000
 
 
 def test_manifest_scans_independent_configs_concurrently(tmp_path: Path):
@@ -277,15 +308,13 @@ def test_manifest_scans_independent_configs_concurrently(tmp_path: Path):
 
 def test_target_bounded_text_inventory_stops_at_route_goals(tmp_path: Path):
     catalog = build_catalog(["Text"])
-    values = [
-        row("docs-0", path="/README.txt", extension="txt"),
-        row("docs-1", path="/guide.md", extension="md"),
-        row("config", path="/cfg/app.json", extension="json"),
-        row("data", path="/data/items.csv", extension="csv"),
-    ]
+    values = []
+    for index in range(4):
+        values.append(row(f"docs-{index}", path=f"/notes-{index}.txt", extension="txt"))
+        values.append(row(f"config-{index}", path=f"/cfg/app-{index}.json", extension="json"))
+        values.append(row(f"data-{index}", path=f"/data/items-{index}.csv", extension="csv"))
     values.extend(
-        row(f"extra-{index}", path="/notes.txt", extension="txt")
-        for index in range(100)
+        row(f"extra-{index}", path="/more.txt", extension="txt") for index in range(100)
     )
     rows = FakeRows({"Text": values})
     path = tmp_path / "manifest.sqlite3"
@@ -295,13 +324,42 @@ def test_target_bounded_text_inventory_stops_at_route_goals(tmp_path: Path):
         catalog,
         rows,
         target=60_000,
-        area_weights={area: 1 for area in {
-            item.area for item in catalog.formats
-        }},
+        area_weights={area: 1 for area in {item.area for item in catalog.formats}},
     )
     manifest = open_manifest(path, roster_hash)
 
-    assert manifest.capacity("docs-prose-markup/Text") == 40_000
-    assert manifest.capacity("config-build-infra/Text") == 20_000
-    assert manifest.capacity("data-query-schema/Text") == 20_000
+    assert manifest.capacity("docs-prose-markup/Text") == 60_000
+    assert manifest.capacity("config-build-infra/Text") == 60_000
+    assert manifest.capacity("data-query-schema/Text") == 60_000
     assert rows.cursors == [("Text", (0, 0))]
+
+
+def test_extension_grows_one_starved_format_from_its_cursor(tmp_path: Path):
+    formats = (
+        FormatSpec("a", "code", "a", 1_000_000),
+        FormatSpec("b", "code", "b", 1_000_000),
+    )
+    catalog = Catalog(formats, ("a", "b"))
+    values = {
+        "a": [
+            row(f"a-{index}", path="/a", extension="a", length_bytes=20_000)
+            for index in range(50)
+        ],
+        "b": [
+            row(f"b-{index}", path="/b", extension="b", length_bytes=20_000)
+            for index in range(50)
+        ],
+    }
+    path = tmp_path / "manifest.sqlite3"
+    rows = FakeRows(values)
+    roster_hash = build_stack_manifest(
+        path, catalog, rows, target=200_000, area_weights={"code": 1}
+    )
+    before = open_manifest(path, roster_hash)
+
+    extend_manifest(path, catalog, rows, roster_hash, "a", before.capacity("a") + 100_000)
+    after = open_manifest(path, roster_hash)
+
+    assert after.capacity("a") >= before.capacity("a") + 100_000
+    assert after.capacity("b") == before.capacity("b")
+    assert after.candidates("a") > before.candidates("a")

@@ -33,35 +33,59 @@ def train(
 
     from .units import parse_size
 
-    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
-    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
-    token = hf_token()
-    if token is None:
-        typer.echo("error: HF_TOKEN is required for the production corpus")
-        raise typer.Exit(2)
-    effective_target = parse_size(limit or target)
-    n_workers = workers or default_workers()
+    token = _require_token()
+    view = _run_view() if dashboard else None
     build = lambda resume_now: _production_trainer(
         mint_dir=mint_dir,
-        target=effective_target,
+        target=parse_size(limit or target),
         mint_cadence=parse_size(mint_every),
-        workers=n_workers,
+        workers=workers or default_workers(),
         checkpoint_interval=checkpoint_every,
         resume=resume_now,
         token=token,
+        view=view,
     )
     from .errors import ConfigurationError, CorpusExhausted
 
     try:
-        trainer = _run_until_done(build, resume, dashboard)
+        trainer = _dashboard_run(build, resume, view)
     except (ConfigurationError, CorpusExhausted) as error:
         typer.echo(f"error: {error}")
         raise typer.Exit(2) from error
     typer.echo(f"done: {trainer.describe_progress()}")
 
 
+def _require_token() -> str:
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+    token = hf_token()
+    if token is None:
+        typer.echo("error: HF_TOKEN is required for the production corpus")
+        raise typer.Exit(2)
+    return token
+
+
 def default_workers() -> int:
     return min(max((os.cpu_count() or 4) * 4, 16), 64)
+
+
+def _scan_workers(workers: int) -> int:
+    return min(workers, 12)
+
+
+def _run_view():
+    from .dashboard import RunView
+
+    return RunView()
+
+
+def _dashboard_run(build, resume: bool, view):
+    if view is None:
+        return _run_until_done(build, resume, None)
+    from .dashboard import Dashboard
+
+    with Dashboard(view):
+        return _run_until_done(build, resume, view)
 
 
 def _production_trainer(
@@ -73,20 +97,54 @@ def _production_trainer(
     checkpoint_interval: float,
     resume: bool,
     token: str,
+    view=None,
 ):
     from .catalog import build_catalog
     from .config import STACK_V2_BUCKET_CAPS
-    from .content import SwhContent
-    from .errors import ConfigurationError
-    from .pipeline import Trainer, TrainerConfig
-    from .resources import manifest_disk_budget
-    from .stack import HuggingFaceRows
+    from .pipeline import TrainerConfig
+    from .stackrows import HuggingFaceRows
 
     rows = HuggingFaceRows(token)
     catalog = build_catalog(rows.configs())
     roster_hash = catalog.roster_hash(rows.revision, target)
     path = mint_dir / ".manifest.sqlite3"
-    config_counts = {}
+    _check_disk_budget(path, catalog, target)
+    manifest = _prepare_manifest(
+        path,
+        catalog,
+        rows,
+        roster_hash,
+        target,
+        STACK_V2_BUCKET_CAPS,
+        _scan_workers(workers),
+        view,
+    )
+    config = TrainerConfig(
+        mint_dir, target, mint_cadence, workers, checkpoint_interval, resume
+    )
+    return _assemble_trainer(catalog, manifest, config, path, rows, roster_hash)
+
+
+def _assemble_trainer(catalog, manifest, config, path, rows, roster_hash):
+    from .config import STACK_V2_BUCKET_CAPS
+    from .content import SwhContent
+    from .pipeline import Trainer
+
+    return Trainer(
+        catalog,
+        manifest,
+        SwhContent(workers=config.workers),
+        config,
+        STACK_V2_BUCKET_CAPS,
+        extend=_manifest_extension(path, catalog, rows, roster_hash),
+    )
+
+
+def _check_disk_budget(path: Path, catalog, target: int) -> None:
+    from .errors import ConfigurationError
+    from .resources import manifest_disk_budget
+
+    config_counts: dict[str, int] = {}
     for item in catalog.formats:
         config_counts[item.config] = config_counts.get(item.config, 0) + 1
     extra_capacity = sum(
@@ -98,63 +156,89 @@ def _production_trainer(
             f"insufficient disk for manifest: need {budget.required_bytes} bytes, "
             f"have {budget.free_bytes} bytes"
         )
-    manifest = _prepare_manifest(
-        path,
-        catalog,
-        rows,
-        roster_hash,
-        target,
-        STACK_V2_BUCKET_CAPS,
-        min(workers, 4),
-    )
-    config = TrainerConfig(
-        mint_dir, target, mint_cadence, workers, checkpoint_interval, resume
-    )
-    return Trainer(catalog, manifest, SwhContent(workers=workers), config, STACK_V2_BUCKET_CAPS)
+
+
+def _manifest_extension(path: Path, catalog, rows, roster_hash: str):
+    from .manifest import open_manifest
+    from .stack import extend_manifest
+
+    def extend(format_id: str, minimum: int):
+        extend_manifest(path, catalog, rows, roster_hash, format_id, minimum)
+        return open_manifest(path, roster_hash)
+
+    return extend
+
+
+class _ManifestReport:
+    """Routes scan progress to the dashboard view or plain lines."""
+
+    def __init__(self, view, events, total: int) -> None:
+        self.view = view
+        self.events = events
+        self.total = total
+        self.completed = 0
+
+    def started(self, config: str) -> None:
+        if self.view is not None:
+            self.view.started(config)
+
+    def scanned(self, config: str, rows: int, accepted_bytes: int) -> None:
+        if self.view is not None:
+            self.view.scanned(config, rows, accepted_bytes)
+
+    def finished(self, config: str, accepted: int, effective: int, seconds: float) -> None:
+        self.completed += 1
+        self.events.log(
+            "manifest_config",
+            config=config,
+            candidates=accepted,
+            effective_bytes=effective,
+            seconds=round(seconds, 3),
+        )
+        if self.view is not None:
+            self.view.finished(config, accepted, effective, seconds)
+        else:
+            typer.echo(
+                f"manifest {self.completed}/{self.total}: {config} "
+                f"({accepted} objects, {seconds:.1f}s)"
+            )
 
 
 def _prepare_manifest(
-    path, catalog, rows, roster_hash, target, area_weights, workers
+    path, catalog, rows, roster_hash, target, area_weights, workers, view
 ):
-    from .events import EventLog
     from .manifest import open_manifest
-    from .stack import build_stack_manifest
 
     if path.exists():
         return open_manifest(path, roster_hash)
     total = len(catalog.configs)
-    typer.echo(f"building sampled manifest for {total} Stack formats ({workers} readers)")
+    if view is not None:
+        view.manifest_start(total)
+    else:
+        typer.echo(f"building sampled manifest for {total} Stack configs ({workers} readers)")
+    _build_manifest(path, catalog, rows, target, area_weights, workers, view, total)
+    manifest = open_manifest(path, roster_hash)
+    _warn_clamped(manifest, target)
+    return manifest
+
+
+def _build_manifest(path, catalog, rows, target, area_weights, workers, view, total):
+    from .events import EventLog
+    from .stack import build_stack_manifest
+
     events = EventLog(path.parent / "train-events.jsonl")
     events.log(
         "manifest_start",
         revision=rows.revision,
-        configs=len(catalog.configs),
+        configs=total,
         formats=len(catalog.formats),
     )
-
-    completed = 0
-
-    def report(fields):
-        nonlocal completed
-        completed += 1
-        events.log(
-            "manifest_config",
-            config=fields[0],
-            candidates=fields[1],
-            effective_bytes=fields[2],
-            seconds=round(fields[3], 3),
-        )
-        typer.echo(
-            f"manifest {completed}/{total}: {fields[0]} "
-            f"({fields[1]} objects, {fields[3]:.1f}s)"
-        )
-
     try:
         build_stack_manifest(
             path,
             catalog,
             rows,
-            report,
+            _ManifestReport(view, events, total),
             target=target,
             area_weights=area_weights,
             workers=workers,
@@ -162,25 +246,31 @@ def _prepare_manifest(
         events.log("manifest_done", bytes=path.stat().st_size)
     finally:
         events.close()
-    return open_manifest(path, roster_hash)
 
 
-def _run_until_done(build, resume: bool, dashboard: bool):
-    from .errors import ConfigurationError, CorpusExhausted
+def _warn_clamped(manifest, target: int) -> None:
+    from .units import fmt_bytes
+
+    effective = manifest.effective_target
+    if effective is not None and effective < target:
+        typer.echo(
+            f"warning: corpus supplies {fmt_bytes(effective)} of the requested "
+            f"{fmt_bytes(target)}; training to the achievable target"
+        )
+
+
+def _run_until_done(build, resume: bool, view):
+    from .errors import ConfigurationError, CorpusExhausted, is_transient
 
     attempt = 0
+    delay = 5.0
     while True:
         trainer = None
         try:
             trainer = build(resume or attempt > 0)
-            if dashboard:
-                from .dashboard import Dashboard
-
-                with Dashboard() as live:
-                    trainer.on_refresh = live.refresh
-                    trainer.run()
-            else:
-                trainer.run()
+            if view is not None:
+                view.training(trainer)
+            trainer.run()
             return trainer
         except KeyboardInterrupt:
             if trainer is None:
@@ -190,9 +280,16 @@ def _run_until_done(build, resume: bool, dashboard: bool):
         except (ConfigurationError, CorpusExhausted):
             raise
         except Exception as error:
+            if not is_transient(error):
+                raise
             attempt += 1
-            typer.echo(f"\ntransport failure ({error!r}); resuming in 30s")
-            time.sleep(30)
+            delay = _transport_pause(error, delay)
+
+
+def _transport_pause(error: Exception, delay: float) -> float:
+    typer.echo(f"\ntransport failure ({error!r}); resuming in {delay:.0f}s")
+    time.sleep(delay)
+    return min(delay * 2, 300.0)
 
 
 @app.command()

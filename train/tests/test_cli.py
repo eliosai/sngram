@@ -80,11 +80,47 @@ def test_startup_transport_failure_retries_but_configuration_error_does_not(monk
         return FakeTrainer()
 
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
-    assert cli._run_until_done(build, resume=False, dashboard=False).__class__ is FakeTrainer
+    assert cli._run_until_done(build, resume=False, view=None).__class__ is FakeTrainer
     assert calls == 2
 
     def invalid(_resume):
         raise ConfigurationError("bad roster")
 
     with pytest.raises(ConfigurationError):
-        cli._run_until_done(invalid, resume=False, dashboard=False)
+        cli._run_until_done(invalid, resume=False, view=None)
+
+
+def test_unexpected_errors_fail_loudly_instead_of_retrying(monkeypatch):
+    calls = 0
+
+    def build(_resume):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("deterministic bug")
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    with pytest.raises(RuntimeError, match="deterministic bug"):
+        cli._run_until_done(build, resume=False, view=None)
+    assert calls == 1
+
+
+def test_throttling_client_errors_are_retried(monkeypatch):
+    calls = 0
+
+    class ClientError(Exception):
+        response = {"Error": {"Code": "SlowDown"}}
+
+    class FakeTrainer:
+        def run(self):
+            pass
+
+    def build(_resume):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ClientError("throttled")
+        return FakeTrainer()
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    assert cli._run_until_done(build, resume=False, view=None).__class__ is FakeTrainer
+    assert calls == 2

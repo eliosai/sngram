@@ -28,7 +28,8 @@ def manifest_disk_budget(
 ) -> DiskBudget:
     """Estimate manifest space, accounting for a resumable partial file."""
 
-    candidates = ceil((target + extra_capacity) / SAMPLE_FLOOR)
+    inventoried = (target + extra_capacity) * 11 // 10
+    candidates = ceil(inventoried / SAMPLE_FLOOR)
     estimate = candidates * MANIFEST_BYTES_PER_CANDIDATE
     partial = path.with_suffix(path.suffix + ".tmp")
     required = max(estimate - (partial.stat().st_size if partial.exists() else 0), 0)

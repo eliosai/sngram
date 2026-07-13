@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 GB = 10**9
+
+
+@dataclass(frozen=True)
+class Allocation:
+    goals: dict[str, int]
+    shortfall: int
 
 
 def apportion(total: int, weights: Mapping[str, int]) -> dict[str, int]:
@@ -23,40 +30,116 @@ def apportion(total: int, weights: Mapping[str, int]) -> dict[str, int]:
     return dict(sorted(shares.items()))
 
 
-def waterfill(total: int, capacities: Mapping[str, int | None]) -> dict[str, int]:
-    """Max-min allocate total bytes across finite or unbounded formats."""
+def allocate(
+    total: int,
+    floors: Mapping[str, int],
+    supplies: Mapping[str, int | None],
+    preferences: Mapping[str, int | None],
+) -> Allocation:
+    """Max-min allocate total under soft preferences and hard supplies."""
 
-    if total < 0 or not capacities:
-        raise ValueError("total must be non-negative and formats cannot be empty")
-    if any(cap is not None and cap < 0 for cap in capacities.values()):
-        raise ValueError("capacities must be non-negative")
-    assigned = {key: 0 for key in sorted(capacities)}
-    active = list(assigned)
-    remaining = total
-    while active:
-        level = remaining // len(active)
-        exhausted = [key for key in active if _below_level(capacities[key], level)]
-        if not exhausted:
-            _split_level(assigned, active, remaining)
-            return assigned
-        for key in exhausted:
-            amount = int(capacities[key] or 0)
-            assigned[key] = amount
-            remaining -= amount
-            active.remove(key)
-    if remaining:
-        raise ValueError("format capacity is below the requested total")
-    return assigned
+    if total < 0 or not floors:
+        raise ValueError("total must be non-negative and keys cannot be empty")
+    if sum(floors.values()) > total:
+        raise ValueError("floors exceed the requested total")
+    soft = {key: _soft_cap(supplies[key], preferences[key], floors[key]) for key in floors}
+    goals, leftover = waterlevel(total, floors, soft)
+    if leftover:
+        hard = {key: _hard_cap(supplies[key], floors[key]) for key in floors}
+        goals, leftover = waterlevel(total, goals, hard)
+    return Allocation(goals, leftover)
 
 
-def _below_level(capacity: int | None, level: int) -> bool:
-    return capacity is not None and capacity < level
+def waterlevel(
+    total: int, floors: Mapping[str, int], caps: Mapping[str, int | None]
+) -> tuple[dict[str, int], int]:
+    """Raise a common level from floors to caps until total is spent."""
+
+    if any(cap is not None and cap < floors[key] for key, cap in caps.items()):
+        raise ValueError("caps must not undercut floors")
+    reachable = min(total, sum(floors.values()) + _headroom(floors, caps))
+    level = _level_for(reachable, floors, caps)
+    goals = {key: _clamp(level, floors[key], caps[key]) for key in sorted(floors)}
+    deficit = reachable - sum(goals.values())
+    for key in sorted(floors):
+        if deficit <= 0:
+            break
+        if goals[key] == level and (caps[key] is None or caps[key] > level):
+            goals[key] += 1
+            deficit -= 1
+    return goals, total - sum(goals.values())
 
 
-def _split_level(assigned: dict[str, int], active: list[str], total: int) -> None:
-    level, extra = divmod(total, len(active))
-    for index, key in enumerate(active):
-        assigned[key] = level + (index < extra)
+def _level_for(
+    reachable: int, floors: Mapping[str, int], caps: Mapping[str, int | None]
+) -> int:
+    low, high = 0, reachable + max(floors.values(), default=0)
+    while low < high:
+        middle = (low + high) // 2
+        filled = sum(_clamp(middle, floors[key], caps[key]) for key in floors)
+        if filled < reachable:
+            low = middle + 1
+        else:
+            high = middle
+    return max(low - 1, 0)
+
+
+def _clamp(level: int, floor: int, cap: int | None) -> int:
+    value = max(level, floor)
+    return value if cap is None else min(value, cap)
+
+
+def _headroom(floors: Mapping[str, int], caps: Mapping[str, int | None]) -> int:
+    infinite = 10**18
+    return sum(
+        infinite if cap is None else cap - floors[key] for key, cap in caps.items()
+    )
+
+
+def _soft_cap(supply: int | None, preference: int | None, floor: int) -> int | None:
+    bounds = [bound for bound in (supply, preference) if bound is not None]
+    if not bounds:
+        return None
+    return max(min(bounds), floor)
+
+
+def _hard_cap(supply: int | None, floor: int) -> int | None:
+    if supply is None:
+        return None
+    return max(supply, floor)
+
+
+def schedule_targets(
+    thresholds: Sequence[int], weights: Mapping[str, int]
+) -> dict[int, dict[str, int]]:
+    """Cumulative per-area targets, monotone across the mint schedule."""
+
+    running = {key: 0 for key in weights}
+    targets: dict[int, dict[str, int]] = {}
+    previous = 0
+    for value in thresholds:
+        for key, amount in apportion(value - previous, weights).items():
+            running[key] += amount
+        targets[value] = dict(sorted(running.items()))
+        previous = value
+    return targets
+
+
+def feasible_delta(limit: int, weights: Mapping[str, int], room: Mapping[str, int]) -> int:
+    """Largest delta whose apportionment fits inside every finite room."""
+
+    delta = limit
+    denominator = sum(weights.values())
+    for key, cap in room.items():
+        if weights[key]:
+            delta = min(delta, cap * denominator // weights[key])
+    while delta > 0 and any(
+        amount > room[key]
+        for key, amount in apportion(delta, weights).items()
+        if key in room
+    ):
+        delta -= 1
+    return max(delta, 0)
 
 
 def mint_schedule(target: int, cadence: int) -> list[int]:
