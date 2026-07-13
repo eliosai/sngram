@@ -1,0 +1,121 @@
+train/sngram_train/goals.py
+  s_55baf0013db89e::t_de858dc812e37a 5,8,11-12,15-35
+  s_55baf0013db89e::t_05a8c469954e8f 1-4,6-7,9-10,13-14,36-75,95-114
+  s_55baf0013db89e::t_6de67f6b115ee7 76-94
+train/sngram_train/checkpoint.py
+  s_55baf0013db89e::t_27fe020a4b6f44 15,33,51,61,67,70-75,77-79,90,102,105-107,116
+train/sngram_train/manifest.py
+  s_55baf0013db89e::t_7acda0b489f3e6 157-163
+  s_55baf0013db89e::t_febe8dd3945dbc 236,245-246,251-253,258-264,272-274,286,290-293,295
+  s_55baf0013db89e::t_87923a6a952538 82-83
+train/sngram_train/stack.py
+  s_55baf0013db89e::t_c005e1e4af3c13 1,6,12-14,65,78,98,156
+  s_55baf0013db89e::t_a8b8b4989f7be7 5,10-11,21,27,34,39,44-64,67,72,87,90,92-94,96,101-102,105,108-122,124-146
+  s_55baf0013db89e::t_bcfa729490ec35 66
+train/sngram_train/scanning.py
+  s_55baf0013db89e::t_6b15c0589873c2 1-353
+train/sngram_train/dashboard.py
+  s_55baf0013db89e::t_1915e13f176d8c 1,6-8,20-93,96,106-113,115-116,119-120,124-130,132,158-160,172,192-198
+train/sngram_train/metrics.py
+  s_55baf0013db89e::t_22f3b1372b42f3 73-77
+  s_55baf0013db89e::t_350a6a70ba7229 7-8,14-36
+  s_55baf0013db89e::t_76dd8f2d780556 37-38
+train/sngram_train/stackrows.py
+  s_55baf0013db89e::t_c4450a65c13883 77
+  s_55baf0013db89e::t_03b08f95156df5 1-76,78-79,96-169
+  s_55baf0013db89e::t_3ea8230f09c682 80-95
+train/tests/test_distribution.py
+  s_55baf0013db89e::t_53a52177b5f452 1-10,36-38,40,42-43,45-135
+train/tests/test_stack_manifest.py
+  s_55baf0013db89e::t_39a890827a1e41 10-11
+  s_55baf0013db89e::t_7162a4afcb0624 12,32-46,76,78,82-83,216-218,222,224-225,228-229,236,241-268,311-315,317,327,331-333,335-365
+train/sngram_train/events.py
+  s_55baf0013db89e::t_110d1129cd7698 12-24
+train/tests/test_run_recovery.py
+  s_55baf0013db89e::t_e88d5e28ee023d 1-207
+train/sngram_train/errors.py
+  s_55baf0013db89e::t_e2bf4c4cbb8d95 1-3,12-67
+train/sngram_train/distribution.py
+  s_55baf0013db89e::t_1c7d1a807f7140 5-6,11-16,33-62,64,66,68,70-142
+  s_55baf0013db89e::t_8677e38d2e9ba6 63,65,67,69
+train/tests/test_cli.py
+  s_55baf0013db89e::t_553979959aff95 83,90-126
+train/sngram_train/resources.py
+  s_55baf0013db89e::t_c283d7b6c17f59 31-32
+train/tests/test_throughput.py
+  s_55baf0013db89e::t_b57605722a9012 1-41,43,45,47-83,85-86,88-91,93-94
+  s_55baf0013db89e::t_6588870f2ec1a4 84,87,92
+  s_55baf0013db89e::t_00cab5391c28e2 42,44,46
+train/sngram_train/pipeline.py
+  s_55baf0013db89e::t_cc53f3dd03fbf8 134
+  s_55baf0013db89e::t_0a036b11285471 149,156-160
+  s_55baf0013db89e::t_992fde980d5a39 18,54,62,69-73,81-84,89-92,98,105-107,115-116,139,141-148,150-155,162-181,184-185,187,189-196,198-200,202-206,208-210,213-214,216-228,230-231,233-249,254-259,261,268,274,283,287-292,300-308,339-349,374-376,379-381,383,388,390-395,399-400
+  s_55baf0013db89e::t_3e9a3264c0e531 284-286
+  s_55baf0013db89e::t_489db35a779624 64
+  s_55baf0013db89e::t_418c2cdf1195fe 363-364
+  s_55baf0013db89e::t_78c730dc8bf53f 373
+  s_55baf0013db89e::t_62d35a9d53fe1a 77
+  s_55baf0013db89e::t_dd3359fc1e70eb 12
+  s_55baf0013db89e::t_db2009ca7f94fa 250-253
+  s_55baf0013db89e::t_0133a3dd580dff 215
+  s_55baf0013db89e::t_e297e7d464f5fc 229
+  s_55baf0013db89e::t_7ca00fc9ad879f 382
+  s_55baf0013db89e::t_28f46b5fe35352 16,20,74-76,123,126-133,135-136,161,201,212,260,263,277-282,293-298
+  s_55baf0013db89e::t_8413e8543bb1eb 332,338
+  s_55baf0013db89e::t_9f9709513dbe40 386,389
+  s_55baf0013db89e::t_b2aa202cf05489 111-112
+  s_55baf0013db89e::t_3094de0d51735a 316
+  s_55baf0013db89e::t_783aa1d5c6052a 333-337
+  s_55baf0013db89e::t_3d24e54f31b806 22-29,31
+  s_45c96f219eec27::t_98f8406e031b71 387
+train/tests/test_train_end_to_end.py
+  s_55baf0013db89e::t_e538f5afb70443 53,57
+  s_55baf0013db89e::t_33a1a9ad03d1d9 1-52,54-56,58-132
+train/sngram_train/fetching.py
+  s_55baf0013db89e::t_c4efb0301a61f3 11,21-22,40-83,85-87,89-93,95-98
+  s_55baf0013db89e::t_54e773464905cf 1-7,9-10,12-20,107-129,133-168
+  s_55baf0013db89e::t_2c267356c51c34 23-39
+  s_55baf0013db89e::t_868a75376ff04c 8
+  s_55baf0013db89e::t_b16446d7ccb683 84,88,94,99-106
+  s_55baf0013db89e::t_244cb613e95aa5 130-132
+train/sngram_train/cli.py
+  s_55baf0013db89e::t_ead227fdb77dc0 219-228
+  s_55baf0013db89e::t_7f09de32121756 286-292
+  s_55baf0013db89e::t_e5a8a65cdbab0c 37,40,42,46,51,72-90,100,105,111,119-120,133-135,137-138,140-204,208,215-218,233,241,251-263,266,271-273,283-284
+  s_55baf0013db89e::t_de7ef5cecfc572 36,58-65
+  s_55baf0013db89e::t_ce9a8a3a9f8da8 125-132,136,139
+  s_55baf0013db89e::t_431024dfd82848 104
+  s_284a4c69600417::t_2c516a6fc4ab8c 66-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "3d4c83e9cf642db68a7b3a54dd8cf69be043f1f0",
+  "prompts": {},
+  "sessions": {
+    "s_284a4c69600417": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4d56-0e40-79d1-97bf-9ee65f46637c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    },
+    "s_45c96f219eec27": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7a1e7c04-9ead-4123-a630-bde2a2444f4f",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    },
+    "s_55baf0013db89e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "758014a9-b43e-4512-871b-d588a6583bbf",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Joshua Smotritsky <joshua@elios.ai>"
+    }
+  }
+}
