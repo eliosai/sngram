@@ -115,8 +115,8 @@ impl PyWeightTable {
     }
 }
 
-/// The embedded weight table for the enabled tier
-#[cfg(feature = "12tb")]
+/// The embedded production weight table
+#[cfg(feature = "weights")]
 #[pyfunction]
 pub fn weights() -> PyWeightTable {
     PyWeightTable::new(sngram::weights())

@@ -23,8 +23,8 @@ arrow-schema = "59"
 [features]
 default = []
 
-# weight tier features forwarded to the core library
-"12tb" = ["sngram/12tb"]
+# weights embeds the trained production weight table
+weights = ["sngram/weights"]
 
 [lints]
 workspace = true

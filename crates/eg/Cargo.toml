@@ -39,7 +39,7 @@ memmap2 = "0.9"
 regex-syntax = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.23"
-sngram = { workspace = true, features = ["12tb"] }
+sngram = { workspace = true, features = ["weights"] }
 sngram-types = { workspace = true }
 tantivy = "0.26.1"
 textwrap = { version = "0.16.2", default-features = false }

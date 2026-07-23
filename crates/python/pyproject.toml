@@ -27,7 +27,7 @@ Repository = "https://github.com/eliosai/sngram"
 manifest-path = "Cargo.toml"
 module-name = "sngram._core"
 python-source = "."
-features = ["pyo3/extension-module", "12tb"]
+features = ["pyo3/extension-module", "weights"]
 
 [dependency-groups]
 dev = [

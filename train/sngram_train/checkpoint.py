@@ -39,13 +39,17 @@ class RunState:
         return self.formats.get(format_id, _EMPTY_PROGRESS)
 
 
-def write_table(mint_dir: Path, label: str, counter: sngram.BigramCounter) -> None:
-    """Atomically write one minted weight table."""
+def write_table(
+    mint_dir: Path, label: str, counter: sngram.BigramCounter, provenance: str
+) -> None:
+    """Atomically write one minted weight table with its provenance record."""
 
     mint_dir.mkdir(parents=True, exist_ok=True)
+    table = sngram.WeightTable.from_bytes(counter.to_table_bytes())
+    stamped = table.with_provenance(provenance)
     path = mint_dir / f"{label}_weights.bin"
     temporary = path.with_suffix(".bin.tmp")
-    temporary.write_bytes(counter.to_table_bytes())
+    temporary.write_bytes(stamped.to_bytes())
     os.replace(temporary, path)
 
 

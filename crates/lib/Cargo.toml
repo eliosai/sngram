@@ -18,8 +18,8 @@ stream = ["dep:tokio"]
 # learn adds the bigram counters used to train weight tables; off by default
 # because it is useless without a training pipeline driving it
 learn = ["dep:crc32fast"]
-# one feature per minted weight tier; enable exactly one to embed its table
-"12tb" = []
+# weights embeds the trained production weight table
+weights = []
 
 [dependencies]
 sngram-types = { workspace = true }

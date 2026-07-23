@@ -1,4 +1,4 @@
-//! Build-time validation for embedded weight tier tables
+//! Build-time validation for the embedded weight table
 
 #![allow(
     clippy::expect_used,
@@ -8,15 +8,12 @@
 
 use std::{env, fs, path::PathBuf};
 
-const TIERS: &[&str] = &["12tb"];
+const TABLE: &str = "data/weights.bin";
 
 fn main() {
-    for tier in TIERS {
-        let path = format!("data/{tier}_weights.bin");
-        println!("cargo::rerun-if-changed={path}");
-        if env::var_os(format!("CARGO_FEATURE_{}", tier.to_uppercase())).is_some() {
-            validate(&path);
-        }
+    println!("cargo::rerun-if-changed={TABLE}");
+    if env::var_os("CARGO_FEATURE_WEIGHTS").is_some() {
+        validate(TABLE);
     }
 }
 
@@ -29,20 +26,14 @@ fn validate(relative: &str) {
         fs::read(&path).unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let table = sngram_types::WeightTable::from_bytes(&bytes)
         .unwrap_or_else(|err| panic!("invalid embedded table {}: {err}", path.display()));
-    write_fingerprint(relative, table.fingerprint());
+    write_fingerprint(table.fingerprint());
 }
 
-fn write_fingerprint(relative: &str, fingerprint: u64) {
-    let tier = relative
-        .strip_prefix("data/")
-        .and_then(|name| name.strip_suffix("_weights.bin"))
-        .expect("known weight path");
-    let name = format!("WEIGHTS_{}_FINGERPRINT", tier.to_uppercase());
+fn write_fingerprint(fingerprint: u64) {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
-    let path = out_dir.join(format!("{tier}_weights.rs"));
     fs::write(
-        path,
-        format!("const {name}: u64 = {};\n", rust_u64(fingerprint)),
+        out_dir.join("weights.rs"),
+        format!("const WEIGHTS_FINGERPRINT: u64 = {};\n", rust_u64(fingerprint)),
     )
     .expect("write fingerprint");
 }

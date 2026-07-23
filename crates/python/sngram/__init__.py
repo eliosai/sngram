@@ -40,7 +40,7 @@ from sngram._core import (
 
 try:
     from sngram._core import weights
-except ImportError:  # built without a weight tier feature
+except ImportError:  # built without the weights feature
 
     def weights() -> WeightTable:
         """The embedded weight table."""

@@ -257,7 +257,7 @@ class Trainer:
         self._sink.drain()
         if self.counter.bytes_processed != self.committed_bytes:
             raise RuntimeError("counter does not match committed progress")
-        write_table(self.config.mint_dir, "final", self.counter)
+        write_table(self.config.mint_dir, "final", self.counter, self._provenance())
         self.events.log(
             "mint",
             label="final",
@@ -265,6 +265,13 @@ class Trainer:
             fetched_bytes=self.fetched_bytes(),
             areas=self.area_bytes(),
             formats=self.format_bytes(),
+        )
+
+    def _provenance(self) -> str:
+        return (
+            f"sngram-train stack-v2@{self.manifest.revision[:12]} "
+            f"{self.counter.bytes_processed} effective bytes "
+            f"{self.counter.files_processed} objects"
         )
 
     def _set_progress(self, format_id: str, exhausted: bool) -> None:

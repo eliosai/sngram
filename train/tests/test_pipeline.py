@@ -81,6 +81,18 @@ def test_final_mint_has_exact_area_and_format_balance(tmp_path: Path):
     assert (tmp_path / "bins" / "final_weights.bin").exists()
 
 
+def test_final_table_carries_a_provenance_record(tmp_path: Path):
+    import sngram
+
+    trainer = setup_run(tmp_path, {"a": [20] * 4}, target=80)
+
+    trainer.run()
+
+    table = sngram.WeightTable.from_path(tmp_path / "bins" / "final_weights.bin")
+    assert "stack-v2@revision" in (table.provenance or "")
+    assert "80 effective bytes" in table.provenance
+
+
 def test_exhausted_format_quota_moves_inside_its_area(tmp_path: Path):
     trainer = setup_run(tmp_path, {"a": [20], "b": [20] * 6}, target=100)
 
