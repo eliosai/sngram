@@ -7,3 +7,4 @@ dist/
 .hypothesis/
 bins/
 bins_v2/
+runs/
