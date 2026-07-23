@@ -20,11 +20,13 @@ METADATA_BLOCK_BYTES = 64 * 1024 * 1024
 class HuggingFaceRows:
     """Stack v2 metadata reader pinned to one dataset revision."""
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, revision: str | None = None) -> None:
         from huggingface_hub import HfApi, HfFileSystem
 
         self.token = token
-        self.revision = HfApi(token=token).dataset_info(STACK_V2_METADATA_REPO).sha
+        self.revision = (
+            revision or HfApi(token=token).dataset_info(STACK_V2_METADATA_REPO).sha
+        )
         self._fs = HfFileSystem(token=token)
         self._files: dict[str, list[str]] | None = None
 

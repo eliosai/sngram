@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from typer.testing import CliRunner
 
@@ -61,8 +63,8 @@ def test_train_bounds_hugging_face_request_time(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0, result.output
-    assert cli.os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "30"
-    assert cli.os.environ["HF_HUB_ETAG_TIMEOUT"] == "30"
+    assert os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "30"
+    assert os.environ["HF_HUB_ETAG_TIMEOUT"] == "30"
 
 
 def test_startup_transport_failure_retries_but_configuration_error_does_not(monkeypatch):

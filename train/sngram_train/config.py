@@ -10,13 +10,13 @@ GB = 10**9
 TB = 10**12
 MIB = 1024 * 1024
 
-CANONICAL_TARGET_BYTES = 10 * TB
+CANONICAL_TARGET_BYTES = 6 * TB
 AVAILABLE_CORPUS_BYTES = 12 * TB
 STACK_V2_METADATA_REPO = "bigcode/the-stack-v2-dedup"
+STACK_V2_REVISION = "94d47b4385264b30f228e28a5d63e9b2eee8c2c5"
 STACK_V2_CONTENT_PREFIX = "s3://softwareheritage/content/"
 STACK_V2_MAX_BYTES = 2 * MIB
 STACK_V2_DOC_MAX_BYTES = 4 * MIB
-FORMAT_MAX_SHARE = 0.06
 
 STACK_V2_REQUIRED_COLUMNS = (
     "blob_id",
@@ -25,18 +25,63 @@ STACK_V2_REQUIRED_COLUMNS = (
     "language",
     "path",
     "extension",
+    "license_type",
     "is_vendor",
     "is_generated",
     "length_bytes",
 )
 
+# area weights double as apportionment ratios and per-format cap basis
+# measured Stack supply hard-caps code at 1.94 TB and prose at 0.72 TB, both exhausted
+# code lands at 38 to clear 5 TB, docs at 14 to take nearly all prose
+# only JSON, HTML, and CSV are elastic, so config, web, data are sized to balance
+# those three at ~9 percent each rather than let one spike past the rest
 STACK_V2_BUCKET_CAPS = {
-    "core-programming": 5_200 * GB,
-    "docs-prose-markup": 2_300 * GB,
-    "config-build-infra": 1_500 * GB,
-    "web-ui-templates": 1_200 * GB,
-    "data-query-schema": 1_000 * GB,
-    "long-tail": 800 * GB,
+    "core-programming": 2_280 * GB,
+    "config-build-infra": 1_182 * GB,
+    "docs-prose-markup": 840 * GB,
+    "web-ui-templates": 822 * GB,
+    "data-query-schema": 696 * GB,
+    "long-tail": 180 * GB,
+}
+
+# per-format cap basis: fraction of the area weight one format may hold
+# set well above the balanced level so the area weight governs each share and
+# max-min allocation balances formats within an area; a hard stop on domination
+AREA_FORMAT_SHARE = {
+    "core-programming": 0.30,
+    "config-build-infra": 0.48,
+    "docs-prose-markup": 0.55,
+    "web-ui-templates": 0.72,
+    "data-query-schema": 0.78,
+    "long-tail": 0.30,
+}
+
+GROUP_LABELS = {
+    "core-programming": "code",
+    "docs-prose-markup": "docs",
+    "config-build-infra": "config",
+    "web-ui-templates": "web",
+    "data-query-schema": "data",
+    "long-tail": "other",
+}
+
+# configs dropped entirely: bloated base64 JSON, no value for a code byte-pair table
+EXCLUDED_CONFIGS = frozenset({"Jupyter_Notebook"})
+
+# extensions dropped entirely: OCR layout dumps that read as markup but carry no code
+EXCLUDED_EXTENSIONS = frozenset({"hocr"})
+
+# per-config file-size ceilings that drop generated data blobs from bloat formats
+CONFIG_FILE_CAPS = {
+    "JSON": 192 * 1024,
+    "XML": 192 * 1024,
+    "YAML": 160 * 1024,
+    "CSV": 384 * 1024,
+    "TSV": 384 * 1024,
+    "HTML": 768 * 1024,
+    "SQL": 512 * 1024,
+    "Text": 256 * 1024,
 }
 
 CORE_LANGUAGES = {
@@ -45,6 +90,11 @@ CORE_LANGUAGES = {
     "Lua", "R", "Perl", "Objective-C", "Objective-C++", "Fortran",
     "Fortran Free Form", "Pascal", "Visual Basic .NET", "F#", "Haskell",
     "Clojure", "Elixir", "Erlang", "OCaml", "Julia", "MATLAB", "PowerShell",
+    "Assembly", "WebAssembly", "Verilog", "SystemVerilog", "VHDL", "Solidity",
+    "GLSL", "HLSL", "Cuda", "Zig", "Nim", "Crystal", "D", "Groovy",
+    "Common Lisp", "Scheme", "Racket", "Emacs Lisp", "Tcl", "Ada", "COBOL",
+    "Prolog", "Smalltalk", "Vala", "Elm", "PureScript", "Haxe", "Hack",
+    "Standard ML", "Raku", "Coq",
 }
 
 DOC_LANGUAGES = {

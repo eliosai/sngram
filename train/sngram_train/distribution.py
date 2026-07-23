@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from .units import mint_label
+
 GB = 10**9
 
 
@@ -151,3 +153,19 @@ def mint_schedule(target: int, cadence: int) -> list[int]:
     thresholds.update(range(cadence, target + 1, cadence))
     thresholds.add(target)
     return sorted(thresholds)
+
+
+def remaining_thresholds(schedule: Sequence[int], done: Sequence[str]) -> list[int]:
+    """Schedule entries whose mint labels are not finished yet."""
+
+    finished = set(done)
+    return [value for value in schedule if mint_label(value) not in finished]
+
+
+def minted_baseline(schedule: Sequence[int], done: Sequence[str]) -> int:
+    """Largest schedule entry already minted."""
+
+    finished = set(done)
+    return max(
+        (value for value in schedule if mint_label(value) in finished), default=0
+    )

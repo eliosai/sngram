@@ -25,6 +25,9 @@ class FormatProgress:
     exhausted: bool = False
 
 
+_EMPTY_PROGRESS = FormatProgress()
+
+
 @dataclass
 class RunState:
     roster_hash: str
@@ -36,7 +39,17 @@ class RunState:
     last_mint_counts: bytes | None = None
 
     def progress(self, format_id: str) -> FormatProgress:
-        return self.formats.get(format_id, FormatProgress())
+        return self.formats.get(format_id, _EMPTY_PROGRESS)
+
+
+def write_table(mint_dir: Path, label: str, counter: sngram.BigramCounter) -> None:
+    """Atomically write one minted weight table."""
+
+    mint_dir.mkdir(parents=True, exist_ok=True)
+    path = mint_dir / f"{label}_weights.bin"
+    temporary = path.with_suffix(".bin.tmp")
+    temporary.write_bytes(counter.to_table_bytes())
+    os.replace(temporary, path)
 
 
 def save(path: Path, counter: sngram.BigramCounter, state: RunState) -> None:

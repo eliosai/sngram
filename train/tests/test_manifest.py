@@ -84,3 +84,45 @@ def test_manifest_resumes_completed_configs_and_rolls_back_partial_one(tmp_path:
         "python"
     ]
     assert [item.blob_id for item in manifest.read("core/Rust", 0, 10).items] == ["rust"]
+
+
+def test_manifest_reads_are_stable_across_the_read_ahead_window(tmp_path: Path):
+    from sngram_train.manifest import READ_AHEAD_ROWS
+
+    path = tmp_path / "manifest.sqlite3"
+    count = READ_AHEAD_ROWS + 50
+    with ManifestBuilder(path, revision="abc", roster_hash="roster") as builder:
+        for index in range(count):
+            builder.add(Candidate("core/Python", f"blob-{index:05d}", "utf-8", 10, 1))
+
+    manifest = open_manifest(path, roster_hash="roster")
+    bulk = manifest.read("core/Python", cursor=0, limit=count).items
+    stepped = []
+    cursor = 0
+    while True:
+        batch = manifest.read("core/Python", cursor, limit=7)
+        stepped.extend(batch.items)
+        cursor = batch.cursor
+        if batch.exhausted:
+            break
+    rewound = manifest.read("core/Python", cursor=3, limit=7).items
+
+    assert [item.blob_id for item in stepped] == [item.blob_id for item in bulk]
+    assert [item.blob_id for item in rewound] == [item.blob_id for item in bulk[3:10]]
+
+
+def test_legacy_roster_identity_is_adopted_in_place(tmp_path: Path):
+    from sngram_train.manifest import adopt_manifest
+
+    path = tmp_path / "manifest.sqlite3"
+    with ManifestBuilder(path, revision="rev", roster_hash="legacy") as builder:
+        builder.add(Candidate("core/Python", "one", "utf-8", 100, 1))
+
+    assert adopt_manifest(path, "modern", legacy_hash="wrong", built_target=10) is False
+    with pytest.raises(Exception):
+        open_manifest(path, roster_hash="modern")
+
+    assert adopt_manifest(path, "modern", legacy_hash="legacy", built_target=10) is True
+    manifest = open_manifest(path, roster_hash="modern")
+    assert manifest.roster_hash == "modern"
+    assert manifest.capacity("core/Python") == 100

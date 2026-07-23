@@ -24,6 +24,9 @@ _TRANSIENT_NAMES = {
     "HfHubHTTPError",
     "RemoteDisconnected",
     "SSLError",
+    "MaxRetryError",
+    "NewConnectionError",
+    "NameResolutionError",
 }
 
 _TRANSIENT_S3_CODES = {

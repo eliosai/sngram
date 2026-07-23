@@ -5,18 +5,21 @@ from __future__ import annotations
 import gzip
 import os
 import threading
+import zlib
 from pathlib import Path
 from urllib.parse import urlparse
 
 from .config import STACK_V2_CONTENT_PREFIX
+
+RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
 
 
 class SwhContent:
     def __init__(self, prefix: str = STACK_V2_CONTENT_PREFIX, workers: int = 32) -> None:
         self.prefix = prefix.rstrip("/")
         self.workers = workers
-        self._client_value = None
-        self._client_lock = threading.Lock()
+        self._transport_value = None
+        self._transport_lock = threading.Lock()
 
     def read(self, blob_id: str, max_bytes: int) -> bytes:
         try:
@@ -31,51 +34,99 @@ class SwhContent:
                 return _bounded_read(handle, max_bytes)
         if not url.startswith("s3://"):
             raise ValueError(f"unsupported content prefix: {self.prefix}")
-        return self._read_s3(url, max_bytes)
-
-    def _read_s3(self, url: str, max_bytes: int) -> bytes:
         parsed = urlparse(url)
+        raw = self._transport().fetch(parsed.netloc, parsed.path.lstrip("/"))
+        return _gunzip_bounded(raw, max_bytes)
+
+    def _transport(self):
+        transport = self._transport_value
+        if transport is not None:
+            return transport
+        with self._transport_lock:
+            if self._transport_value is None:
+                self._transport_value = self._new_transport()
+            return self._transport_value
+
+    def _new_transport(self):
+        if os.environ.get("SNG_SWH_ANONYMOUS", "1") != "0":
+            return _AnonymousTransport(self.workers)
+        return _SignedTransport(self.workers)
+
+
+class _AnonymousTransport:
+    """Unsigned virtual-hosted S3 GETs over one pooled HTTPS client."""
+
+    def __init__(self, workers: int) -> None:
+        import urllib3
+
+        self._region = _region()
+        self._pool = urllib3.PoolManager(
+            maxsize=max(workers, 8),
+            retries=urllib3.util.Retry(
+                total=8, backoff_factor=0.5, status_forcelist=RETRYABLE_STATUSES
+            ),
+            timeout=urllib3.Timeout(connect=10.0, read=30.0),
+        )
+
+    def fetch(self, bucket: str, key: str) -> bytes:
+        host = f"{bucket}.s3.{self._region}.amazonaws.com" if self._region else f"{bucket}.s3.amazonaws.com"
+        response = self._pool.request("GET", f"https://{host}/{key}")
+        if response.status == 404:
+            raise FileNotFoundError(f"s3://{bucket}/{key}")
+        if response.status != 200:
+            raise ValueError(f"content GET returned status {response.status}")
+        return response.data
+
+
+class _SignedTransport:
+    """Credentialed boto3 reads for private content mirrors."""
+
+    def __init__(self, workers: int) -> None:
+        import boto3
+        from botocore.config import Config
+
+        config = Config(
+            max_pool_connections=max(workers, 8),
+            retries={"max_attempts": 8, "mode": "adaptive"},
+        )
+        self._client = boto3.client(
+            "s3", region_name=_region() or "us-east-1", config=config
+        )
+
+    def fetch(self, bucket: str, key: str) -> bytes:
         try:
-            response = self._client().get_object(
-                Bucket=parsed.netloc, Key=parsed.path.lstrip("/")
-            )
+            body = self._client.get_object(Bucket=bucket, Key=key)["Body"]
         except Exception as error:
             if _is_missing(error):
-                raise FileNotFoundError(url) from error
+                raise FileNotFoundError(f"s3://{bucket}/{key}") from error
             raise
-        body = response["Body"]
         try:
-            with gzip.GzipFile(fileobj=body) as handle:
-                return _bounded_read(handle, max_bytes)
+            return body.read()
         finally:
             body.close()
 
-    def _client(self):
-        with self._client_lock:
-            if self._client_value is None:
-                self._client_value = self._new_client()
-            return self._client_value
 
-    def _new_client(self):
-        import boto3
-        from botocore import UNSIGNED
-        from botocore.config import Config
-
-        options = {
-            "max_pool_connections": max(self.workers, 8),
-            "retries": {"max_attempts": 8, "mode": "adaptive"},
-        }
-        if os.environ.get("SNG_SWH_ANONYMOUS", "1") != "0":
-            options["signature_version"] = UNSIGNED
-        config = Config(**options)
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        return boto3.client("s3", region_name=region or "us-east-1", config=config)
+def _region() -> str | None:
+    return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
 
 
 def _bounded_read(handle, max_bytes: int) -> bytes:
     data = handle.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise ValueError("content exceeds its declared metadata length")
+    return data
+
+
+def _gunzip_bounded(raw: bytes, max_bytes: int) -> bytes:
+    stream = zlib.decompressobj(wbits=31)
+    try:
+        data = stream.decompress(raw, max_bytes + 1)
+    except zlib.error as error:
+        raise ValueError("content is not a complete gzip stream") from error
+    if len(data) > max_bytes:
+        raise ValueError("content exceeds its declared metadata length")
+    if not stream.eof:
+        raise ValueError("content is not a complete gzip stream")
     return data
 
 

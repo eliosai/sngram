@@ -24,7 +24,7 @@ class RunView:
         self.lock = threading.Lock()
         self.trainer: Trainer | None = None
         self.total_configs = 0
-        self.done_configs = 0
+        self.done: set[str] = set()
         self.accepted_bytes = 0
         self.started_at = time.monotonic()
         self.active: dict[str, tuple[int, int, float]] = {}
@@ -47,7 +47,7 @@ class RunView:
     def finished(self, config: str, accepted: int, effective: int, seconds: float) -> None:
         with self.lock:
             self.active.pop(config, None)
-            self.done_configs += 1
+            self.done.add(config)
             self.accepted_bytes += effective
             self.recent.append(
                 f"{config}: {accepted} objects, {fmt_bytes(effective)}, {seconds:.1f}s"
@@ -67,7 +67,7 @@ class RunView:
         elapsed = time.monotonic() - self.started_at
         header = Text()
         header.append(
-            f"manifest {self.done_configs}/{self.total_configs} configs",
+            f"manifest {len(self.done)}/{self.total_configs} configs",
             style="bold green",
         )
         header.append(f"   {fmt_bytes(self.accepted_bytes)} inventoried", style="cyan")
@@ -104,12 +104,12 @@ def render(trainer: Trainer):
 def _header(trainer: Trainer, threshold: int) -> Text:
     header = Text()
     header.append(
-        f"{fmt_bytes(trainer.counter.bytes_processed)} effective", style="bold green"
+        f"{fmt_bytes(trainer.committed_bytes)} effective", style="bold green"
     )
     header.append(f" / {fmt_bytes(trainer.effective_target)}")
     header.append(f"   {fmt_bytes(trainer.fetched_bytes())} fetched", style="cyan")
     header.append(f"   now {fmt_rate(trainer.rate_now())}", style="cyan")
-    header.append(f"   avg {fmt_rate(trainer.rate_avg())}")
+    header.append(f"   avg {fmt_rate(trainer.meter.rate_avg(trainer.committed_bytes))}")
     header.append(f"   mint {mint_label(threshold)}{_eta(trainer)}", style="magenta")
     header.append(f"   rss {fmt_bytes(_rss_bytes())}", style="dim")
     if trainer.skips:
@@ -122,9 +122,10 @@ def _header(trainer: Trainer, threshold: int) -> Text:
 
 
 def _eta(trainer: Trainer) -> str:
-    eta = trainer.eta_next_mint()
-    if eta is None:
+    rate = trainer.rate_now()
+    if trainer.current_threshold is None or rate <= 0:
         return ""
+    eta = max(trainer.current_threshold - trainer.committed_bytes, 0) / rate
     return f" in {int(eta // 3600)}:{int(eta % 3600 // 60):02d}:{int(eta % 60):02d}"
 
 

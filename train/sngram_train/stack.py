@@ -26,7 +26,7 @@ def build_stack_manifest(
 ) -> str:
     """Build a sampled manifest covering margined adaptive format goals."""
 
-    roster_hash = catalog.roster_hash(rows.revision, target)
+    roster_hash = catalog.roster_hash(rows.revision)
     with ManifestBuilder(path, rows.revision, roster_hash) as builder:
         for item in catalog.formats:
             builder.register(item.id)
@@ -35,6 +35,7 @@ def build_stack_manifest(
         else:
             if area_weights is None:
                 raise ValueError("area weights are required for target-bounded inventory")
+            builder.set_built_target(target)
             _adaptive_inventory(
                 builder, catalog, rows, target, area_weights, report, workers
             )

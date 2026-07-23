@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from math import ceil
@@ -11,6 +12,14 @@ from .sampling import SAMPLE_FLOOR
 
 MANIFEST_BYTES_PER_CANDIDATE = 64
 MANIFEST_RESERVE_BYTES = 5 * 10**9
+
+
+def default_workers() -> int:
+    return min(max((os.cpu_count() or 4) * 16, 64), 256)
+
+
+def scan_workers(workers: int) -> int:
+    return min(workers, 12)
 
 
 @dataclass(frozen=True)

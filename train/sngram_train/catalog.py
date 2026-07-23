@@ -7,11 +7,12 @@ import json
 from dataclasses import dataclass
 
 from .config import (
+    AREA_FORMAT_SHARE,
     CONFIG_LANGUAGES,
     CORE_LANGUAGES,
     DATA_LANGUAGES,
     DOC_LANGUAGES,
-    FORMAT_MAX_SHARE,
+    EXCLUDED_CONFIGS,
     STACK_V2_BUCKET_CAPS,
     WEB_LANGUAGES,
     stack_config_name,
@@ -49,16 +50,24 @@ class Catalog:
                 return item.id
         raise KeyError(config)
 
-    def roster_hash(self, revision: str, target: int | None = None) -> str:
+    def roster_hash(self, revision: str) -> str:
         payload = [(item.id, item.config, item.cap_bytes) for item in self.formats]
-        raw = json.dumps([revision, target, payload], separators=(",", ":")).encode()
+        raw = json.dumps([revision, payload], separators=(",", ":")).encode()
         return hashlib.sha256(raw).hexdigest()
+
+
+def legacy_roster_hash(catalog: Catalog, revision: str, target: int | None) -> str:
+    """Roster identity from before targets left the manifest key."""
+
+    payload = [(item.id, item.config, item.cap_bytes) for item in catalog.formats]
+    raw = json.dumps([revision, target, payload], separators=(",", ":")).encode()
+    return hashlib.sha256(raw).hexdigest()
 
 
 def build_catalog(configs: list[str]) -> Catalog:
     """Assign every physical Stack config to one or more logical formats."""
 
-    available = sorted(set(configs) - {"default"})
+    available = sorted(set(configs) - {"default"} - EXCLUDED_CONFIGS)
     formats: list[FormatSpec] = []
     for config in available:
         if config == "Text":
@@ -76,7 +85,7 @@ def _text_formats() -> list[FormatSpec]:
 def _format(area: str, config: str) -> FormatSpec:
     area_cap = STACK_V2_BUCKET_CAPS[area]
     return FormatSpec(
-        f"{area}/{config}", area, config, int(area_cap * FORMAT_MAX_SHARE)
+        f"{area}/{config}", area, config, int(area_cap * AREA_FORMAT_SHARE[area])
     )
 
 

@@ -183,6 +183,7 @@ def test_stack_rows_use_bounded_readahead_for_remote_parquet(tmp_path: Path):
             "language": ["Rust"],
             "path": ["/src/main.rs"],
             "extension": ["rs"],
+            "license_type": ["permissive"],
             "is_vendor": [False],
             "is_generated": [False],
             "length_bytes": [20_000],
@@ -363,3 +364,100 @@ def test_extension_grows_one_starved_format_from_its_cursor(tmp_path: Path):
     assert after.capacity("a") >= before.capacity("a") + 100_000
     assert after.capacity("b") == before.capacity("b")
     assert after.candidates("a") > before.candidates("a")
+
+
+def test_excluded_configs_are_dropped_from_the_catalog():
+    catalog = build_catalog(["Python", "Jupyter_Notebook", "Markdown"])
+
+    assert not any("Jupyter" in item.id for item in catalog.formats)
+    assert "Jupyter_Notebook" not in catalog.configs
+
+
+def test_per_config_file_cap_rejects_bloated_config_files():
+    big = row("big", path="/a.json", extension="json", length_bytes=200 * 1024)
+
+    assert skip_reason(big, "config-build-infra", 128 * 1024) == "oversize"
+    assert skip_reason(big, "config-build-infra", None) is None
+
+
+def test_excluded_extension_drops_ocr_layout_dumps():
+    scan = row("ocr", path="/page.hocr", extension="hocr", language="XML")
+    kept = row("ok", path="/data.xml", extension="xml", language="XML")
+
+    assert skip_reason(scan, "config-build-infra") == "excluded_extension"
+    assert skip_reason(kept, "config-build-infra") is None
+
+
+def test_manifest_captures_extension_and_license(tmp_path: Path):
+    import sqlite3
+
+    catalog = build_catalog(["Python"])
+    py = dict(
+        row("p", path="/m.py", extension="py", language="Python"),
+        license_type="mit",
+    )
+    rows = FakeRows({"Python": [py]})
+    path = tmp_path / "m.sqlite3"
+
+    build_stack_manifest(path, catalog, rows, None)
+
+    with sqlite3.connect(path) as connection:
+        extension, license_type = connection.execute(
+            "SELECT extension, license FROM candidates LIMIT 1"
+        ).fetchone()
+    assert extension == "py"
+    assert license_type == "mit"
+
+
+def test_training_read_path_ignores_the_new_metadata_columns(tmp_path: Path):
+    catalog = build_catalog(["Python"])
+    py = dict(row("p", path="/m.py", extension="py", language="Python"), license_type="mit")
+    path = tmp_path / "m.sqlite3"
+
+    roster = build_stack_manifest(path, catalog, FakeRows({"Python": [py]}), None)
+    manifest = open_manifest(path, roster)
+    item = manifest.read("core-programming/Python", 0, 10).items[0]
+
+    assert item.blob_id == "p"
+    assert item.length == 20_000
+
+
+def test_adaptive_inventory_tracks_the_target_area_weights(tmp_path: Path):
+    from sngram_train.config import STACK_V2_BUCKET_CAPS
+
+    def many(prefix, ext, lang):
+        return [
+            row(f"{prefix}{i}", path=f"/f.{ext}", extension=ext, language=lang)
+            for i in range(4000)
+        ]
+
+    configs = {
+        "Python": many("py", "py", "Python"),
+        "Markdown": many("md", "md", "Markdown"),
+        "JSON": many("js", "json", "JSON"),
+        "HTML": many("ht", "html", "HTML"),
+        "SQL": many("sq", "sql", "SQL"),
+        "1C_Enterprise": many("tc", "1c", "1C Enterprise"),
+        "Jupyter_Notebook": many("nb", "ipynb", "Jupyter Notebook"),
+    }
+    catalog = build_catalog(list(configs))
+    path = tmp_path / "m.sqlite3"
+    roster = build_stack_manifest(
+        path, catalog, FakeRows(configs), None,
+        target=20_000_000, area_weights=STACK_V2_BUCKET_CAPS, workers=1,
+    )
+    manifest = open_manifest(path, roster)
+
+    areas: dict[str, int] = {}
+    for fmt in catalog.formats:
+        areas[fmt.area] = areas.get(fmt.area, 0) + manifest.capacity(fmt.id)
+    total = sum(areas.values())
+    share = {a: v / total for a, v in areas.items()}
+
+    assert not any("Jupyter" in fmt.id for fmt in catalog.formats)
+    assert abs(share["core-programming"] - 0.380) < 0.02
+    assert abs(share["config-build-infra"] - 0.197) < 0.02
+    assert abs(share["docs-prose-markup"] - 0.140) < 0.02
+    assert abs(share["web-ui-templates"] - 0.137) < 0.02
+    assert abs(share["data-query-schema"] - 0.116) < 0.02
+    assert abs(share["long-tail"] - 0.030) < 0.02

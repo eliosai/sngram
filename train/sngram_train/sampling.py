@@ -3,15 +3,36 @@
 from __future__ import annotations
 
 import hashlib
-import sys
-from array import array
-from collections import defaultdict
 from collections.abc import Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
 import sngram
 
 SAMPLE_FLOOR = 16 * 1024
+
+
+class CountSink:
+    """Asynchronous slice counting into one shared counter."""
+
+    def __init__(self, counter: sngram.BigramCounter) -> None:
+        self.counter = counter
+        self.pool: ThreadPoolExecutor | None = None
+        self._pending: list[Future] = []
+
+    def submit(self, slices: tuple[WeightedSlice, ...]) -> None:
+        if self.pool is None:
+            self._count(slices)
+            return
+        self._pending.append(self.pool.submit(self._count, slices))
+
+    def _count(self, slices: tuple[WeightedSlice, ...]) -> None:
+        self.counter.merge(count_slices(slices).counter)
+
+    def drain(self) -> None:
+        pending, self._pending = self._pending, []
+        for future in pending:
+            future.result()
 
 
 @dataclass(frozen=True)
@@ -57,37 +78,37 @@ def count_weighted(rows: Iterable[tuple[bytes, int]], limit: int) -> CountedBatc
 
     if limit < 0:
         raise ValueError("limit must be non-negative")
-    groups: dict[int, list[bytes]] = defaultdict(list)
+    documents: list[bytes] = []
     effective = 0
-    documents = 0
+    counted = 0
     for data, weight in rows:
         taken = min(len(data) * weight, limit - effective)
         if taken <= 0:
             break
-        _group_segments(groups, data, weight, taken)
+        _segment_rows(documents, data, weight, taken)
         effective += taken
-        documents += 1
-    counter = _count_groups(groups)
-    counter.add_files(documents)
-    return CountedBatch(counter, effective, documents)
+        counted += 1
+    counter = _count_documents(documents)
+    counter.add_files(counted)
+    return CountedBatch(counter, effective, counted)
 
 
 def count_slices(rows: Iterable[WeightedSlice]) -> CountedBatch:
     """Count slices of conceptual inverse-weighted documents."""
 
-    groups: dict[int, list[bytes]] = defaultdict(list)
+    documents: list[bytes] = []
     effective = 0
-    documents = 0
+    counted = 0
     for row in rows:
-        _group_slice(groups, row)
+        _slice_rows(documents, row)
         effective += row.length
-        documents += 1
-    counter = _count_groups(groups)
-    counter.add_files(documents)
-    return CountedBatch(counter, effective, documents)
+        counted += 1
+    counter = _count_documents(documents)
+    counter.add_files(counted)
+    return CountedBatch(counter, effective, counted)
 
 
-def _group_slice(groups: dict[int, list[bytes]], row: WeightedSlice) -> None:
+def _slice_rows(documents: list[bytes], row: WeightedSlice) -> None:
     total = len(row.data) * row.weight
     if not row.data or row.offset < 0 or row.length <= 0 or row.offset + row.length > total:
         raise ValueError("weighted slice is outside its document")
@@ -95,56 +116,32 @@ def _group_slice(groups: dict[int, list[bytes]], row: WeightedSlice) -> None:
     remaining = row.length
     if position:
         taken = min(len(row.data) - position, remaining)
-        groups[1].append(row.data[position : position + taken])
+        documents.append(row.data[position : position + taken])
         remaining -= taken
     copies, prefix = divmod(remaining, len(row.data))
-    if copies:
-        groups[copies].append(row.data)
+    documents.extend([row.data] * copies)
     if prefix:
-        groups[1].append(row.data[:prefix])
+        documents.append(row.data[:prefix])
 
 
-def _group_segments(
-    groups: dict[int, list[bytes]], data: bytes, weight: int, taken: int
+def _segment_rows(
+    documents: list[bytes], data: bytes, weight: int, taken: int
 ) -> None:
     if not data or weight <= 0:
         raise ValueError("weighted documents must be non-empty with a positive weight")
     copies, prefix = divmod(taken, len(data))
-    if copies:
-        groups[copies].append(data)
+    documents.extend([data] * copies)
     if prefix:
-        groups[1].append(data[:prefix])
+        documents.append(data[:prefix])
 
 
-def _count_groups(groups: dict[int, list[bytes]]) -> sngram.BigramCounter:
+def _count_documents(documents: list[bytes]) -> sngram.BigramCounter:
     import pyarrow as pa
 
-    total = sngram.BigramCounter()
-    for factor, documents in groups.items():
-        counter = sngram.BigramCounter()
+    counter = sngram.BigramCounter()
+    if documents:
         batch = pa.record_batch(
             {"content": pa.array(documents, type=pa.large_binary())}
         )
         counter.count_arrow(batch)
-        total.merge(_scaled(counter, factor))
-    return total
-
-
-def _scaled(counter: sngram.BigramCounter, factor: int) -> sngram.BigramCounter:
-    if factor == 1:
-        return counter
-    counts = array("Q")
-    counts.frombytes(counter.snapshot())
-    if sys.byteorder != "little":
-        counts.byteswap()
-    counts = array("Q", (count * factor for count in counts))
-    if sys.byteorder != "little":
-        counts.byteswap()
-    scaled = sngram.BigramCounter()
-    scaled.restore(
-        counts.tobytes(),
-        counter.pairs_processed * factor,
-        counter.bytes_processed * factor,
-        0,
-    )
-    return scaled
+    return counter

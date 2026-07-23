@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -10,12 +9,14 @@ from typing import Optional
 import typer
 
 from .config import CANONICAL_TARGET_BYTES, hf_token
+from .publishing import hub_timeouts, manifest_app, open_trained_manifest
 
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
     help="Sparse n-gram weight tables: train, inspect, validate.",
 )
+app.add_typer(manifest_app, name="manifest")
 
 
 @app.command()
@@ -29,11 +30,17 @@ def train(
     resume: bool = typer.Option(True, help="Resume the manifest and checkpoint."),
     dashboard: bool = typer.Option(True, help="Show the live terminal dashboard."),
 ) -> None:
-    """Build a balanced Stack manifest and mint durable weight tables."""
+    """Mint durable weight tables from the published corpus manifest."""
+
+    import sys
 
     from .units import parse_size
 
-    token = _require_token()
+    from .resources import default_workers
+
+    # short GIL slices keep the coordinator responsive beside many fetch threads
+    sys.setswitchinterval(0.002)
+    hub_timeouts()
     view = _run_view() if dashboard else None
     build = lambda resume_now: _production_trainer(
         mint_dir=mint_dir,
@@ -42,7 +49,7 @@ def train(
         workers=workers or default_workers(),
         checkpoint_interval=checkpoint_every,
         resume=resume_now,
-        token=token,
+        token=hf_token(),
         view=view,
     )
     from .errors import ConfigurationError, CorpusExhausted
@@ -53,24 +60,6 @@ def train(
         typer.echo(f"error: {error}")
         raise typer.Exit(2) from error
     typer.echo(f"done: {trainer.describe_progress()}")
-
-
-def _require_token() -> str:
-    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
-    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
-    token = hf_token()
-    if token is None:
-        typer.echo("error: HF_TOKEN is required for the production corpus")
-        raise typer.Exit(2)
-    return token
-
-
-def default_workers() -> int:
-    return min(max((os.cpu_count() or 4) * 4, 16), 64)
-
-
-def _scan_workers(workers: int) -> int:
-    return min(workers, 12)
 
 
 def _run_view():
@@ -96,156 +85,26 @@ def _production_trainer(
     workers: int,
     checkpoint_interval: float,
     resume: bool,
-    token: str,
+    token: str | None,
     view=None,
 ):
-    from .catalog import build_catalog
+    from .assets import assets_repo, fetch_dataset
     from .config import STACK_V2_BUCKET_CAPS
-    from .pipeline import TrainerConfig
-    from .stackrows import HuggingFaceRows
+    from .content import SwhContent
+    from .pipeline import Trainer, TrainerConfig
 
-    rows = HuggingFaceRows(token)
-    catalog = build_catalog(rows.configs())
-    roster_hash = catalog.roster_hash(rows.revision, target)
     path = mint_dir / ".manifest.sqlite3"
-    _check_disk_budget(path, catalog, target)
-    manifest = _prepare_manifest(
-        path,
-        catalog,
-        rows,
-        roster_hash,
-        target,
-        STACK_V2_BUCKET_CAPS,
-        _scan_workers(workers),
-        view,
-    )
+    if not path.exists():
+        typer.echo(f"fetching manifest dataset from {assets_repo()} (one-time import)")
+        fetch_dataset(path, token)
+    catalog, manifest = open_trained_manifest(path)
+    _warn_clamped(manifest, target)
     config = TrainerConfig(
         mint_dir, target, mint_cadence, workers, checkpoint_interval, resume
     )
-    return _assemble_trainer(catalog, manifest, config, path, rows, roster_hash)
-
-
-def _assemble_trainer(catalog, manifest, config, path, rows, roster_hash):
-    from .config import STACK_V2_BUCKET_CAPS
-    from .content import SwhContent
-    from .pipeline import Trainer
-
     return Trainer(
-        catalog,
-        manifest,
-        SwhContent(workers=config.workers),
-        config,
-        STACK_V2_BUCKET_CAPS,
-        extend=_manifest_extension(path, catalog, rows, roster_hash),
+        catalog, manifest, SwhContent(workers=workers), config, STACK_V2_BUCKET_CAPS
     )
-
-
-def _check_disk_budget(path: Path, catalog, target: int) -> None:
-    from .errors import ConfigurationError
-    from .resources import manifest_disk_budget
-
-    config_counts: dict[str, int] = {}
-    for item in catalog.formats:
-        config_counts[item.config] = config_counts.get(item.config, 0) + 1
-    extra_capacity = sum(
-        item.cap_bytes for item in catalog.formats if config_counts[item.config] > 1
-    )
-    budget = manifest_disk_budget(path, target, extra_capacity)
-    if not budget.sufficient:
-        raise ConfigurationError(
-            f"insufficient disk for manifest: need {budget.required_bytes} bytes, "
-            f"have {budget.free_bytes} bytes"
-        )
-
-
-def _manifest_extension(path: Path, catalog, rows, roster_hash: str):
-    from .manifest import open_manifest
-    from .stack import extend_manifest
-
-    def extend(format_id: str, minimum: int):
-        extend_manifest(path, catalog, rows, roster_hash, format_id, minimum)
-        return open_manifest(path, roster_hash)
-
-    return extend
-
-
-class _ManifestReport:
-    """Routes scan progress to the dashboard view or plain lines."""
-
-    def __init__(self, view, events, total: int) -> None:
-        self.view = view
-        self.events = events
-        self.total = total
-        self.completed = 0
-
-    def started(self, config: str) -> None:
-        if self.view is not None:
-            self.view.started(config)
-
-    def scanned(self, config: str, rows: int, accepted_bytes: int) -> None:
-        if self.view is not None:
-            self.view.scanned(config, rows, accepted_bytes)
-
-    def finished(self, config: str, accepted: int, effective: int, seconds: float) -> None:
-        self.completed += 1
-        self.events.log(
-            "manifest_config",
-            config=config,
-            candidates=accepted,
-            effective_bytes=effective,
-            seconds=round(seconds, 3),
-        )
-        if self.view is not None:
-            self.view.finished(config, accepted, effective, seconds)
-        else:
-            typer.echo(
-                f"manifest {self.completed}/{self.total}: {config} "
-                f"({accepted} objects, {seconds:.1f}s)"
-            )
-
-
-def _prepare_manifest(
-    path, catalog, rows, roster_hash, target, area_weights, workers, view
-):
-    from .manifest import open_manifest
-
-    if path.exists():
-        return open_manifest(path, roster_hash)
-    total = len(catalog.configs)
-    if view is not None:
-        view.manifest_start(total)
-    else:
-        typer.echo(f"building sampled manifest for {total} Stack configs ({workers} readers)")
-    _build_manifest(path, catalog, rows, target, area_weights, workers, view, total)
-    manifest = open_manifest(path, roster_hash)
-    _warn_clamped(manifest, target)
-    return manifest
-
-
-def _build_manifest(path, catalog, rows, target, area_weights, workers, view, total):
-    from .events import EventLog
-    from .stack import build_stack_manifest
-
-    events = EventLog(path.parent / "train-events.jsonl")
-    events.log(
-        "manifest_start",
-        revision=rows.revision,
-        configs=total,
-        formats=len(catalog.formats),
-    )
-    try:
-        build_stack_manifest(
-            path,
-            catalog,
-            rows,
-            _ManifestReport(view, events, total),
-            target=target,
-            area_weights=area_weights,
-            workers=workers,
-        )
-        events.log("manifest_done", bytes=path.stat().st_size)
-    finally:
-        events.close()
 
 
 def _warn_clamped(manifest, target: int) -> None:

@@ -19,6 +19,8 @@ class Candidate:
     encoding: str
     length: int
     weight: int
+    extension: str = ""
+    license: str = ""
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,9 @@ class ManifestBatch:
     items: tuple[Candidate, ...]
     cursor: int
     exhausted: bool
+
+
+READ_AHEAD_ROWS = 1024
 
 
 class ManifestBuilder:
@@ -112,6 +117,8 @@ class ManifestBuilder:
                 self._encoding_key(candidate.encoding),
                 candidate.length,
                 candidate.weight,
+                candidate.extension,
+                candidate.license,
             )
         )
         if len(self._buffer) >= 8192:
@@ -150,7 +157,7 @@ class ManifestBuilder:
     def _flush(self) -> None:
         assert self._connection is not None
         self._connection.executemany(
-            "INSERT INTO candidates VALUES (?, ?, ?, ?, ?, ?)", self._buffer
+            "INSERT INTO candidates VALUES (?, ?, ?, ?, ?, ?, ?, ?)", self._buffer
         )
         self._buffer.clear()
 
@@ -158,6 +165,13 @@ class ManifestBuilder:
         assert self._connection is not None
         self._connection.execute(
             "INSERT OR REPLACE INTO metadata VALUES ('effective_target', ?)",
+            (str(value),),
+        )
+
+    def set_built_target(self, value: int) -> None:
+        assert self._connection is not None
+        self._connection.execute(
+            "INSERT OR REPLACE INTO metadata VALUES ('built_target', ?)",
             (str(value),),
         )
 
@@ -244,6 +258,9 @@ class Manifest:
         self.roster_hash = roster_hash
         self.effective_target = effective_target
         self._connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        self._connection.execute("PRAGMA mmap_size = 17179869184")
+        self._connection.execute("PRAGMA cache_size = -131072")
+        self._windows: dict[str, tuple[int, list[Candidate]]] = {}
 
     def capacity(self, format_id: str) -> int:
         return self._capacities.get(format_id, 0)
@@ -255,6 +272,22 @@ class Manifest:
         return self._exhausted.get(format_id, False)
 
     def read(self, format_id: str, cursor: int, limit: int) -> ManifestBatch:
+        items = tuple(self._window(format_id, cursor, limit))
+        next_cursor = cursor + len(items)
+        count = self._counts.get(format_id, 0)
+        return ManifestBatch(items, next_cursor, next_cursor >= count)
+
+    def _window(self, format_id: str, cursor: int, limit: int) -> list[Candidate]:
+        start, rows = self._windows.get(format_id, (0, []))
+        offset = cursor - start
+        covered = offset + limit <= len(rows) or start + len(rows) >= self._counts.get(format_id, 0)
+        if 0 <= offset <= len(rows) and covered:
+            return rows[offset : offset + limit]
+        rows = self._query(format_id, cursor, max(limit, READ_AHEAD_ROWS))
+        self._windows[format_id] = (cursor, rows)
+        return rows[:limit]
+
+    def _query(self, format_id: str, cursor: int, limit: int) -> list[Candidate]:
         rows = self._connection.execute(
             "SELECT c.blob_id, e.name, c.length, c.weight "
             "FROM candidates c JOIN encodings e ON e.key = c.encoding_key "
@@ -262,12 +295,7 @@ class Manifest:
             "ORDER BY c.sequence LIMIT ?",
             (self._keys[format_id], cursor, limit),
         ).fetchall()
-        items = tuple(
-            Candidate(format_id, _unpack_blob_id(row[0]), *row[1:]) for row in rows
-        )
-        next_cursor = cursor + len(items)
-        count = self._counts.get(format_id, 0)
-        return ManifestBatch(items, next_cursor, next_cursor >= count)
+        return [Candidate(format_id, _unpack_blob_id(row[0]), *row[1:]) for row in rows]
 
     def close(self) -> None:
         self._connection.close()
@@ -294,6 +322,34 @@ def open_manifest(path: Path, roster_hash: str) -> Manifest:
         metadata["roster_hash"],
         int(effective) if effective is not None else None,
     )
+
+
+def read_metadata(path: Path) -> dict[str, str]:
+    """Read the metadata table of a complete manifest."""
+
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        return dict(connection.execute("SELECT key, value FROM metadata"))
+
+
+def stored_format_ids(path: Path) -> list[str]:
+    """List the format ids recorded in a complete manifest."""
+
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        return [row[0] for row in connection.execute("SELECT id FROM formats ORDER BY id")]
+
+
+def adopt_manifest(path: Path, roster_hash: str, legacy_hash: str, built_target: int) -> bool:
+    """Rewrite a matching legacy roster identity in place."""
+
+    with sqlite3.connect(path) as connection:
+        stored = dict(connection.execute("SELECT key, value FROM metadata"))
+        if stored.get("roster_hash") != legacy_hash:
+            return False
+        connection.executemany(
+            "INSERT OR REPLACE INTO metadata VALUES (?, ?)",
+            (("roster_hash", roster_hash), ("built_target", str(built_target))),
+        )
+    return True
 
 
 def _pack_blob_id(blob_id: str) -> bytes:
@@ -340,6 +396,8 @@ CREATE TABLE candidates (
     encoding_key INTEGER NOT NULL,
     length INTEGER NOT NULL,
     weight INTEGER NOT NULL,
+    extension TEXT NOT NULL,
+    license TEXT NOT NULL,
     PRIMARY KEY (format_key, sequence)
 ) WITHOUT ROWID;
 """

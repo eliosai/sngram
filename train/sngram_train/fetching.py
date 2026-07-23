@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Sequence
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from queue import SimpleQueue
 from typing import Protocol
 
 from .manifest import Candidate
@@ -29,12 +31,19 @@ def read_candidate(content: ContentReader, candidate: Candidate) -> Fetched:
 
     try:
         raw = content.read(candidate.blob_id, candidate.length)
-        data = raw.decode(candidate.encoding).encode("utf-8")
+        data = _utf8(raw, candidate.encoding)
         if not data:
             raise ValueError("decoded content is empty")
         return Fetched(candidate, data, len(raw))
     except (FileNotFoundError, LookupError, UnicodeError, ValueError) as error:
         return Fetched(candidate, None, 0, str(error)[:300])
+
+
+def _utf8(raw: bytes, encoding: str) -> bytes:
+    text = raw.decode(encoding)
+    if encoding.lower() in ("utf-8", "utf8", "ascii", "us-ascii"):
+        return raw
+    return text.encode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -120,6 +129,9 @@ class FetchPool:
         self._max_inflight = max_inflight
         self._batches: dict[str, list[Future]] = {}
         self._carry: dict[str, list[Fetched]] = {}
+        self._lock = threading.Lock()
+        self._left: dict[str, int] = {}
+        self._complete: SimpleQueue[str] = SimpleQueue()
 
     def inflight(self) -> int:
         return sum(len(futures) for futures in self._batches.values())
@@ -137,26 +149,31 @@ class FetchPool:
         return self._carry.get(format_id, [])
 
     def submit(self, format_id: str, items: Sequence[Candidate]) -> None:
-        self._batches[format_id] = [
-            self._pool.submit(self._reader, item) for item in items
-        ]
+        futures = [self._pool.submit(self._reader, item) for item in items]
+        self._batches[format_id] = futures
+        if not futures:
+            self._complete.put(format_id)
+            return
+        with self._lock:
+            self._left[format_id] = len(futures)
+        for future in futures:
+            future.add_done_callback(lambda _f, key=format_id: self._one_done(key))
+
+    def _one_done(self, format_id: str) -> None:
+        with self._lock:
+            left = self._left.get(format_id, 0) - 1
+            if left > 0:
+                self._left[format_id] = left
+                return
+            self._left.pop(format_id, None)
+        self._complete.put(format_id)
 
     def wait_complete(self) -> str | None:
         """Block until some format's whole batch is fetched."""
 
         if not self._batches:
             return None
-        while True:
-            for format_id in sorted(self._batches):
-                if all(future.done() for future in self._batches[format_id]):
-                    return format_id
-            pending = [
-                future
-                for futures in self._batches.values()
-                for future in futures
-                if not future.done()
-            ]
-            wait(pending, return_when=FIRST_COMPLETED)
+        return self._complete.get()
 
     def collect(self, format_id: str) -> list[Fetched]:
         futures = self._batches.pop(format_id)

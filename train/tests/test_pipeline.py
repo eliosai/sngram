@@ -36,7 +36,7 @@ def setup_run(tmp_path: Path, lengths: dict[str, list[int]], target: int):
         for format_id in sorted(lengths)
     )
     catalog = Catalog(formats, tuple(sorted(lengths)))
-    roster_hash = catalog.roster_hash("revision", target)
+    roster_hash = catalog.roster_hash("revision")
     manifest_path = tmp_path / "manifest.sqlite3"
     content = {}
     with ManifestBuilder(manifest_path, "revision", roster_hash) as builder:

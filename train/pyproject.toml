@@ -18,6 +18,7 @@ dependencies = [
     "pyarrow>=17",
     "rich>=13",
     "typer>=0.15",
+    "urllib3>=2",
 ]
 
 [project.scripts]

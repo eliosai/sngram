@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Protocol
 
 from .catalog import Catalog
-from .config import STACK_V2_DOC_MAX_BYTES, STACK_V2_MAX_BYTES
+from .config import (
+    CONFIG_FILE_CAPS,
+    EXCLUDED_EXTENSIONS,
+    STACK_V2_DOC_MAX_BYTES,
+    STACK_V2_MAX_BYTES,
+)
 from .manifest import Candidate, ManifestBuilder
 from .sampling import sample_weight
 
@@ -85,6 +90,8 @@ class _ScanSpool:
                 candidate.encoding,
                 candidate.length,
                 candidate.weight,
+                candidate.extension,
+                candidate.license,
             )
         )
         self._sequence += 1
@@ -112,7 +119,7 @@ class _ScanSpool:
 
     def _flush(self) -> None:
         self._connection.executemany(
-            "INSERT INTO candidates VALUES (?, ?, ?, ?, ?, ?)", self._buffer
+            "INSERT INTO candidates VALUES (?, ?, ?, ?, ?, ?, ?, ?)", self._buffer
         )
         self._buffer.clear()
 
@@ -207,7 +214,7 @@ def _merge_scan(builder, result, report) -> None:
     try:
         with sqlite3.connect(result.path) as connection:
             rows = connection.execute(
-                "SELECT format_id, blob_id, encoding, length, weight "
+                "SELECT format_id, blob_id, encoding, length, weight, extension, license "
                 "FROM candidates ORDER BY sequence"
             )
             for row in rows:
@@ -290,7 +297,7 @@ def _accept_row(
 ) -> int:
     format_id = catalog.route(config, row)
     spec = catalog.format(format_id)
-    if skip_reason(row, spec.area) is not None:
+    if skip_reason(row, spec.area, CONFIG_FILE_CAPS.get(spec.config)) is not None:
         return 0
     candidate = _candidate(format_id, row)
     if candidate is None:
@@ -318,16 +325,22 @@ def _candidate(format_id: str, row: dict[str, object]) -> Candidate | None:
         str(row["src_encoding"]),
         length,
         weight,
+        str(row.get("extension") or ""),
+        str(row.get("license_type") or ""),
     )
 
 
-def skip_reason(row: dict[str, object], area: str) -> str | None:
+def skip_reason(
+    row: dict[str, object], area: str, file_cap: int | None = None
+) -> str | None:
     """Validate one metadata row without imposing a minimum file size."""
 
     if row.get("is_vendor") is True:
         return "vendor"
     if row.get("is_generated") is True:
         return "generated"
+    if str(row.get("extension") or "").lower().lstrip(".") in EXCLUDED_EXTENSIONS:
+        return "excluded_extension"
     for field in ("blob_id", "content_id", "src_encoding", "language"):
         if not row.get(field):
             return f"missing_{field}"
@@ -338,6 +351,8 @@ def skip_reason(row: dict[str, object], area: str) -> str | None:
     if length <= 0:
         return "empty"
     limit = STACK_V2_DOC_MAX_BYTES if area == "docs-prose-markup" else STACK_V2_MAX_BYTES
+    if file_cap is not None:
+        limit = min(limit, file_cap)
     return "oversize" if length > limit else None
 
 
@@ -348,6 +363,8 @@ CREATE TABLE candidates (
     blob_id TEXT NOT NULL,
     encoding TEXT NOT NULL,
     length INTEGER NOT NULL,
-    weight INTEGER NOT NULL
+    weight INTEGER NOT NULL,
+    extension TEXT NOT NULL,
+    license TEXT NOT NULL
 )
 """

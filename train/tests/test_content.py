@@ -26,3 +26,20 @@ def test_content_reader_rejects_decompression_past_the_declared_length(tmp_path:
         assert "declared" in str(error)
     else:
         raise AssertionError("oversized decompressed content should be rejected")
+
+
+def test_bounded_gunzip_rejects_oversize_and_truncated_streams():
+    import gzip
+
+    import pytest
+
+    from sngram_train.content import _gunzip_bounded
+
+    payload = gzip.compress(b"x" * 100)
+    assert _gunzip_bounded(payload, 100) == b"x" * 100
+    with pytest.raises(ValueError, match="declared metadata length"):
+        _gunzip_bounded(payload, 99)
+    with pytest.raises(ValueError, match="complete gzip stream"):
+        _gunzip_bounded(payload[:-5], 100)
+    with pytest.raises(ValueError, match="complete gzip stream"):
+        _gunzip_bounded(b"not gzip at all", 100)

@@ -14,7 +14,7 @@ def build_trainer(tmp_path: Path, lengths, target, content, cadence=None, worker
         FormatSpec(name, "code", name, target) for name in sorted(lengths)
     )
     catalog = Catalog(formats, tuple(sorted(lengths)))
-    roster_hash = catalog.roster_hash("revision", target)
+    roster_hash = catalog.roster_hash("revision")
     path = tmp_path / "manifest.sqlite3"
     with ManifestBuilder(path, "revision", roster_hash) as builder:
         for spec in formats:
@@ -78,6 +78,22 @@ def test_uniform_latency_overlaps_fetches_across_formats(tmp_path: Path):
     ideal = 8 * 25 * 0.02 / 16
     assert trainer.counter.bytes_processed == total
     assert wall < ideal * 2.5 + 0.3
+
+
+def test_many_formats_do_not_throttle_the_planner(tmp_path: Path):
+    doc = len(LINE) * 1000
+    lengths = {f"f{i:03d}": [doc] * 24 for i in range(330)}
+    total = doc * 24 * 330 // 3
+    content = LatencyContent({})
+    trainer = build_trainer(tmp_path, lengths, total, content, workers=64)
+
+    started = time.monotonic()
+    trainer.run()
+    wall = time.monotonic() - started
+
+    objects = sum(item.objects for item in trainer.state.formats.values())
+    assert trainer.counter.bytes_processed == total
+    assert objects / wall > 400
 
 
 def test_partial_documents_carry_across_thresholds_without_refetch(tmp_path: Path):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from collections import defaultdict
 from collections.abc import Mapping
@@ -16,8 +15,14 @@ import sngram
 from . import goals as planning
 from . import metrics
 from .catalog import Catalog
-from .checkpoint import FormatProgress, RunState, load, save
-from .distribution import apportion, mint_schedule, schedule_targets
+from .checkpoint import FormatProgress, RunState, load, save, write_table
+from .distribution import (
+    apportion,
+    mint_schedule,
+    minted_baseline,
+    remaining_thresholds,
+    schedule_targets,
+)
 from .events import EventLog
 from .fetching import (
     ContentReader,
@@ -28,8 +33,10 @@ from .fetching import (
     read_candidate,
 )
 from .manifest import Candidate, Manifest
-from .sampling import count_slices
+from .sampling import CountSink
 from .units import fmt_bytes, mint_label
+
+FETCH_BATCH_ITEMS = 64
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,7 @@ class Trainer:
         self.roster_hash = manifest.roster_hash
         self._checkpoint_path = config.mint_dir / ".checkpoint.sqlite3"
         self.counter, self.state = self._load_state()
+        self.committed_bytes = self.counter.bytes_processed
         self.events = EventLog(config.mint_dir / "train-events.jsonl")
         self.effective_target = min(
             config.target, manifest.effective_target or config.target
@@ -82,22 +90,15 @@ class Trainer:
         self.clamped = False
         self.skips = 0
         self._starved: set[str] = set()
+        self._goal_cache: dict[str, int] | None = None
+        self._sink = CountSink(self.counter)
 
     def _load_state(self) -> tuple[sngram.BigramCounter, RunState]:
+        roster, revision = self.roster_hash, self.manifest.revision
+        target, cadence = self.config.target, self.config.mint_cadence
         if not self.config.resume:
-            return sngram.BigramCounter(), RunState(
-                self.roster_hash,
-                self.manifest.revision,
-                self.config.target,
-                self.config.mint_cadence,
-            )
-        return load(
-            self._checkpoint_path,
-            self.roster_hash,
-            self.config.target,
-            self.config.mint_cadence,
-            self.manifest.revision,
-        )
+            return sngram.BigramCounter(), RunState(roster, revision, target, cadence)
+        return load(self._checkpoint_path, roster, target, cadence, revision)
 
     def run(self) -> None:
         """Fill each cumulative distribution barrier and mint its table."""
@@ -107,7 +108,11 @@ class Trainer:
         )
         complete = False
         try:
-            with ThreadPoolExecutor(max_workers=self.config.workers) as pool:
+            with (
+                ThreadPoolExecutor(max_workers=self.config.workers) as pool,
+                ThreadPoolExecutor(max_workers=2) as counters,
+            ):
+                self._sink.pool = counters
                 reader = lambda candidate: read_candidate(self.content, candidate)
                 fetch = FetchPool(pool, reader, self.config.workers * 2)
                 for threshold in self._remaining_thresholds():
@@ -135,21 +140,21 @@ class Trainer:
         )
 
     def _remaining_thresholds(self) -> list[int]:
-        done = set(self.state.mints_done)
-        return [value for value in self._schedule if mint_label(value) not in done]
-
-    def _minted_baseline(self) -> int:
-        done = set(self.state.mints_done)
-        minted = [value for value in self._schedule if mint_label(value) in done]
-        return max(minted, default=0)
+        return remaining_thresholds(self._schedule, self.state.mints_done)
 
     def _fill(self, threshold: int, fetch: FetchPool) -> bool:
         targets = dict(self._targets[threshold])
-        while self.counter.bytes_processed < sum(targets.values()):
-            goals = self._goals_for(targets)
+        total = sum(targets.values())
+        self._goal_cache = None
+        while self.committed_bytes < total:
+            goals = self._goal_cache
+            if goals is None:
+                goals = self._goals_for(targets)
             if goals is None:
                 targets = self._clamped_targets(targets)
+                total = sum(targets.values())
                 continue
+            self._goal_cache = goals
             self._pump(goals, fetch)
         return not self.clamped
 
@@ -170,6 +175,8 @@ class Trainer:
         self._after_commit()
 
     def _top_up(self, goals: dict[str, int], fetch: FetchPool) -> None:
+        if fetch.saturated():
+            return
         for format_id in self._active(goals, fetch):
             if fetch.saturated():
                 return
@@ -178,18 +185,17 @@ class Trainer:
                 fetch.submit(format_id, items)
 
     def _active(self, goals: dict[str, int], fetch: FetchPool) -> list[str]:
-        pending = [
-            key
-            for key, goal in goals.items()
-            if not fetch.has_batch(key)
-            and key not in self._starved
-            and not self.state.progress(key).exhausted
-            and self.state.progress(key).effective_bytes < goal
-        ]
-        pending.sort(
-            key=lambda key: (self.state.progress(key).effective_bytes / goals[key], key)
-        )
-        return pending
+        progress = self.state.progress
+        pending = []
+        for key, goal in goals.items():
+            if fetch.has_batch(key) or key in self._starved:
+                continue
+            item = progress(key)
+            if item.exhausted or item.effective_bytes >= goal:
+                continue
+            pending.append((item.effective_bytes / goal, key))
+        pending.sort()
+        return [key for _ratio, key in pending]
 
     def _plan_items(
         self, format_id: str, goal: int, fetch: FetchPool
@@ -212,9 +218,8 @@ class Trainer:
         return bounded_items(batch.items, remaining - estimate, offset)
 
     def _batch_limit(self, fetch: FetchPool) -> int:
-        live = sum(1 for key in self._formats if not self.state.progress(key).exhausted)
-        share = max(self.config.workers // max(live, 1), 1)
-        return max(min(share, fetch.headroom()), 1)
+        share = max(self.config.workers // 4, 1)
+        return max(min(share, FETCH_BATCH_ITEMS, fetch.headroom()), 1)
 
     def _no_more_items(self, format_id: str) -> None:
         if self.manifest.exhausted(format_id):
@@ -224,6 +229,7 @@ class Trainer:
 
     def _deplete(self, format_id: str) -> None:
         self._starved.discard(format_id)
+        self._goal_cache = None
         self._set_progress(format_id, exhausted=True)
         self.events.log(
             "format_depleted", format=format_id,
@@ -261,10 +267,10 @@ class Trainer:
         fetch.store_carry(format_id, leftover)
         if consumed.errors:
             self._log_skips(format_id, consumed.errors)
-        counted = count_slices(consumed.slices) if consumed.slices else None
-        if counted:
-            self.counter.merge(counted.counter)
-        effective = counted.effective_bytes if counted else 0
+        effective = sum(item.length for item in consumed.slices)
+        if consumed.slices:
+            self._sink.submit(consumed.slices)
+        self.committed_bytes += effective
         self.state.formats[format_id] = FormatProgress(
             consumed.cursor,
             consumed.offset,
@@ -281,7 +287,7 @@ class Trainer:
         )
 
     def _after_commit(self) -> None:
-        self.meter.sample(self.counter.bytes_processed)
+        self.meter.sample(self.committed_bytes)
         last = self.last_checkpoint_at or self.meter.started_at
         if time.monotonic() - last >= self.config.checkpoint_interval:
             self._checkpoint()
@@ -289,7 +295,8 @@ class Trainer:
             self.on_refresh(self)
 
     def _clamped_targets(self, targets: Mapping[str, int]) -> dict[str, int]:
-        base = self._targets.get(self._minted_baseline(), {key: 0 for key in targets})
+        baseline = minted_baseline(self._schedule, self.state.mints_done)
+        base = self._targets.get(baseline, {key: 0 for key in targets})
         clamped = planning.clamped_targets(
             targets,
             base,
@@ -308,6 +315,7 @@ class Trainer:
         return clamped
 
     def _mint(self, threshold: int) -> None:
+        self._sink.drain()
         self._validate_barrier(threshold)
         label = mint_label(threshold)
         self._write_table(label)
@@ -349,13 +357,10 @@ class Trainer:
         )
 
     def _write_table(self, label: str) -> None:
-        self.config.mint_dir.mkdir(parents=True, exist_ok=True)
-        path = self.config.mint_dir / f"{label}_weights.bin"
-        temporary = path.with_suffix(".bin.tmp")
-        temporary.write_bytes(self.counter.to_table_bytes())
-        os.replace(temporary, path)
+        write_table(self.config.mint_dir, label, self.counter)
 
     def _checkpoint(self) -> None:
+        self._sink.drain()
         save(self._checkpoint_path, self.counter, self.state)
         self.last_checkpoint_at = time.monotonic()
 
@@ -382,19 +387,10 @@ class Trainer:
         goals = self._goals_for(self.area_targets(threshold))
         return goals if goals is not None else self.format_bytes()
 
-    def rate_avg(self) -> float:
-        return self.meter.rate_avg(self.counter.bytes_processed)
-
     def rate_now(self) -> float:
-        return self.meter.rate_now(self.counter.bytes_processed)
-
-    def eta_next_mint(self) -> float | None:
-        rate = self.rate_now()
-        if self.current_threshold is None or rate <= 0:
-            return None
-        return max(self.current_threshold - self.counter.bytes_processed, 0) / rate
+        return self.meter.rate_now(self.committed_bytes)
 
     def describe_progress(self) -> str:
-        effective = fmt_bytes(self.counter.bytes_processed)
+        effective = fmt_bytes(self.committed_bytes)
         suffix = " (target clamped to corpus supply)" if self.clamped else ""
         return f"{effective} effective, {len(self.state.mints_done)} mints{suffix}"
