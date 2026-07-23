@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import sngram
 
@@ -20,6 +19,7 @@ from .distribution import apportion
 from .events import EventLog
 from .fetching import (
     ContentReader,
+    Fetched,
     FetchPool,
     bounded_items,
     carry_estimate,
@@ -30,7 +30,7 @@ from .manifest import Candidate, Manifest
 from .sampling import CountSink
 from .units import fmt_bytes
 
-FETCH_BATCH_ITEMS = 64
+_FETCH_BATCH_ITEMS = 64
 
 
 @dataclass(frozen=True)
@@ -65,11 +65,14 @@ class Trainer:
         self.counter, self.state = self._load_state()
         self.committed_bytes = self.counter.bytes_processed
         self.events = EventLog(config.mint_dir / "train-events.jsonl")
+        self._init_targets()
+        self._init_telemetry()
+
+    def _init_targets(self) -> None:
         self.effective_target = min(
-            config.target, manifest.effective_target or config.target
+            self.config.target, self.manifest.effective_target or self.config.target
         )
         self._targets = apportion(self.effective_target, self.area_weights)
-        self._init_telemetry()
 
     def _init_telemetry(self) -> None:
         self.meter = metrics.RateMeter()
@@ -100,8 +103,7 @@ class Trainer:
                 ThreadPoolExecutor(max_workers=2) as counters,
             ):
                 self._sink.pool = counters
-                reader = lambda candidate: read_candidate(self.content, candidate)
-                fetch = FetchPool(pool, reader, self.config.workers * 2)
+                fetch = FetchPool(pool, self._read, self.config.workers * 2)
                 self._fill(fetch)
             self._mint_final()
             complete = True
@@ -109,6 +111,9 @@ class Trainer:
             self._checkpoint()
             self._log_summary(complete)
             self.events.close()
+
+    def _read(self, candidate: Candidate) -> Fetched:
+        return read_candidate(self.content, candidate)
 
     def _fill(self, fetch: FetchPool) -> None:
         targets = dict(self._targets)
@@ -185,7 +190,7 @@ class Trainer:
 
     def _batch_limit(self, fetch: FetchPool) -> int:
         share = max(self.config.workers // 4, 1)
-        return max(min(share, FETCH_BATCH_ITEMS, fetch.headroom()), 1)
+        return max(min(share, _FETCH_BATCH_ITEMS, fetch.headroom()), 1)
 
     def _deplete(self, format_id: str) -> None:
         self._starved.discard(format_id)

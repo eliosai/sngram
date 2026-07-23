@@ -1,14 +1,11 @@
-//! Arrow `PyCapsule` ingestion for the counting hot path.
-//!
-//! Accepts any Python object exporting the Arrow C data interface with a
-//! record-batch (struct) schema — `pyarrow.Table`, `RecordBatch`,
-//! `RecordBatchReader` — and counts every string/binary value per row.
-//! The only `unsafe` in the bindings lives here: taking ownership of the
-//! C structs the capsules carry, exactly as the `PyCapsule` protocol specifies.
+//! Arrow `PyCapsule` ingestion for the counting hot path
 
 use arrow_array::ffi::{FFI_ArrowArray, from_ffi};
 use arrow_array::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
-use arrow_array::{Array, RecordBatch, StructArray};
+use arrow_array::{
+    Array, BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, RecordBatch,
+    StringArray, StringViewArray, StructArray,
+};
 use arrow_schema::ffi::FFI_ArrowSchema;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -16,8 +13,7 @@ use pyo3::types::{PyCapsule, PyTuple};
 
 use sngram::learn::BigramCounter;
 
-/// Count all string/binary columns of `data` into `counter`, per row.
-/// Returns the number of text bytes counted by this call.
+/// Count all string/binary columns of `data` into `counter`, returning bytes counted
 pub fn count_arrow(
     py: Python<'_>,
     data: &Bound<'_, PyAny>,
@@ -37,16 +33,14 @@ pub fn count_arrow(
     Ok(counter.bytes_processed() - before)
 }
 
-/// Drain a `__arrow_c_stream__` of record batches.
+/// Drain a `__arrow_c_stream__` of record batches
 fn count_stream(py: Python<'_>, data: &Bound<'_, PyAny>, counter: &BigramCounter) -> PyResult<()> {
     let capsule: Bound<'_, PyCapsule> = data
         .call_method0("__arrow_c_stream__")?
         .cast_into()
         .map_err(|_| PyTypeError::new_err("__arrow_c_stream__ did not return a capsule"))?;
 
-    // SAFETY: the capsule contract hands us an owned FFI_ArrowArrayStream;
-    // from_raw moves it out and leaves a released struct for the capsule's
-    // destructor, so it is consumed exactly once.
+    // SAFETY: from_raw moves the owned stream out of the capsule exactly once
     #[allow(
         unsafe_code,
         reason = "Arrow PyCapsule ownership transfer, per protocol"
@@ -61,8 +55,7 @@ fn count_stream(py: Python<'_>, data: &Bound<'_, PyAny>, counter: &BigramCounter
     }
     .map_err(arrow_err)?;
 
-    // pull each batch with the GIL held (cheap slicing on the producer side),
-    // count it with the GIL released (the heavy part)
+    // pull each batch with the GIL held, count it with the GIL released
     loop {
         let Some(batch) = reader.next().transpose().map_err(arrow_err)? else {
             return Ok(());
@@ -71,11 +64,7 @@ fn count_stream(py: Python<'_>, data: &Bound<'_, PyAny>, counter: &BigramCounter
     }
 }
 
-/// Consume a single `__arrow_c_array__` (a RecordBatch-shaped struct array).
-#[allow(
-    clippy::too_many_lines,
-    reason = "Arrow C data capsules require schema and array extraction in one ownership block"
-)]
+/// Consume a single `__arrow_c_array__` (a RecordBatch-shaped struct array)
 fn count_array(py: Python<'_>, data: &Bound<'_, PyAny>, counter: &BigramCounter) -> PyResult<()> {
     let pair: Bound<'_, PyTuple> = data
         .call_method0("__arrow_c_array__")?
@@ -83,9 +72,17 @@ fn count_array(py: Python<'_>, data: &Bound<'_, PyAny>, counter: &BigramCounter)
         .map_err(|_| PyTypeError::new_err("__arrow_c_array__ did not return a 2-tuple"))?;
     let schema_capsule: Bound<'_, PyCapsule> = pair.get_item(0)?.cast_into()?;
     let array_capsule: Bound<'_, PyCapsule> = pair.get_item(1)?.cast_into()?;
+    let batch = import_batch(&schema_capsule, &array_capsule)?;
+    count_batch(py, &batch, counter);
+    Ok(())
+}
 
-    // SAFETY: same ownership contract as the stream path — each struct is
-    // moved out of its capsule once, leaving an empty/released struct behind.
+/// Rebuild a record batch from schema and array capsules
+fn import_batch(
+    schema_capsule: &Bound<'_, PyCapsule>,
+    array_capsule: &Bound<'_, PyCapsule>,
+) -> PyResult<RecordBatch> {
+    // SAFETY: each struct is moved out of its capsule once, leaving a released struct behind
     #[allow(
         unsafe_code,
         reason = "Arrow PyCapsule ownership transfer, per protocol"
@@ -103,14 +100,10 @@ fn count_array(py: Python<'_>, data: &Bound<'_, PyAny>, counter: &BigramCounter)
         let schema = unsafe { &*schema_ptr };
         unsafe { from_ffi(array, schema) }.map_err(arrow_err)?
     };
-
-    let strukt = StructArray::from(array_data);
-    let batch = RecordBatch::from(strukt);
-    count_batch(py, &batch, counter);
-    Ok(())
+    Ok(RecordBatch::from(StructArray::from(array_data)))
 }
 
-/// Count every string/binary column of one batch, GIL released.
+/// Count every string/binary column of one batch, GIL released
 fn count_batch(py: Python<'_>, batch: &RecordBatch, counter: &BigramCounter) {
     py.detach(|| {
         for col in batch.columns() {
@@ -119,15 +112,8 @@ fn count_batch(py: Python<'_>, batch: &RecordBatch, counter: &BigramCounter) {
     });
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one arm per supported arrow text type"
-)]
+/// Count one column, recursing through struct children
 fn count_column(col: &dyn Array, counter: &BigramCounter) {
-    use arrow_array::{
-        BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, StringArray,
-        StringViewArray,
-    };
     let any = col.as_any();
     if let Some(a) = any.downcast_ref::<StringArray>() {
         counter.process_batch(a.iter().flatten().map(str::as_bytes));
@@ -146,11 +132,9 @@ fn count_column(col: &dyn Array, counter: &BigramCounter) {
             count_column(child.as_ref(), counter);
         }
     }
-    // non-text columns are ignored: the trainer projects to the text column,
-    // and counting numbers would poison the table
+    // non-text columns are ignored
 }
 
-#[allow(clippy::needless_pass_by_value, reason = "map_err adapter")]
 fn arrow_err(e: arrow_schema::ArrowError) -> PyErr {
     PyValueError::new_err(format!("arrow error: {e}"))
 }

@@ -33,7 +33,10 @@ fn write_fingerprint(fingerprint: u64) {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
     fs::write(
         out_dir.join("weights.rs"),
-        format!("const WEIGHTS_FINGERPRINT: u64 = {};\n", rust_u64(fingerprint)),
+        format!(
+            "const WEIGHTS_FINGERPRINT: u64 = {};\n",
+            rust_u64(fingerprint)
+        ),
     )
     .expect("write fingerprint");
 }

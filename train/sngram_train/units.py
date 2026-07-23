@@ -1,4 +1,4 @@
-"""Byte-size parsing and formatting (decimal units, matching the Rust learner)."""
+"""Byte-size parsing and formatting in decimal units."""
 
 from __future__ import annotations
 

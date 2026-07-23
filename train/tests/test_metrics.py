@@ -1,5 +1,4 @@
-"""Distribution metrics: KL between byte-pair count vectors, snapshot parsing,
-and recovering a table's frequency distribution from its weights."""
+"""Distribution metrics over byte-pair count vectors."""
 
 from __future__ import annotations
 
@@ -18,8 +17,7 @@ def test_kl_identical_is_zero():
 
 
 def test_kl_known_value():
-    # P=[2,2] -> [.5,.5], Q=[3,1] -> [.75,.25] (eps=0)
-    # KL = .5 ln(.5/.75) + .5 ln(.5/.25) = .5 ln(2/3) + .5 ln 2
+    # KL([.5,.5] || [.75,.25]) = .5 ln(2/3) + .5 ln 2
     expected = 0.5 * math.log(2 / 3) + 0.5 * math.log(2)
     assert metrics.kl_divergence([2, 2], [3, 1], eps=0.0) == pytest.approx(expected)
 
@@ -30,9 +28,7 @@ def test_kl_is_nonnegative():
 
 
 def test_kl_never_negative_from_roundoff_at_scale():
-    # at production scale (10^11+ per cell, near-identical consecutive mints) the
-    # naive sum of 65536 float terms underflows slightly negative; KL>=0 is a
-    # mathematical invariant the early-stop rule relies on as KL -> 0
+    # a naive sum of 65536 near-identical float terms can drift below zero
     import random
 
     random.seed(0)
@@ -64,8 +60,7 @@ def test_counts_from_snapshot_roundtrips_counter():
 
 
 def test_kl_between_consecutive_mints_decreases():
-    # cumulative snapshots of the same distribution get closer as data grows,
-    # so KL(mint_n || mint_{n-1}) trends to zero — the convergence stop signal
+    # cumulative snapshots of one distribution converge, so KL trends to zero
     c = sngram.BigramCounter()
     doc = b"fn main() { let x = compute(value); return x + 1; }\n"
     snaps = []
@@ -91,8 +86,7 @@ def test_table_frequencies_ranks_common_pairs_high():
 
 
 def test_table_frequencies_has_no_zeros_for_kl_safety():
-    # default output is used as the Q of a KL; a hard zero would make
-    # KL(P||Q) silently +inf wherever P has mass the table never saw
+    # a hard zero in Q would make KL(P||Q) infinite wherever P has mass
     c = sngram.BigramCounter()
     c.process(b"aaaa")
     table = sngram.WeightTable.from_bytes(c.to_table_bytes())

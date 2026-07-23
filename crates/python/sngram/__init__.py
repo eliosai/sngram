@@ -43,7 +43,7 @@ try:
 except ImportError:  # built without the weights feature
 
     def weights() -> WeightTable:
-        """The embedded weight table."""
+        """The embedded production weight table."""
         raise RuntimeError("this build of sngram embeds no weight table")
 
 

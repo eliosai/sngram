@@ -7,7 +7,7 @@ import struct
 import time
 from collections import deque
 
-PAIR_COUNT = 256 * 256
+_PAIR_COUNT = 256 * 256
 _UNSEEN_WEIGHT = 2**32 - 1
 
 
@@ -38,9 +38,9 @@ class RateMeter:
 
 def counts_from_snapshot(snapshot: bytes) -> list[int]:
     """Parse a counter snapshot into pair counts."""
-    if len(snapshot) != PAIR_COUNT * 8:
-        raise ValueError(f"snapshot must be {PAIR_COUNT * 8} bytes, got {len(snapshot)}")
-    return list(struct.unpack(f"<{PAIR_COUNT}Q", snapshot))
+    if len(snapshot) != _PAIR_COUNT * 8:
+        raise ValueError(f"snapshot must be {_PAIR_COUNT * 8} bytes, got {len(snapshot)}")
+    return list(struct.unpack(f"<{_PAIR_COUNT}Q", snapshot))
 
 
 def probs_from_counts(counts: list[int], eps: float = 1.0) -> list[float]:
@@ -79,5 +79,5 @@ def table_frequencies(table, floor: float = 1e-15) -> list[float]:
             inv.append(floor if w >= _UNSEEN_WEIGHT else (1.0 / w) + floor)
     s = sum(inv)
     if s <= 0:
-        return [1.0 / PAIR_COUNT] * PAIR_COUNT
+        return [1.0 / _PAIR_COUNT] * _PAIR_COUNT
     return [x / s for x in inv]

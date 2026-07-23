@@ -16,6 +16,19 @@ class LossyContent:
         return self.values[blob_id]
 
 
+class InterruptingContent(LossyContent):
+    def __init__(self, values, interrupt_at):
+        super().__init__(values)
+        self.interrupt_at = interrupt_at
+        self.calls = 0
+
+    def read(self, blob_id, max_bytes):
+        self.calls += 1
+        if self.calls == self.interrupt_at:
+            raise KeyboardInterrupt
+        return super().read(blob_id, max_bytes)
+
+
 def lossy_corpus(configs, per_config, length):
     """Rows where every third blob shrinks by half and every tenth is missing."""
 
@@ -128,19 +141,6 @@ def test_manifest_effective_target_bounds_the_run_upfront(tmp_path: Path):
 def test_lossy_run_resumes_after_interrupt_to_the_identical_table(tmp_path: Path):
     configs = ["a", "b", "c"]
     rows, content = lossy_corpus(configs, per_config=200, length=2_100)
-
-    class InterruptingContent(LossyContent):
-        def __init__(self, values, interrupt_at):
-            super().__init__(values)
-            self.interrupt_at = interrupt_at
-            self.calls = 0
-
-        def read(self, blob_id, max_bytes):
-            self.calls += 1
-            if self.calls == self.interrupt_at:
-                raise KeyboardInterrupt
-            return super().read(blob_id, max_bytes)
-
     interrupted = setup(tmp_path / "run", configs, 300_000, rows, content)
     interrupted.content = InterruptingContent(content, interrupt_at=150)
     try:
@@ -148,19 +148,7 @@ def test_lossy_run_resumes_after_interrupt_to_the_identical_table(tmp_path: Path
     except KeyboardInterrupt:
         pass
 
-    resumed = Trainer(
-        interrupted.catalog,
-        interrupted.manifest,
-        LossyContent(content),
-        TrainerConfig(
-            mint_dir=tmp_path / "run" / "bins",
-            target=300_000,
-            workers=8,
-            checkpoint_interval=3600,
-            resume=True,
-        ),
-        {"code": 1},
-    )
+    resumed = _resumed_trainer(interrupted, content, tmp_path / "run" / "bins")
     resumed.run()
     reference = setup(tmp_path / "reference", configs, 300_000, rows, content)
     reference.run()
@@ -168,3 +156,20 @@ def test_lossy_run_resumes_after_interrupt_to_the_identical_table(tmp_path: Path
     resumed_table = (tmp_path / "run" / "bins" / "final_weights.bin").read_bytes()
     reference_table = (tmp_path / "reference" / "bins" / "final_weights.bin").read_bytes()
     assert resumed_table == reference_table
+
+
+def _resumed_trainer(interrupted, content, mint_dir: Path):
+    config = TrainerConfig(
+        mint_dir=mint_dir,
+        target=300_000,
+        workers=8,
+        checkpoint_interval=3600,
+        resume=True,
+    )
+    return Trainer(
+        interrupted.catalog,
+        interrupted.manifest,
+        LossyContent(content),
+        config,
+        {"code": 1},
+    )

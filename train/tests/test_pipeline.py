@@ -38,16 +38,7 @@ def setup_run(tmp_path: Path, lengths: dict[str, list[int]], target: int):
     catalog = Catalog(formats, tuple(sorted(lengths)))
     roster_hash = catalog.roster_hash("revision")
     manifest_path = tmp_path / "manifest.sqlite3"
-    content = {}
-    with ManifestWriter(manifest_path, "revision", roster_hash) as writer:
-        for spec in formats:
-            writer.register(spec.id)
-            rows = []
-            for index, length in enumerate(lengths[spec.id]):
-                blob_id = f"{spec.id}-{index}"
-                content[blob_id] = bytes([65 + index]) * length
-                rows.append((blob_id, "utf-8", length, 1, "", ""))
-            writer.add_rows(spec.id, rows)
+    content = _write_manifest(manifest_path, roster_hash, formats, lengths)
     manifest = open_manifest(manifest_path, roster_hash)
     config = TrainerConfig(
         mint_dir=tmp_path / "bins",
@@ -57,6 +48,20 @@ def setup_run(tmp_path: Path, lengths: dict[str, list[int]], target: int):
         resume=False,
     )
     return Trainer(catalog, manifest, MemoryContent(content), config, {"code": 1})
+
+
+def _write_manifest(path: Path, roster_hash, formats, lengths):
+    content = {}
+    with ManifestWriter(path, "revision", roster_hash) as writer:
+        for spec in formats:
+            writer.register(spec.id)
+            rows = []
+            for index, length in enumerate(lengths[spec.id]):
+                blob_id = f"{spec.id}-{index}"
+                content[blob_id] = bytes([65 + index]) * length
+                rows.append((blob_id, "utf-8", length, 1, "", ""))
+            writer.add_rows(spec.id, rows)
+    return content
 
 
 def mint_events(tmp_path: Path):

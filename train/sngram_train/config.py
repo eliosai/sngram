@@ -6,30 +6,24 @@ import os
 from collections.abc import Iterable
 from pathlib import Path
 
-GB = 10**9
-TB = 10**12
+_GB = 10**9
+_TB = 10**12
 
-CANONICAL_TARGET_BYTES = 6 * TB
+CANONICAL_TARGET_BYTES = 6 * _TB
 STACK_V2_REVISION = "94d47b4385264b30f228e28a5d63e9b2eee8c2c5"
 STACK_V2_CONTENT_PREFIX = "s3://softwareheritage/content/"
 
-# area weights double as apportionment ratios and per-format cap basis
-# measured Stack supply hard-caps code at 1.94 TB and prose at 0.72 TB, both exhausted
-# code lands at 38 to clear 5 TB, docs at 14 to take nearly all prose
-# only JSON, HTML, and CSV are elastic, so config, web, data are sized to balance
-# those three at ~9 percent each rather than let one spike past the rest
+# per-area byte budgets, summing to the canonical target
 STACK_V2_BUCKET_CAPS = {
-    "core-programming": 2_280 * GB,
-    "config-build-infra": 1_182 * GB,
-    "docs-prose-markup": 840 * GB,
-    "web-ui-templates": 822 * GB,
-    "data-query-schema": 696 * GB,
-    "long-tail": 180 * GB,
+    "core-programming": 2_280 * _GB,
+    "config-build-infra": 1_182 * _GB,
+    "docs-prose-markup": 840 * _GB,
+    "web-ui-templates": 822 * _GB,
+    "data-query-schema": 696 * _GB,
+    "long-tail": 180 * _GB,
 }
 
-# per-format cap basis: fraction of the area weight one format may hold
-# set well above the balanced level so the area weight governs each share and
-# max-min allocation balances formats within an area; a hard stop on domination
+# fraction of its area budget one format may hold
 AREA_FORMAT_SHARE = {
     "core-programming": 0.30,
     "config-build-infra": 0.48,
@@ -48,7 +42,7 @@ GROUP_LABELS = {
     "long-tail": "other",
 }
 
-# configs dropped entirely: bloated base64 JSON, no value for a code byte-pair table
+# configs dropped from every area
 EXCLUDED_CONFIGS = frozenset({"Jupyter_Notebook"})
 
 CORE_LANGUAGES = {

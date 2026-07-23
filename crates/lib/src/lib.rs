@@ -36,7 +36,8 @@ pub mod learn;
 pub use query::query;
 pub use scan::scan;
 pub use sngram_types::{
-    DfStats, GramNeedle, LearnError, PlanExpr, QueryError, QueryPlan, ScanError, ScanNeed,
+    DfStats, GramKey, GramNeedle, LearnError, PlanExpr, QueryError, QueryPlan, ScanError,
+    ScanEvent, ScanNeed, ScanSummary, ScannedGram, TableError, WeightTable,
 };
 #[cfg(feature = "weights")]
 pub use weights::weights;

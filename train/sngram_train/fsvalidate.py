@@ -60,22 +60,7 @@ def filesystem_histogram(
     for path in _walk_files(roots):
         if cap is not None and stats.total_bytes >= cap:
             break
-        try:
-            if os.path.islink(path) or not os.path.isfile(path):
-                continue
-            size = os.path.getsize(path)
-            if size == 0 or size > max_file:
-                stats.skipped_other += 1
-                continue
-            with open(path, "rb") as fh:
-                head = fh.read(head_bytes)
-                if is_binary(head):
-                    stats.skipped_binary += 1
-                    continue
-                data = head + fh.read(max_file - len(head))
-        except OSError:
-            stats.skipped_other += 1
-            continue
+        data = _read_text(path, max_file, head_bytes, stats)
         if not data:
             continue
         counter.process(data)
@@ -84,6 +69,25 @@ def filesystem_histogram(
         ext = os.path.splitext(path)[1].lower() or "(noext)"
         stats.ext_bytes[ext] = stats.ext_bytes.get(ext, 0) + len(data)
     return metrics.counts_from_snapshot(counter.snapshot()), stats
+
+
+def _read_text(path: str, max_file: int, head_bytes: int, stats: FsStats) -> bytes | None:
+    try:
+        if os.path.islink(path) or not os.path.isfile(path):
+            return None
+        size = os.path.getsize(path)
+        if size == 0 or size > max_file:
+            stats.skipped_other += 1
+            return None
+        with open(path, "rb") as fh:
+            head = fh.read(head_bytes)
+            if is_binary(head):
+                stats.skipped_binary += 1
+                return None
+            return head + fh.read(max_file - len(head))
+    except OSError:
+        stats.skipped_other += 1
+        return None
 
 
 def _pair(index: int) -> tuple[int, int]:

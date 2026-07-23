@@ -15,7 +15,7 @@ from .errors import ConfigurationError
 from .manifest import ManifestWriter
 
 DEFAULT_ASSETS_REPO = "eliosai/sngram-train"
-MANIFEST_META = "manifest.json"
+_MANIFEST_META = "manifest.json"
 
 Report = Callable[[str], None]
 
@@ -31,7 +31,7 @@ def fetch_dataset(manifest_path: Path, token: str | None, report: Report | None 
 
     repo = assets_repo()
     local = Path(_snapshot(repo, token))
-    if not (local / MANIFEST_META).exists():
+    if not (local / _MANIFEST_META).exists():
         raise ConfigurationError(f"{repo} has no published manifest sidecar")
     import_dataset(local, manifest_path, report)
     return repo
@@ -42,7 +42,7 @@ def import_dataset(
 ) -> str:
     """Rebuild a SQLite manifest from downloaded jsonl shards."""
 
-    meta = json.loads((dataset_dir / MANIFEST_META).read_text())
+    meta = json.loads((dataset_dir / _MANIFEST_META).read_text())
     catalog = _catalog_from(meta)
     roster = catalog.roster_hash(meta["revision"])
     if roster != meta["roster_hash"]:
@@ -71,7 +71,7 @@ def _snapshot(repo: str, token: str | None) -> str:
             repo,
             repo_type="dataset",
             token=token,
-            allow_patterns=["data/*.jsonl.gz", MANIFEST_META],
+            allow_patterns=["data/*.jsonl.gz", _MANIFEST_META],
         )
     except RepositoryNotFoundError as error:
         raise ConfigurationError(f"{repo} does not exist or this token cannot read it") from error

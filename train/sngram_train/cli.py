@@ -28,23 +28,11 @@ def train(
 ) -> None:
     """Train the final weight table from the published corpus manifest."""
 
-    import sys
-
     from .errors import ConfigurationError
-    from .units import parse_size
 
-    # short GIL slices keep the coordinator responsive beside many fetch threads
-    sys.setswitchinterval(0.002)
-    _hub_timeouts()
+    _tune_runtime()
     view = _run_view() if dashboard else None
-    build = lambda resume_now: _production_trainer(
-        mint_dir=mint_dir,
-        target=parse_size(limit or target),
-        workers=workers or _default_workers(),
-        checkpoint_interval=checkpoint_every,
-        resume=resume_now,
-        view=view,
-    )
+    build = _trainer_factory(mint_dir, limit or target, workers, checkpoint_every, view)
     try:
         trainer = _dashboard_run(build, resume, view)
     except ConfigurationError as error:
@@ -53,7 +41,31 @@ def train(
     typer.echo(f"done: {trainer.describe_progress()}")
 
 
-def _hub_timeouts() -> None:
+def _trainer_factory(
+    mint_dir: Path, target: str, workers: Optional[int], checkpoint_every: float, view
+):
+    from .units import parse_size
+
+    size = parse_size(target)
+    concurrency = workers or _default_workers()
+
+    def build(resume_now: bool):
+        return _production_trainer(
+            mint_dir=mint_dir,
+            target=size,
+            workers=concurrency,
+            checkpoint_interval=checkpoint_every,
+            resume=resume_now,
+            view=view,
+        )
+
+    return build
+
+
+def _tune_runtime() -> None:
+    import sys
+
+    sys.setswitchinterval(0.002)
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
     os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
 
@@ -204,15 +216,23 @@ def fs_histogram(
     counts, stats = fsvalidate.filesystem_histogram(
         [str(root) for root in roots], cap=parse_size(cap) if cap else None
     )
-    pairs = sum(counts) or 1
     typer.echo(
         f"text files: {stats.files}  skipped binary: {stats.skipped_binary}  "
         f"text bytes: {fmt_bytes(stats.total_bytes)}"
     )
+    _echo_top_pairs(counts, top)
+    _echo_extensions(stats, top)
+
+
+def _echo_top_pairs(counts: list[int], top: int) -> None:
+    pairs = sum(counts) or 1
     order = sorted(range(len(counts)), key=counts.__getitem__, reverse=True)
     for index in order[:top]:
         pair = _show_pair(index >> 8, index & 255)
         typer.echo(f"  {pair:8s} {counts[index] / pairs * 100:5.2f}%")
+
+
+def _echo_extensions(stats, top: int) -> None:
     total = stats.total_bytes or 1
     extensions = sorted(
         stats.ext_bytes.items(), key=lambda item: item[1], reverse=True
@@ -239,7 +259,10 @@ def fs_validate(
     counts, _stats = fsvalidate.filesystem_histogram(
         [str(root) for root in roots], cap=parse_size(cap) if cap else None
     )
-    report = fsvalidate.validate(counts, table, top=top)
+    _echo_validation(fsvalidate.validate(counts, table, top=top))
+
+
+def _echo_validation(report) -> None:
     typer.echo(f"KL(filesystem || table) = {report.kl:.4f} nats")
     for label, rows in (("under-represented", report.under_weighted),
                         ("over-represented", report.over_weighted)):

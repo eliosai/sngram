@@ -1,6 +1,4 @@
-"""Filesystem validation: measure the byte-pair distribution of the real files
-a regex search runs over (text only, binaries skipped) and score a minted table
-against it."""
+"""Filesystem byte-pair histograms scored against minted tables."""
 
 from __future__ import annotations
 
@@ -61,8 +59,7 @@ def test_filesystem_histogram_counts_match_reference(tmp_path: Path):
 
 
 def test_validate_flags_pair_the_corpus_underrepresents(tmp_path: Path):
-    # corpus (table) saw only 'aa'; the filesystem is full of 'zq' the corpus
-    # barely produced -> 'zq' must surface as under-weighted, and KL > 0
+    # the filesystem is full of 'zq' the corpus barely produced
     corpus = sngram.BigramCounter()
     for _ in range(500):
         corpus.process(b"aaaaaaaa")
@@ -76,11 +73,7 @@ def test_validate_flags_pair_the_corpus_underrepresents(tmp_path: Path):
 
 
 def test_validate_ranks_by_divergence_contribution_not_floor_noise(tmp_path: Path):
-    # 'xy' is frequent on disk and the corpus produced only a little of it (a
-    # real, actionable under-representation). 'QZ' is a single stray byte-pair
-    # the corpus never saw (q at the floor) -> a raw log-ratio ranking would
-    # rank 'QZ' ABOVE 'xy' (huge log-ratio from the floor), which is noise. The
-    # report must rank the high-contribution 'xy' first.
+    # the high-contribution 'xy' must outrank the floor-noise 'QZ'
     corpus = sngram.BigramCounter()
     for _ in range(1000):
         corpus.process(b"thththththth")  # 'th'/'ht' everywhere
@@ -95,8 +88,7 @@ def test_validate_ranks_by_divergence_contribution_not_floor_noise(tmp_path: Pat
     report = fsvalidate.validate(fs_counts, table, top=5)
     pairs = [p for p, *_ in report.under_weighted]
     xy, yx, qz = (ord("x"), ord("y")), (ord("y"), ord("x")), (ord("Q"), ord("Z"))
-    # the frequent 'xy'/'yx' (the repeated text emits both) lead; the floor-noise
-    # 'QZ' is ranked below them, not above
+    # the repeated text emits both 'xy' and 'yx'; floor-noise ranks below them
     assert pairs[0] in {xy, yx}, f"floor-noise led the ranking: {pairs}"
     assert xy in pairs
     if qz in pairs:

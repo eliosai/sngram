@@ -94,8 +94,6 @@ impl PyScanResult {
     }
 
     /// Gram index keys as little-endian u64 bytes, one per gram
-    ///
-    /// Zero-copy view from Python: `np.frombuffer(buf, dtype=np.uint64)`.
     fn key_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         let mut out = Vec::with_capacity(self.grams.len() * 8);
         for &(_, _, key) in &self.grams {

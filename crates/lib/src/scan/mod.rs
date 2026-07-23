@@ -5,12 +5,11 @@ use std::io::BufRead;
 pub mod cover;
 mod engine;
 mod facts;
-mod settings;
+pub mod settings;
+mod space;
 mod validate;
 
 use sngram_types::{ScanError, ScanEvent, WeightTable};
-
-pub use settings::ScanSettings;
 
 /// Extract sparse n-grams and scan metadata from one byte stream.
 ///

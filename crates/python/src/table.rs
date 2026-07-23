@@ -17,7 +17,7 @@ pub struct PyWeightTable {
 
 impl PyWeightTable {
     /// Wrap a core table
-    pub fn new(inner: WeightTable) -> Self {
+    fn new(inner: WeightTable) -> Self {
         Self { inner }
     }
 

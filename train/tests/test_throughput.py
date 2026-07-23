@@ -10,9 +10,7 @@ LINE = b"fn main() { return 42; }\n"
 
 
 def build_trainer(tmp_path: Path, lengths, target, content, workers=16):
-    formats = tuple(
-        FormatSpec(name, "code", name, target) for name in sorted(lengths)
-    )
+    formats = tuple(FormatSpec(name, "code", name, target) for name in sorted(lengths))
     catalog = Catalog(formats, tuple(sorted(lengths)))
     roster_hash = catalog.roster_hash("revision")
     path = tmp_path / "manifest.sqlite3"

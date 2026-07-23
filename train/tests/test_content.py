@@ -29,8 +29,6 @@ def test_content_reader_rejects_decompression_past_the_declared_length(tmp_path:
 
 
 def test_bounded_gunzip_rejects_oversize_and_truncated_streams():
-    import gzip
-
     import pytest
 
     from sngram_train.content import _gunzip_bounded

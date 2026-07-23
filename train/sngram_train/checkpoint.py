@@ -12,7 +12,7 @@ import sngram
 
 from .errors import ConfigurationError
 
-VERSION = 5
+_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,7 @@ def load(
         return sngram.BigramCounter(), RunState(roster_hash, revision, target)
     with sqlite3.connect(path) as connection:
         row = connection.execute("SELECT * FROM checkpoint").fetchone()
-    identity = (VERSION, roster_hash, target)
+    identity = (_VERSION, roster_hash, target)
     if row is None or (row[0], row[1], row[3]) != identity:
         raise ConfigurationError(
             "checkpoint does not match this roster and target; "
@@ -91,7 +91,7 @@ def load(
 def _record(counter: sngram.BigramCounter, state: RunState) -> tuple[object, ...]:
     formats = {key: asdict(value) for key, value in state.formats.items()}
     return (
-        VERSION,
+        _VERSION,
         state.roster_hash,
         state.revision,
         state.target,

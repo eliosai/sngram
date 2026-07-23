@@ -16,7 +16,7 @@ from .units import fmt_bytes, fmt_rate
 
 
 class RunView:
-    """Shared render state fed by the corpus import and the trainer."""
+    """Shared render state for one run."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()

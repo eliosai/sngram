@@ -4,7 +4,8 @@ use std::collections::VecDeque;
 
 use sngram_types::{Gram, WeightTable};
 
-use super::{ScanSettings, engine};
+use super::engine;
+use super::settings::ScanSettings;
 
 /// Minimal covering grams of a single literal.
 pub fn minimal_cover(table: &WeightTable, literal: &[u8]) -> Vec<Gram> {

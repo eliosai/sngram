@@ -4,9 +4,7 @@
 #[derive(Debug, Clone, Copy)]
 pub struct Content<'a>(&'a [u8]);
 
-// Conservative binary signatures used as a fast prefilter before the control
-// byte sniff. Ownership stays with callers; `Content` intentionally does not
-// require an owned buffer type.
+// conservative binary signatures checked before the control-byte sniff
 const BINARY_SIGS: &[&[u8]] = &[
     b"SPNG",
     b"\x7fELF",

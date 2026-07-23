@@ -160,9 +160,6 @@ class Manifest:
     def capacity(self, format_id: str) -> int:
         return self._capacities.get(format_id, 0)
 
-    def candidates(self, format_id: str) -> int:
-        return self._counts.get(format_id, 0)
-
     def exhausted(self, format_id: str) -> bool:
         return self._exhausted.get(format_id, False)
 

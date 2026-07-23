@@ -30,7 +30,7 @@ pub struct RegexpInfo {
     pub suffix: StringSet,
     /// When `Some(E)`, this info is a *pure* one-or-more repetition `E+` of the
     /// small exact set `E` (both edges an open `E`-run), freshly produced by
-    /// [`super::analyze::demote_plus`]. It carries no constraint of its own —
+    /// repetition demotion. It carries no constraint of its own —
     /// `prefix`/`suffix` already equal `E` and stay exhaustive — but lets the
     /// enclosing [`Analyzer::concat`] tighten the seam where the run abuts a
     /// neighbour (see `plus_prefix`/`plus_suffix`). It is a transient hint: the

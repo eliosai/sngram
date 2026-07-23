@@ -1,6 +1,6 @@
 //! Query parser settings.
 
-use crate::scan::ScanSettings;
+use crate::scan::settings::ScanSettings;
 
 /// Internal parser constants matching the verifier defaults this crate plans
 /// against.

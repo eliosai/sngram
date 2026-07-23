@@ -105,8 +105,7 @@ def consume(
         remaining -= taken
         objects += 1
         if taken < available:
-            partial = _done(slices, cursor, offset + taken, fetched, objects, errors)
-            return partial, rows[index:]
+            return _done(slices, cursor, offset + taken, fetched, objects, errors), rows[index:]
         cursor, offset = cursor + 1, 0
     return _done(slices, cursor, offset, fetched, objects, errors), []
 

@@ -192,7 +192,7 @@ mod tests {
     fn test_clean_suffix_groups_shared_endings() {
         let mut fixture = set(&[b"xbc", b"abc", b"aac"]);
         fixture.clean(Order::Suffix);
-        // All share "bc"/"ac"; suffix order sorts by trailing bytes.
+        // all share "bc"/"ac"; suffix order sorts by trailing bytes
         let expected = set(&[b"aac", b"abc", b"xbc"]);
         assert_eq!(fixture, expected);
     }

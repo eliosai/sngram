@@ -280,8 +280,7 @@ fn max_hull_depth(table: &WeightTable, content: &[u8]) -> usize {
 
 #[test]
 fn eviction_path_is_exercised() {
-    // sanity: the monotonic table + ascending input must overflow the stack,
-    // so the differential suite genuinely covers the eviction branch
+    // sanity: this table and input must overflow the bounded eviction stack
     let table = build_table(|a, b| {
         if b == a.wrapping_add(1) {
             1_000_000 - u32::from(a)

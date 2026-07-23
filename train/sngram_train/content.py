@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from .config import STACK_V2_CONTENT_PREFIX
 
-RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
+_RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
 
 
 class SwhContent:
@@ -58,7 +58,7 @@ class _AnonymousTransport:
         self._pool = urllib3.PoolManager(
             maxsize=max(workers, 8),
             retries=urllib3.util.Retry(
-                total=8, backoff_factor=0.5, status_forcelist=RETRYABLE_STATUSES
+                total=8, backoff_factor=0.5, status_forcelist=_RETRYABLE_STATUSES
             ),
             timeout=urllib3.Timeout(connect=10.0, read=30.0),
         )

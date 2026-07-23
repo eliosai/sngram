@@ -77,8 +77,7 @@ def test_query_literal_is_and(table):
     plan = sngram.query(table, "MAX_FILE_SIZE")
     assert plan.op == "and"
     assert plan.grams
-    # Query keys must match index keys: every logical gram needle appears in a
-    # scan of any document containing the literal.
+    # every logical gram needle must appear in a scan of a matching document
     doc = b"prefix MAX_FILE_SIZE suffix"
     index_keys = set(np.frombuffer(sngram.scan(table, doc).key_bytes(), dtype=np.uint64))
     for alternatives in plan.grams:

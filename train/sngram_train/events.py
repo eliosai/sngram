@@ -1,4 +1,4 @@
-"""Structured JSONL event log + an in-memory tail for the dashboard."""
+"""Structured JSONL event log with an in-memory tail."""
 
 from __future__ import annotations
 
@@ -8,10 +8,8 @@ import time
 from collections import deque
 from pathlib import Path
 
-# Dashboard event kinds
-TAIL_KINDS = frozenset(
-    {"mint", "content_skips", "target_clamped", "format_depleted"}
-)
+# event kinds kept in the tail
+_TAIL_KINDS = frozenset({"mint", "content_skips", "target_clamped", "format_depleted"})
 
 
 class EventLog:
@@ -36,7 +34,7 @@ class EventLog:
             self._fh.flush()
             if self._fh.tell() > self._segment_bytes:
                 self._rotate()
-            if kind in TAIL_KINDS:
+            if kind in _TAIL_KINDS:
                 self.tail.append(event)
 
     def _rotate(self) -> None:

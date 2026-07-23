@@ -1,10 +1,4 @@
 //! Python bindings for sngram
-//!
-//! Exposes the scan/query core, weight tables, and the training counters. The
-//! counting hot path accepts Arrow data through the Arrow `PyCapsule` C
-//! interface (`__arrow_c_stream__` / `__arrow_c_array__`), crosses the FFI
-//! once per record batch, and counts with the GIL released — Python never
-//! touches a row.
 
 #![allow(
     clippy::needless_pass_by_value,

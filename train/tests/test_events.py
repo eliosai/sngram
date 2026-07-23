@@ -1,9 +1,4 @@
-"""EventLog splits its JSONL into many small segments, losing nothing.
-
-A 50 TB run logs for days; one ever-growing file is unreadable and risky.
-The log is split into small, sequentially numbered segments — all retained as
-debug material — and the active file is always the base path.
-"""
+"""Segmented JSONL event log rotation and retention."""
 
 import json
 from pathlib import Path

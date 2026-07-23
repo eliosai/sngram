@@ -101,7 +101,7 @@ impl Query {
     pub fn and_or(self, other: Self, op: Op) -> Self {
         let q = unwrap_single(self);
         let r = unwrap_single(other);
-        // q ⇒ r: under AND keep the stronger q, under OR keep the weaker r.
+        // q ⇒ r: under AND keep the stronger q, under OR keep the weaker r
         if q.implies(&r) {
             return if op == Op::And { q } else { r };
         }
@@ -126,8 +126,7 @@ impl Query {
         if self.is(Op::And) || (self.is(Op::Or) && self.is_atom()) {
             return grams_imply(&self.grams, other);
         }
-        // An OR implies `other` when every alternative does: each sub-query,
-        // and each gram on its own.
+        // an OR implies `other` when every alternative and every lone gram does
         self.is(Op::Or)
             && self.sub.iter().all(|q| q.implies(other))
             && self.grams.as_slice().iter().all(|g| gram_implies(g, other))
@@ -317,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_and_collapses() {
-        // abc AND abc ≡ abc (implication both ways).
+        // abc AND abc ≡ abc (implication both ways)
         let actual = gram(b"abc").and(gram(b"abc"));
         assert_eq!(actual, gram(b"abc"));
     }
@@ -330,11 +329,11 @@ mod tests {
 
     #[test]
     fn test_factor_common_gram_out_of_ors() {
-        // (abc|def) AND (abc|ghi) factors to abc | (def AND ghi).
+        // (abc|def) AND (abc|ghi) factors to abc | (def AND ghi)
         let left = gram(b"abc").or(gram(b"def"));
         let right = gram(b"abc").or(gram(b"ghi"));
         let actual = left.and(right);
-        // Common "abc" implies each side, so the AND collapses to "abc".
+        // common "abc" implies each side, so the AND collapses to "abc"
         assert!(grams_imply(
             &StringSet::of(Gram::from(&b"abc"[..])),
             &actual
@@ -343,7 +342,7 @@ mod tests {
 
     #[test]
     fn test_or_of_conjunctions_factors_shared_required_gram() {
-        // (abc AND def) OR (abc AND ghi) => abc AND (def OR ghi).
+        // (abc AND def) OR (abc AND ghi) => abc AND (def OR ghi)
         let left = gram(b"abc").and(gram(b"def"));
         let right = gram(b"abc").and(gram(b"ghi"));
         let actual = left.or(right);

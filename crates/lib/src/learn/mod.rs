@@ -11,14 +11,11 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sngram_types::WeightTable;
-
 mod batch;
 mod mint;
 mod settings;
 
 use batch::BatchCounts;
-use mint::{Tuning, compute_weight, tune_weight};
 use settings::LearnSettings;
 use sngram_types::LearnError;
 
@@ -156,6 +153,14 @@ impl BigramCounter {
         if !self.is_fresh() {
             return Err(LearnError::NotFresh);
         }
+        self.restore_counts(snapshot);
+        self.pairs_processed.store(pairs, Ordering::Relaxed);
+        self.bytes_processed.store(bytes, Ordering::Relaxed);
+        self.files_processed.store(files, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn restore_counts(&self, snapshot: &[u8]) {
         for (idx, chunk) in snapshot.chunks_exact(8).enumerate() {
             let mut bytes = [0; 8];
             bytes.copy_from_slice(chunk);
@@ -164,16 +169,6 @@ impl BigramCounter {
                 self.add_pair_by_index(idx, n);
             }
         }
-        self.pairs_processed.store(pairs, Ordering::Relaxed);
-        self.bytes_processed.store(bytes, Ordering::Relaxed);
-        self.files_processed.store(files, Ordering::Relaxed);
-        Ok(())
-    }
-
-    /// Serialize the learned weight table in the `SPNG` binary format.
-    #[must_use]
-    pub fn to_table_bytes(&self) -> Vec<u8> {
-        self.weight_table(Tuning::OFF).to_bytes()
     }
 
     fn is_fresh(&self) -> bool {
@@ -205,25 +200,6 @@ impl BigramCounter {
     fn add_pair(&self, c1: u8, c2: u8, n: u64) {
         self.add_pair_by_index(LearnSettings::pair_index(c1, c2), n);
     }
-
-    fn weight_table(&self, tuning: Tuning) -> WeightTable {
-        let total = self.pairs_processed();
-        WeightTable::from_weight_fn(|c1, c2| {
-            let raw = compute_weight(total, self.count(c1, c2));
-            tune_weight(raw, c1, c2, tuning)
-        })
-    }
-
-    #[cfg(test)]
-    fn mint_table_bytes(
-        &self,
-        options: &mint::MintOptions<'_>,
-    ) -> Result<Vec<u8>, sngram_types::TableError> {
-        Ok(self
-            .weight_table(options.tuning)
-            .with_provenance(options.provenance)?
-            .to_bytes())
-    }
 }
 
 #[cfg(test)]
@@ -234,7 +210,6 @@ mod tests {
     use sngram_types::WeightTable;
 
     use super::*;
-    use crate::learn::mint::{MintOptions, Tuning, is_boundary_pair};
 
     #[test]
     fn empty_counter_produces_valid_table() {
@@ -378,108 +353,6 @@ mod tests {
     fn repeated_staging_counter(value: &[u8], repeats: usize) -> BigramCounter {
         let counter = BigramCounter::new();
         counter.process_batch(core::iter::repeat_n(value, repeats));
-        counter
-    }
-
-    #[test]
-    fn mint_round_trips_version_and_provenance() {
-        let counter = counter_with_corpus();
-        let options = MintOptions {
-            provenance: "corpus=fs-validate;date=2026-07-03;commit=deadbeef",
-            tuning: Tuning::default(),
-        };
-        let table = WeightTable::from_bytes(&counter.mint_table_bytes(&options).unwrap()).unwrap();
-
-        assert_eq!(table.version(), 2);
-        assert_eq!(table.provenance(), Some(options.provenance));
-    }
-
-    #[test]
-    fn mint_rejects_oversized_provenance() {
-        let counter = BigramCounter::new();
-        let big = "x".repeat(2048);
-        let options = MintOptions {
-            provenance: &big,
-            tuning: Tuning::OFF,
-        };
-
-        assert!(counter.mint_table_bytes(&options).is_err());
-    }
-
-    #[test]
-    fn identity_tuning_matches_v1_weights() {
-        let counter = counter_with_corpus();
-        let v1 = WeightTable::from_bytes(&counter.to_table_bytes()).unwrap();
-        let options = MintOptions {
-            provenance: "p",
-            tuning: Tuning::OFF,
-        };
-        let v2 = WeightTable::from_bytes(&counter.mint_table_bytes(&options).unwrap()).unwrap();
-
-        for a in [b'_', b's', b'c', b'\n', b'.', b'k'] {
-            for b in [b'_', b's', b'c', b'\n', b'.', b'k'] {
-                assert_eq!(v1.weight(a, b), v2.weight(a, b), "({a},{b})");
-            }
-        }
-    }
-
-    #[test]
-    fn boundary_pairs_discount_toward_floor() {
-        let counter = counter_with_corpus();
-        let tuning = Tuning {
-            boundary_discount: 16,
-            boundary_floor: 1,
-        };
-        let v1 = WeightTable::from_bytes(&counter.to_table_bytes()).unwrap();
-        let options = MintOptions {
-            provenance: "p",
-            tuning,
-        };
-        let v2 = WeightTable::from_bytes(&counter.mint_table_bytes(&options).unwrap()).unwrap();
-
-        for (a, b) in [
-            (b'd', b'_'),
-            (b'_', b'c'),
-            (b'e', b'.'),
-            (b'.', b'r'),
-            (b'1', b'-'),
-            (b'c', b':'),
-            (b't', b'\n'),
-            (b'\n', b's'),
-        ] {
-            let expected = (v1.weight(a, b) / 16).max(1);
-            assert_eq!(v2.weight(a, b), expected, "boundary pair ({a},{b})");
-        }
-    }
-
-    #[test]
-    fn case_seam_and_interior_pairs_are_classified_correctly() {
-        assert!(is_boundary_pair(b'd', b'C'));
-        assert!(!is_boundary_pair(b'D', b'c'));
-        assert!(!is_boundary_pair(b'D', b'C'));
-        assert!(!is_boundary_pair(b'd', b'c'));
-    }
-
-    #[test]
-    fn interior_pairs_pass_through_tuned_mint() {
-        let counter = counter_with_corpus();
-        let v1 = WeightTable::from_bytes(&counter.to_table_bytes()).unwrap();
-        let options = MintOptions {
-            provenance: "p",
-            tuning: Tuning::default(),
-        };
-        let v2 = WeightTable::from_bytes(&counter.mint_table_bytes(&options).unwrap()).unwrap();
-
-        for (a, b) in [(b's', b'c'), (b'c', b'h'), (b'o', b'c'), (b'z', b'q')] {
-            assert_eq!(v1.weight(a, b), v2.weight(a, b), "interior pair ({a},{b})");
-        }
-    }
-
-    fn counter_with_corpus() -> BigramCounter {
-        let counter = BigramCounter::new();
-        for _ in 0..50 {
-            counter.process(b"sched_clock init\nsched_boost done\nmodule.rs v1.2-rc:3");
-        }
         counter
     }
 

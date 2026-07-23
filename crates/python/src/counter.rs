@@ -36,12 +36,7 @@ impl PyBigramCounter {
         py.detach(|| inner.process(data));
     }
 
-    /// Count every row of an Arrow object, per row, GIL-free
-    ///
-    /// Accepts anything exporting the Arrow `PyCapsule` interface with a
-    /// struct/record-batch schema: a `pyarrow.Table`, `RecordBatch`, or
-    /// `RecordBatchReader`. All string/binary columns are counted; nulls are
-    /// skipped. Returns the number of text bytes counted.
+    /// Count every string/binary row of an Arrow object GIL-free, returning bytes counted
     fn count_arrow(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<u64> {
         arrow_ffi::count_arrow(py, data, &self.inner)
     }

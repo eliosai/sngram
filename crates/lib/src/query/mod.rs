@@ -8,6 +8,9 @@
 mod algebra;
 mod analyze;
 mod combine;
+mod covers;
+mod edges;
+mod flush;
 mod info;
 mod needs;
 mod parser;

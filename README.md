@@ -1,24 +1,70 @@
 # sngram
 
-Sparse n-gram extraction for regular-expression search indexing.
+Sparse n-gram extraction for regular-expression search indexing, and
+elgrep, an indexed ripgrep alternative built on it.
 
-A trigram index stores every overlapping 3-byte window. Most of those
-windows are noise. sngram weights every byte pair and keeps only the
-substrings whose two border pairs outweigh everything between them. The
-kept grams vary in length and land on the distinctive parts of the text.
-At query time a regex folds into a boolean plan over gram presence, in
-the spirit of Russ Cox's Google Code Search analysis but with sparse
-covering in place of trigram extraction. The plan matches a superset of
-what the regex matches. A prefilter built from it never misses a match,
-and the real regex verifies the candidates it admits.
+## Sparse n-grams
 
-The weight table decides where gram borders land. Rare byte pairs score
-high and common pairs score low, so selectivity comes from the training
-data. The production table is trained on 5 TB of curated source code,
-config, prose, and web text from Stack v2, and ships inside the library.
+A classic regex index cuts every document into trigrams: each
+overlapping three-byte window becomes a key in an inverted index, a
+query regex decomposes into the trigrams a match must contain, and
+intersecting their posting lists yields the candidate documents.
+Trigrams are a compromise. Two-byte windows make posting lists too
+large to intersect quickly, four-byte windows make the key space too
+large to store, and every trigram repeats two bytes of its neighbor,
+so most of the index is redundancy.
 
-The project has four surfaces: a Rust crate, a Python package, a code
-search CLI, and the trainer that mints weight tables.
+Sparse n-grams replace the fixed window with a weighted one. A weight
+table assigns a weight to every byte pair, high for rare pairs and low
+for common ones. The scanner extracts every substring whose two border
+pairs weigh strictly more than every pair between them. The extracted
+grams vary in length and land on the distinctive parts of the text.
+
+Because the weights are deterministic, the index side and the query
+side stay in agreement. Indexing extracts every sparse gram a document
+contains. Querying extracts far fewer: a covering algorithm derives a
+minimal set of grams a match must contain, so a regex folds into a
+small boolean plan with fewer posting lookups and fewer candidates
+than trigram decomposition. The plan matches a superset of what the
+regex matches. A prefilter built from it never misses a match, and the
+real regex verifies the candidates it admits.
+
+The weight table is a byte-pair frequency table measured over
+terabytes of curated source code, config, prose, and web text, so
+rarity, and with it selectivity, comes from real data. The trained
+production table ships inside the library.
+
+## elgrep
+
+```sh
+cargo install elgrep
+```
+
+`eg` carries ripgrep's search path and adds the sparse index in front:
+the index narrows each query to candidate files, the regex engine
+verifies them, and results match a plain scan exactly. The `eg-indexd`
+daemon builds, watches, and refreshes indexes in the background, so
+every query after the first build hits a warm index.
+
+```sh
+eg 'max_\w+_size' ~/src/linux
+eg --no-index 'max_\w+_size' ~/src/linux   # plain scan for comparison
+```
+
+On the Linux kernel tree, with a hot daemon-owned index,
+files-with-matches output, and identical hit sets (p50 of 9 runs):
+
+| Pattern | Matched files | elgrep | ripgrep | grep | vs ripgrep |
+|---|---:|---:|---:|---:|---:|
+| `linus tor` | 0 | 10.2 ms | 185.9 ms | 1345.8 ms | 18.2x |
+| `EXPORT_SYMBOL_GPL` | 3610 | 45.4 ms | 202.6 ms | 1093.1 ms | 4.5x |
+| `copy_from_user` | 1224 | 19.2 ms | 199.3 ms | 1121.3 ms | 10.4x |
+| `schedule_timeout` | 418 | 13.6 ms | 177.4 ms | 963.2 ms | 13.0x |
+
+The index is 0.90x the corpus size, and the embedded 296-query suite
+enforces zero false negatives on every run.
+[crates/eg/README.md](crates/eg/README.md) covers the CLI, the daemon,
+and the benchmark modes.
 
 ## The Rust crate
 
@@ -47,11 +93,11 @@ scan(&table, Cursor::new(doc), |event| {
 let plan = query(&table, r"max_\w+_size")?;
 ```
 
-`scan` reads one `BufRead` stream, allocates nothing per gram, and ends
-with a `ScanEvent::Finish` summary of document metadata mined in the
-same pass. `query` returns a `QueryPlan` whose needles carry the same
-keys `scan` emits. Training from Rust lives behind the `learn` feature
-as `sngram::learn::BigramCounter`. The README in
+`scan` reads one `BufRead` stream, allocates nothing per gram, and
+ends with a `ScanEvent::Finish` summary of document metadata mined in
+the same pass. `query` returns a `QueryPlan` whose needles carry the
+same keys `scan` emits. Training from Rust lives behind the `learn`
+feature as `sngram::learn::BigramCounter`. The README in
 [crates/lib](crates/lib) covers the library in depth.
 
 ## The Python package
@@ -78,28 +124,6 @@ plan.needs[0].satisfied_by(result.summary)
 
 [crates/python/README.md](crates/python/README.md) documents the full
 surface, including plan tuning and a worked inverted-index example.
-
-## The elgrep CLI
-
-```sh
-cargo install elgrep
-```
-
-`eg` is a code search tool built on the index: a ripgrep-style searcher
-that prefilters files through the sparse index and verifies candidates
-with the real regex engine. Its `eg-indexd` daemon builds, watches, and
-refreshes indexes in the background, so every query after the first
-build hits a warm index.
-
-```sh
-eg 'max_\w+_size' ~/src/linux
-eg --no-index 'max_\w+_size' ~/src/linux   # plain scan for comparison
-```
-
-On the Linux kernel tree the indexed path answers common patterns 4x to
-18x faster than ripgrep, with an index at 0.90x the corpus size and
-zero false negatives. [crates/eg/README.md](crates/eg/README.md) covers
-the CLI, the daemon, and the benchmark modes.
 
 ## The trainer
 

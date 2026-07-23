@@ -18,7 +18,7 @@ from .config import (
     stack_config_name,
 )
 
-TEXT_AREAS = ("docs-prose-markup", "config-build-infra", "data-query-schema")
+_TEXT_AREAS = ("docs-prose-markup", "config-build-infra", "data-query-schema")
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ def build_catalog(configs: list[str]) -> Catalog:
 
 
 def _text_formats() -> list[FormatSpec]:
-    return [_format(area, "Text") for area in TEXT_AREAS]
+    return [_format(area, "Text") for area in _TEXT_AREAS]
 
 
 def _format(area: str, config: str) -> FormatSpec:

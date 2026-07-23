@@ -103,11 +103,7 @@ impl PyQueryPlan {
         self.inner.gram_count()
     }
 
-    /// A copy reordered and thinned by document frequency
-    ///
-    /// `df` maps one gram key to its entry count. Keys whose summed
-    /// alternatives reach `stop_df` entries stop narrowing and drop when a
-    /// stronger sibling remains.
+    /// A copy reordered and thinned by the `df` per-key entry counts
     fn tune(&self, df: Bound<'_, PyAny>, total_entries: u64, stop_df: u64) -> PyResult<Self> {
         let stats = CallableDf {
             func: df,
@@ -155,9 +151,6 @@ fn needle_keys(needle: &GramNeedle) -> Vec<u64> {
 }
 
 /// Fold a regex into a boolean gram query for index lookup
-///
-/// Infallible for valid patterns: a too-broad pattern yields op "all", an
-/// impossible one yields op "none". Raises `ValueError` on an invalid regex.
 #[pyfunction]
 pub fn query(table: &PyWeightTable, pattern: &str) -> PyResult<PyQueryPlan> {
     let planned = sngram::query(table.inner(), pattern)
