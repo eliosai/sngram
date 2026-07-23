@@ -15,16 +15,18 @@ pub struct CollectedHaystacks {
 
 pub fn collect_haystacks(
     args: &HiArgs,
+    corpus_root: &Path,
     index_state_root: &Path,
     progress: Option<&BuildProgress>,
 ) -> anyhow::Result<CollectedHaystacks> {
     let haystack_builder = args.haystack_builder();
     let cwd = args.cwd().to_path_buf();
+    let corpus_root = absolute_path(&cwd, corpus_root);
     let index_state_root = absolute_path(&cwd, index_state_root);
     let mut unsorted = Vec::new();
     let mut dirs = Vec::new();
     let mut entries_done = 0u64;
-    for result in args.walk_builder()?.build() {
+    for result in args.walk_builder_rooted(&corpus_root)?.build() {
         entries_done += 1;
         let dent = match result {
             Ok(dent) => dent,

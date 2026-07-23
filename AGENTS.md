@@ -36,12 +36,12 @@ The `learn` feature exposes training counters. Keep training-specific code behin
 
 ### `weights`
 
-`crates/weights` embeds the trained production weight table behind the `production` feature. Historical tier tables live in git history and are re-mintable from training checkpoints.
+The `sngram` crate embeds trained weight tables behind one Cargo feature per training-data tier (`crates/lib/src/weights.rs`, binaries under `crates/lib/data`). Enable exactly one tier feature (currently `12tb`) and load it with `sngram::weights()`. Historical tier tables live in git history and are re-mintable from training checkpoints.
 
 Use:
 
 ```rust
-let table = sngram_weights::weights();
+let table = sngram::weights();
 ```
 
 Do not expose table internals, filenames, constants, or low-level lookup helpers. The high-level return value is `WeightTable`.
@@ -92,7 +92,7 @@ sngram = { path = "crates/lib", features = ["learn"] }
 
 Use `sngram::learn::BigramCounter` for local counting and table bytes. Use the Python trainer for full corpus minting. The Python trainer is the source of production tables because it handles dataset streaming, worker coordination, checkpointing, mint cadence, and event logs.
 
-Generated `.bin` weight tables load through `WeightTable::from_bytes`. Released tables move into `crates/weights/data` and get exposed through Cargo features.
+Generated `.bin` weight tables load through `WeightTable::from_bytes`. Released tables move into `crates/lib/data` and get exposed through Cargo features.
 
 ## testing
 
@@ -103,9 +103,9 @@ Rust workspace:
 ```sh
 cargo test -p sngram-types --offline
 cargo test -p sngram --offline
-cargo test -p sngram-weights --offline
-cargo test -p eg --offline
-cargo clippy -p eg --all-targets --offline -- -D warnings
+cargo test -p sngram --features 12tb --offline
+cargo test -p elgrep --offline
+cargo clippy -p elgrep --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 ```
 

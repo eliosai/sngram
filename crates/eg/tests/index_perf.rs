@@ -28,7 +28,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> Fixture {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("eg-index-perf-{}-{id}", std::process::id()));
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("eg-index-perf-{}-{id}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         Fixture { root }
     }
@@ -54,7 +55,7 @@ fn eg(args: &[&str]) -> (Output, Duration) {
 }
 
 #[test]
-#[ignore = "local perf smoke; run with `cargo test -p eg --test index_perf -- --ignored --nocapture`"]
+#[ignore = "local perf smoke; run with `cargo test -p elgrep --test index_perf -- --ignored --nocapture`"]
 fn auto_reuse_and_one_file_refresh_timing_smoke() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.path("pkg")).unwrap();

@@ -2,136 +2,134 @@
 
 Sparse n-gram extraction for regular-expression search indexing.
 
-A trigram index extracts every overlapping 3-byte window, which produces a lot
-of redundant, unselective tokens. Sparse n-grams cut that down: weight every
-byte pair, then keep only the substrings whose two border pairs outweigh
-everything inside them. The tokens vary in length and carry more signal. At
-query time a regex folds into a `QueryPlan`, a boolean query over gram presence
-faithful to Russ Cox's Google Code Search analysis but with sparse covering in
-place of trigram extraction, so a regex turns into a handful of selective
-lookups instead of dozens of common trigrams.
+A trigram index stores every overlapping 3-byte window. Most of those
+windows are noise. sngram weights every byte pair and keeps only the
+substrings whose two border pairs outweigh everything between them. The
+kept grams vary in length and land on the distinctive parts of the text.
+At query time a regex folds into a boolean plan over gram presence, in
+the spirit of Russ Cox's Google Code Search analysis but with sparse
+covering in place of trigram extraction. The plan matches a superset of
+what the regex matches. A prefilter built from it never misses a match,
+and the real regex verifies the candidates it admits.
 
-The weight function controls selectivity. Score rare byte pairs high and common
-pairs low, and the grams land on the distinctive parts of the text. `sngram`
-learns those weights from terabytes of blended real text (source code +
-multilingual web), and `sngram-weights` ships the trained tables once minted.
+The weight table decides where gram borders land. Rare byte pairs score
+high and common pairs score low, so selectivity comes from the training
+data. The tables are trained on terabytes of blended source code and
+multilingual web text.
 
-## Install
+The project ships four surfaces.
+
+## The Rust crates
+
+`sngram` is the core library and `sngram-types` holds the shared value
+types. Trained weight tables are embedded in `sngram` behind one Cargo
+feature per training-data tier.
 
 ```toml
 [dependencies]
-sngram = "0.5"
-sngram-types = "0.5"
+sngram = { version = "0.6", features = ["12tb"] }
+sngram-types = "0.6"
 ```
-
-## Index and query
 
 ```rust
 use sngram::{query, scan};
-use sngram_types::{ScanEvent, WeightTable};
+use sngram_types::ScanEvent;
 use std::io::Cursor;
 
-let table = sngram_weights::weights();
+let table = sngram::weights();
 let doc = b"fn max_file_size() -> u64 { 0 }";
 
-// Every sparse gram arrives with its 64-bit index key, computed in O(1)
-// from rolling prefix hashes — store it straight into your inverted index.
+// index side: every gram arrives with its final 64-bit index key
 scan(&table, Cursor::new(doc), |event| {
     if let ScanEvent::Gram(gram) = event {
-        let _span = gram.span;
         let _key = gram.key; // store this in your inverted index
     }
 })?;
 
-// Fold a regex into a boolean gram query to prefilter candidates.
+// query side: a regex becomes a boolean gram query
 let plan = query(&table, r"max_\w+_size")?;
-let _root = plan.root();
 ```
 
-`scan` reads one `BufRead` stream, allocates nothing per gram, and emits
-`ScanEvent::Gram` plus one final `ScanEvent::Finish` summary. Each gram carries
-its content span and finalized `GramKey`; the summary carries document metadata
-that was mined during the same pass.
-`query` folds a regex into a `QueryPlan` rooted at `PlanExpr::All`,
-`PlanExpr::None`, `PlanExpr::AllOf`, or `PlanExpr::AnyOf`. Its `GramNeedle`s are
-the finalized keys to look up in the index, including folded alternatives when a
-case-insensitive pattern needs them. The plan matches a superset of what the
-regex matches, so a prefilter built from it never misses a match the index could
-find; the real regex verifies the candidates. CLI
-concerns such as fixed-string escaping, multiple-pattern OR joining, smart
-case, and CRLF/byte regex mode should be encoded into the single regex pattern
-before calling `query`.
+`scan` reads one `BufRead` stream, allocates nothing per gram, and ends
+with a `ScanEvent::Finish` summary of document metadata mined in the
+same pass. `query` returns a `QueryPlan` whose needles carry the same
+keys `scan` emits. Concerns like fixed-string escaping, smart case, and
+multi-pattern OR joining belong above `query`, encoded into the single
+pattern you pass in.
 
-Upgrading from 0.4: `scan` now takes a `BufRead` input and emits `ScanEvent`,
-`query` now takes one regex pattern and returns `QueryPlan`, and index keys
-changed — reindex.
+Training from Rust lives behind the `learn` feature as
+`sngram::learn::BigramCounter`. The README in [crates/lib](crates/lib)
+covers the library in more depth.
 
-## Weights
+## The Python package
 
-A table is a 256x256 grid: one `u32` per byte pair, 65,536 entries, plus a
-16-byte header (magic, version, CRC32). 262,160 bytes, validated on load.
+`crates/python` is the standalone `sngram` package for Python, built
+with maturin over the same Rust core. It has no runtime dependencies
+and mirrors the Rust surface: scan, query planning, weight tables, and
+the GIL-free training counters. It lands on PyPI with v1 once the final
+tables are minted.
 
-`sngram-weights` embeds the production table behind the `production`
-feature; historical tier tables live in git history. You can also load a
-table you minted yourself:
+```python
+import sngram
 
-```rust
-let table = sngram_types::WeightTable::from_bytes(&std::fs::read("bins/my_weights.bin")?)?;
-let w = table.weight(b'f', b'n');
+table = sngram.weights()
+result = sngram.scan(table, b"fn main() {}")
+result.grams                 # [(start, end, key), ...]
+result.summary.byte_len      # scan-derived document metadata
+
+plan = sngram.query(table, r"max_\w+_size")
+plan.op, plan.grams          # boolean query over index keys
+plan.needs[0].satisfied_by(result.summary)
 ```
 
-## Minting your own
+[crates/python/README.md](crates/python/README.md) documents the full
+surface, including plan tuning and a worked inverted-index example.
 
-To train fresh weights from Rust, enable the `learn` feature for the bigram
-counters and table serialization (the Python trainer below is the full
-pipeline):
+## The trainer
 
-```toml
-sngram = { version = "0.5", features = ["learn"] }
-```
-
-```rust
-use sngram::learn::BigramCounter;
-
-let counter = BigramCounter::new();
-counter.process(b"fn main() {}");           // once per document
-let bytes = counter.to_table_bytes();        // SPNG .bin, loads via WeightTable
-```
-
-Counting is per-value — no bigram straddles two documents — so the learned
-table is a function of the data alone. The minted `.bin` files are what
-`sngram-weights` will embed.
-
-## Python
-
-The `python/` uv project ships the `sngram` Python package: maturin-built
-bindings (`weights` returning the embedded production table, `scan`,
-`scan_hashes`, `query`, `gram_hash`, plus the training counters with
-zero-copy, GIL-free Arrow ingestion) and the training CLI.
+`train/` is the `sngram-train` project, the pipeline that mints weight
+tables. It streams the Stack v2 and Software Heritage blend, counts
+byte pairs through the Rust core at around 3 GB/s per core, checkpoints
+continuously, and mints a table every terabyte.
 
 ```sh
-cd python && uv sync
-export HF_TOKEN=hf_...                   # or put it in python/.env
-uv run sngram train --mint-dir ./bins    # mints every 1 TB
-uv run sngram train --limit 1GB          # smoke run
+cd train
+uv sync
+uv run sngram train --limit 1GB     # smoke run
+uv run sngram train --mint-dir ./bins
 uv run sngram inspect bins/final_weights.bin
 ```
 
-`train` streams the Stack v2 / Software Heritage distribution
-(docs/training-data.md), counts through the Rust core (~3 GB/s/core),
-mints every 1 TB, checkpoints continuously, and resumes exactly where it
-stopped. A live dashboard shows throughput, ETA to the next mint,
-per-worker progress, and stalls; every event also lands in a JSONL log
-next to the mints.
+Credentials go in `train/.env`. [docs/training.md](docs/training.md)
+specifies the one remaining production run and its acceptance gates.
+
+## The eg CLI
+
+`crates/eg` is a code search tool built on the index: a ripgrep-style
+searcher that prefilters files through the sparse index and verifies
+candidates with the real regex engine. Its `eg-indexd` daemon builds,
+watches, and refreshes indexes in the background, so queries after the
+first build hit a warm index.
+
+```sh
+just eg release
+target/release/eg 'max_\w+_size' ~/src/linux
+target/release/eg --bench 'max_\w+_size' ~/src/linux
+```
+
+On the Linux kernel tree the indexed path runs the benchmark suite 2.3x
+faster than scanning, with an index at 0.90x the corpus size and zero
+false negatives. [crates/eg/README.md](crates/eg/README.md) covers the
+CLI, the daemon, and the benchmark modes.
 
 ## Docs
 
-- [docs/architecture.md](docs/architecture.md): the system in one page
-- [docs/index-format.md](docs/index-format.md): postings-v9 on disk
-- [docs/query-planning.md](docs/query-planning.md): regex to plan to candidates
-- [docs/daemon.md](docs/daemon.md): who builds and owns indexes
-- [docs/benchmarking.md](docs/benchmarking.md): how to measure claims
-- [docs/training.md](docs/training.md): the final training run
+- [docs/architecture.md](docs/architecture.md) the system in one page
+- [docs/index-format.md](docs/index-format.md) postings-v9 on disk
+- [docs/query-planning.md](docs/query-planning.md) regex to plan to candidates
+- [docs/daemon.md](docs/daemon.md) who builds and owns indexes
+- [docs/benchmarking.md](docs/benchmarking.md) how to measure claims
+- [docs/training.md](docs/training.md) the final training run
 
 ## License
 

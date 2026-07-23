@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::{flags::HiArgs, haystack::Haystack};
 
 const MANIFEST_VERSION: u32 = 6;
-const TANTIVY_SCHEMA_VERSION: u32 = 4;
-const POSTINGS_SCHEMA_VERSION: u32 = 13;
+const TANTIVY_SCHEMA_VERSION: u32 = 5;
+const POSTINGS_SCHEMA_VERSION: u32 = 16;
 const TANTIVY_BACKEND: &str = "tantivy";
 const POSTINGS_BACKEND: &str = "postings";
 const TANTIVY_COMPAT_VERSION: &str = "0.26.1";
@@ -26,9 +26,9 @@ const MANIFEST_BINARY_MAGIC: &[u8; 8] = b"EGMANI4\0";
 const MANIFEST_BINARY_VERSION: u32 = 5;
 const MANIFEST_BINARY_EXTENSION: &str = "bin";
 const MANIFEST_HEADER_READ_CAP: usize = 4096;
-const PATH_TABLE_FILE_NAME: &str = "paths-v1.bin";
+const PATH_TABLE_FILE_NAME: &str = "paths-v2.bin";
 const PATH_TABLE_MAGIC: &[u8; 8] = b"EGPATH1\0";
-const PATH_TABLE_VERSION: u32 = 1;
+const PATH_TABLE_VERSION: u32 = 2;
 const PATH_TABLE_HEADER_SIZE: usize = 24;
 const PATH_FLAG_EXPLICIT: u8 = 1 << 0;
 const PATH_FLAG_SKIPPED_BINARY: u8 = 1 << 1;
@@ -472,11 +472,13 @@ pub fn write_path_table(manifest_path: &Path, snapshot: &CurrentSnapshot) -> any
     let files = snapshot.eager_files();
     let mut path_bytes = Vec::new();
     let mut offsets = Vec::with_capacity(files.len() + 1);
+    let mut lengths = Vec::with_capacity(files.len());
     let mut flags = Vec::with_capacity(files.len());
     for file in files {
         offsets.push(path_bytes.len());
         let path = file.path.to_string_lossy();
         path_bytes.extend_from_slice(path.as_bytes());
+        lengths.push(file.len());
         let mut flag = 0u8;
         if file.is_explicit() {
             flag |= PATH_FLAG_EXPLICIT;
@@ -489,7 +491,11 @@ pub fn write_path_table(manifest_path: &Path, snapshot: &CurrentSnapshot) -> any
     offsets.push(path_bytes.len());
 
     let mut bytes = Vec::with_capacity(
-        PATH_TABLE_HEADER_SIZE + offsets.len() * 8 + flags.len() + path_bytes.len(),
+        PATH_TABLE_HEADER_SIZE
+            + offsets.len() * 8
+            + lengths.len() * 8
+            + flags.len()
+            + path_bytes.len(),
     );
     bytes.extend_from_slice(PATH_TABLE_MAGIC);
     write_u32(&mut bytes, PATH_TABLE_VERSION);
@@ -503,6 +509,9 @@ pub fn write_path_table(manifest_path: &Path, snapshot: &CurrentSnapshot) -> any
             &mut bytes,
             u64::try_from(offset).context("path table offset too large")?,
         );
+    }
+    for len in lengths {
+        write_u64(&mut bytes, len);
     }
     bytes.extend_from_slice(&flags);
     bytes.extend_from_slice(&path_bytes);
@@ -1044,6 +1053,10 @@ impl CurrentFile {
     pub fn is_skipped_binary(&self) -> bool {
         self.manifest.skipped_binary
     }
+
+    pub fn len(&self) -> u64 {
+        self.manifest.len
+    }
 }
 
 pub struct CurrentDir {
@@ -1058,6 +1071,11 @@ pub struct CurrentSnapshot {
 }
 
 impl CurrentSnapshot {
+    /// Relative directory paths recorded by the walk
+    pub fn dir_paths(&self) -> impl Iterator<Item = &str> {
+        self.dirs.iter().map(|dir| dir.manifest.path.as_str())
+    }
+
     pub fn file_count(&self) -> usize {
         self.files.len()
     }
@@ -1127,6 +1145,7 @@ impl SnapshotFiles {
 struct LazyPathFiles {
     bytes: Arc<Mmap>,
     count: usize,
+    lengths_start: usize,
     flags_start: usize,
     paths_start: usize,
 }
@@ -1159,7 +1178,9 @@ impl LazyPathFiles {
         }
         let path_bytes_len = usize::try_from(read_u64_at(&bytes, 16)?).ok()?;
         let offsets_len = count.checked_add(1)?.checked_mul(8)?;
-        let flags_start = PATH_TABLE_HEADER_SIZE.checked_add(offsets_len)?;
+        let lengths_start = PATH_TABLE_HEADER_SIZE.checked_add(offsets_len)?;
+        let lengths_len = count.checked_mul(8)?;
+        let flags_start = lengths_start.checked_add(lengths_len)?;
         let paths_start = flags_start.checked_add(count)?;
         let expected_len = paths_start.checked_add(path_bytes_len)?;
         if bytes.len() != expected_len {
@@ -1173,6 +1194,7 @@ impl LazyPathFiles {
         Some(Self {
             bytes,
             count,
+            lengths_start,
             flags_start,
             paths_start,
         })
@@ -1200,6 +1222,7 @@ impl LazyPathFiles {
             .get(self.paths_start + start..self.paths_start + end)?;
         let path = String::from_utf8_lossy(path_bytes).into_owned();
         let flag = *self.bytes.get(self.flags_start + ord)?;
+        let len = self.file_len(ord)?;
         Some(CurrentFile {
             ord,
             path: PathBuf::from(&path),
@@ -1207,7 +1230,7 @@ impl LazyPathFiles {
                 path,
                 display_path: String::new(),
                 path_hash: 0,
-                len: 0,
+                len,
                 modified_ns: None,
                 changed_ns: None,
                 content_hash: None,
@@ -1221,6 +1244,11 @@ impl LazyPathFiles {
     fn path_offset(&self, ord: usize) -> Option<usize> {
         let offset_start = PATH_TABLE_HEADER_SIZE.checked_add(ord.checked_mul(8)?)?;
         usize::try_from(read_u64_at(&self.bytes, offset_start)?).ok()
+    }
+
+    fn file_len(&self, ord: usize) -> Option<u64> {
+        let offset = self.lengths_start.checked_add(ord.checked_mul(8)?)?;
+        read_u64_at(&self.bytes, offset)
     }
 }
 
@@ -1304,11 +1332,7 @@ struct ManifestFile {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::path::Path;
 
     use super::{
         Manifest, ManifestFile, binary_manifest_path, changed_ordinals, file_content_changed,
@@ -1344,14 +1368,11 @@ mod tests {
         }
     }
 
-    fn scratch_path(name: &str) -> PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("eg-manifest-{}-{stamp}", std::process::id()));
-        fs::create_dir_all(&root).expect("scratch dir");
-        root.join(name)
+    fn scratch(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("eg-manifest-{name}-"))
+            .tempdir()
+            .expect("scratch dir")
     }
 
     #[test]
@@ -1419,7 +1440,8 @@ mod tests {
 
     #[test]
     fn binary_manifest_round_trips_skipped_binary_disposition() {
-        let path = scratch_path("manifest.bin");
+        let dir = scratch("roundtrip");
+        let path = dir.path().join("manifest.bin");
         let mut source = manifest(vec![file(10, 1, 1, Some(42))]);
         source.files[0].skipped_binary = true;
 
@@ -1429,8 +1451,5 @@ mod tests {
         assert_eq!(decoded.files.len(), 1);
         assert!(decoded.files[0].skipped_binary);
         assert_eq!(decoded.files[0].content_hash, Some(42));
-
-        fs::remove_file(&path).expect("remove manifest");
-        fs::remove_dir(path.parent().expect("parent")).expect("remove scratch dir");
     }
 }

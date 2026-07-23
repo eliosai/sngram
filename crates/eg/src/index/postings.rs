@@ -150,7 +150,13 @@ pub fn query_index(
         );
         return Ok(Some(BTreeSet::new()));
     }
-    let estimate = estimate_with_forced(index, &plan, &df)?;
+    let forced = executor::forced_candidates(index, &plan)?;
+    if let Some(report) = bench.as_deref_mut() {
+        report.set_forced_candidate_files(u64::try_from(forced.len()).unwrap_or(u64::MAX));
+    }
+    let estimate = executor::estimate_candidates(index, &plan, &df)
+        .saturating_add(u64::try_from(forced.len()).unwrap_or(u64::MAX))
+        .min(index.summaries.text_count() as u64);
     if estimate > ceiling {
         if !can_refine_estimate || estimate > selectivity_refinement_ceiling(ceiling, text_count) {
             log::debug!(
@@ -165,7 +171,7 @@ pub fn query_index(
         );
     }
     let lookup_started_at = Instant::now();
-    let candidates = execute_plan(index, &plan, index_plan.precision)?;
+    let candidates = execute_plan(index, &plan, index_plan.precision, &forced)?;
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_index_execute(lookup_started_at);
     }
@@ -194,19 +200,12 @@ fn execute_plan(
     index: &PostingsIndex,
     plan: &QueryPlan,
     precision: executor::Precision,
+    forced: &[usize],
 ) -> anyhow::Result<Vec<usize>> {
     if let Some(candidates) = FastAllOf::try_execute(index, plan, precision)? {
-        let forced = executor::forced_candidates(index, plan)?;
-        return Ok(executor::union_sorted(candidates, forced));
+        return Ok(executor::union_sorted(candidates, forced.to_vec()));
     }
     executor::execute(index, plan, precision)
-}
-
-pub fn forced_candidate_ordinals(
-    index: &PostingsIndex,
-    index_plan: &super::planner::IndexPlan,
-) -> anyhow::Result<Vec<usize>> {
-    executor::forced_candidates(index, &index_plan.plan)
 }
 
 pub fn selectivity_ceiling(doc_count: u64) -> u64 {
@@ -222,22 +221,6 @@ pub fn selectivity_refinement_ceiling(ceiling: u64, doc_count: u64) -> u64 {
     ceiling
         .saturating_mul(SELECTIVITY_REFINE_MULTIPLIER)
         .min(doc_count)
-}
-
-/// Estimated verification set, including files deliberately forced through
-/// exact matching because they have no gram postings.
-fn estimate_with_forced(
-    index: &PostingsIndex,
-    plan: &QueryPlan,
-    df: &PostingsDf<'_>,
-) -> anyhow::Result<u64> {
-    if plan.is_none() {
-        return Ok(0);
-    }
-    let forced = executor::estimate_forced_candidates(index, plan)?;
-    Ok(executor::estimate_candidates(index, plan, df)
-        .saturating_add(forced)
-        .min(index.summaries.text_count() as u64))
 }
 
 /// Posting-list lengths as document-frequency priors.
@@ -996,7 +979,8 @@ struct Segment {
     postings: Mmap,
     records_len: usize,
     block_count: usize,
-    decoder: Decoder,
+    code_lengths: CodeLengths,
+    decoder: std::sync::OnceLock<Decoder>,
 }
 
 impl Segment {
@@ -1034,7 +1018,8 @@ impl Segment {
             postings,
             records_len,
             block_count,
-            decoder: Decoder::new(&code_lengths),
+            code_lengths,
+            decoder: std::sync::OnceLock::new(),
         }))
     }
 
@@ -1054,9 +1039,10 @@ impl Segment {
                 offset,
                 count,
                 size,
-            }) => Ok(self
-                .stored_list(offset, count, size)?
-                .postings(&self.decoder)),
+            }) => Ok(self.stored_list(offset, count, size)?.postings(
+                self.decoder
+                    .get_or_init(|| Decoder::new(&self.code_lengths)),
+            )),
         }
     }
 
@@ -1804,7 +1790,7 @@ mod tests {
 
     #[test]
     fn lookup_round_trips_stored_and_inline_lists() {
-        let dir = scratch("roundtrip");
+        let (_dir, dir) = scratch("roundtrip");
         let stored = vec![(3u32, 0x05u8), (8, 0x21), (70_000, 0xFF)];
         let segment = build_segment(
             &dir,
@@ -1826,7 +1812,7 @@ mod tests {
 
     #[test]
     fn counts_above_u16_stay_exact() {
-        let dir = scratch("bigcount");
+        let (_dir, dir) = scratch("bigcount");
         let docs: Vec<(u32, u8)> = (0..70_000u32).map(|ord| (ord, 0x01)).collect();
         let segment = build_segment(&dir, &[(77, docs.clone())]);
 
@@ -1836,7 +1822,7 @@ mod tests {
 
     #[test]
     fn lookups_cross_directory_blocks() {
-        let dir = scratch("blocks");
+        let (_dir, dir) = scratch("blocks");
         let lists: Vec<(u32, Vec<(u32, u8)>)> = (0..3 * RECORDS_PER_BLOCK as u32 + 7)
             .map(|i| {
                 let hash = i * 3 + 1;
@@ -1913,7 +1899,7 @@ mod tests {
 
     #[test]
     fn run_pair_io_round_trips_and_stops_at_eof() {
-        let dir = scratch("pair-io");
+        let (_dir, dir) = scratch("pair-io");
         let path = dir.join("run.bin");
         let pairs = [
             Pair {
@@ -1968,7 +1954,7 @@ mod tests {
 
     #[test]
     fn actual_open_rejects_corrupted_table_body() {
-        let dir = scratch("corrupt-open");
+        let (_dir, dir) = scratch("corrupt-open");
         build_segment(&dir, &[(9, vec![(1, 0x01), (5, 0x02)])]);
         let table = dir.join("table.bin");
         let postings = dir.join("postings.bin");
@@ -2019,13 +2005,12 @@ mod tests {
         );
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("eg-postings-{name}-{stamp}"));
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn scratch(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("eg-postings-{name}-"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_path_buf();
+        (dir, path)
     }
 }

@@ -20,6 +20,19 @@ impl Watcher {
         Ok(false)
     }
 
+    pub fn watch_dirs(
+        &mut self,
+        _index_root: &std::path::Path,
+        _dirs: &[std::path::PathBuf],
+        _state_root: &std::path::Path,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    pub fn watch_signal_dir(&mut self, _dir: &std::path::Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     pub fn drain_dirty(&mut self) -> anyhow::Result<Vec<std::path::PathBuf>> {
         Ok(Vec::new())
     }
@@ -83,6 +96,57 @@ mod linux {
             Ok(true)
         }
 
+        /// Watch exactly the walked directories, pruning watches the walk dropped
+        pub fn watch_dirs(
+            &mut self,
+            index_root: &Path,
+            dirs: &[PathBuf],
+            state_root: &Path,
+        ) -> anyhow::Result<bool> {
+            if !index_root.is_dir() {
+                return Ok(false);
+            }
+            self.watch_one_dir(index_root, Some(state_root))?;
+            for dir in dirs {
+                self.watch_one_dir(dir, Some(state_root))?;
+            }
+            self.prune_watches(index_root, dirs, state_root);
+            Ok(true)
+        }
+
+        /// Watch a coordination directory whose events only wake the poll
+        pub fn watch_signal_dir(&mut self, dir: &Path) -> anyhow::Result<()> {
+            self.watch_one_dir(dir, None)
+        }
+
+        fn prune_watches(&mut self, index_root: &Path, dirs: &[PathBuf], state_root: &Path) {
+            let keep: HashSet<&Path> = dirs
+                .iter()
+                .map(PathBuf::as_path)
+                .chain([index_root])
+                .collect();
+            let stale: Vec<i32> = self
+                .dirs_by_watch
+                .iter()
+                .filter(|(_, watched)| {
+                    watched.state_root.as_deref() == Some(state_root)
+                        && !keep.contains(watched.dir.as_path())
+                })
+                .map(|(wd, _)| *wd)
+                .collect();
+            for wd in stale {
+                self.drop_watch(wd);
+            }
+        }
+
+        fn drop_watch(&mut self, wd: i32) {
+            let Some(watched) = self.dirs_by_watch.remove(&wd) else {
+                return;
+            };
+            self.watched_dirs.remove(&watched.dir);
+            unsafe { libc::inotify_rm_watch(self.fd, wd) };
+        }
+
         pub fn drain_dirty(&mut self) -> anyhow::Result<Vec<PathBuf>> {
             let mut dirty = HashSet::new();
             let mut buffer = vec![0u8; 64 * 1024];
@@ -141,14 +205,14 @@ mod linux {
             if is_state_path(root, state_root) {
                 return Ok(());
             }
-            self.watch_one_dir(root, state_root)?;
+            self.watch_one_dir(root, Some(state_root))?;
             for path in child_dirs(root, state_root)? {
                 self.watch_dir_recursive(&path, state_root)?;
             }
             Ok(())
         }
 
-        fn watch_one_dir(&mut self, dir: &Path, state_root: &Path) -> anyhow::Result<()> {
+        fn watch_one_dir(&mut self, dir: &Path, state_root: Option<&Path>) -> anyhow::Result<()> {
             if !self.watched_dirs.insert(dir.to_path_buf()) {
                 return Ok(());
             }
@@ -162,7 +226,7 @@ mod linux {
                 wd,
                 WatchedDir {
                     dir: dir.to_path_buf(),
-                    state_root: state_root.to_path_buf(),
+                    state_root: state_root.map(Path::to_path_buf),
                 },
             );
             Ok(())
@@ -188,13 +252,16 @@ mod linux {
             let Some(watched) = self.dirs_by_watch.get(&event.wd).cloned() else {
                 return Ok(());
             };
+            let Some(state_root) = watched.state_root.as_deref() else {
+                return Ok(());
+            };
             let path = watched.event_path(&event.name);
-            if is_state_path(&path, &watched.state_root) {
+            if is_state_path(&path, state_root) {
                 return Ok(());
             }
-            dirty.insert(watched.state_root.clone());
+            dirty.insert(state_root.to_path_buf());
             if event.created_dir() {
-                self.watch_dir_recursive(&path, &watched.state_root)?;
+                self.watch_dir_recursive(&path, state_root)?;
             }
             Ok(())
         }
@@ -209,7 +276,7 @@ mod linux {
     #[derive(Clone)]
     struct WatchedDir {
         dir: PathBuf,
-        state_root: PathBuf,
+        state_root: Option<PathBuf>,
     }
 
     impl WatchedDir {
@@ -291,22 +358,19 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::Watcher;
-        use std::{fs, path::PathBuf, time::Duration};
+        use std::{fs, time::Duration};
 
-        fn scratch(name: &str) -> PathBuf {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos();
-            let root = std::env::temp_dir()
-                .join(format!("eg-watch-{}-{stamp}-{name}", std::process::id()));
-            fs::create_dir_all(&root).expect("scratch dir");
-            root
+        fn scratch(name: &str) -> tempfile::TempDir {
+            tempfile::Builder::new()
+                .prefix(&format!("eg-watch-{name}-"))
+                .tempdir()
+                .expect("scratch dir")
         }
 
         #[test]
         fn file_event_marks_state_root_dirty() {
-            let root = scratch("dirty");
+            let root_guard = scratch("dirty");
+            let root = root_guard.path().to_path_buf();
             let state = root.join(".eg");
             fs::create_dir_all(&state).expect("state");
 
@@ -321,7 +385,8 @@ mod linux {
 
         #[test]
         fn missing_root_is_skipped_without_error() {
-            let root = scratch("missing");
+            let root_guard = scratch("missing");
+            let root = root_guard.path().to_path_buf();
             let gone = root.join("deleted-corpus");
             let state = gone.join(".eg");
 
@@ -332,7 +397,8 @@ mod linux {
 
         #[test]
         fn existing_tree_reports_watching() {
-            let root = scratch("existing");
+            let root_guard = scratch("existing");
+            let root = root_guard.path().to_path_buf();
             let state = root.join(".eg");
             fs::create_dir_all(&state).expect("state");
             fs::create_dir_all(root.join("kept")).expect("kept");
@@ -343,7 +409,8 @@ mod linux {
 
         #[test]
         fn state_root_events_are_ignored() {
-            let root = scratch("state");
+            let root_guard = scratch("state");
+            let root = root_guard.path().to_path_buf();
             let state = root.join(".eg");
             fs::create_dir_all(&state).expect("state");
 
@@ -357,7 +424,8 @@ mod linux {
 
         #[test]
         fn nested_state_root_events_are_ignored() {
-            let root = scratch("nested-state");
+            let root_guard = scratch("nested-state");
+            let root = root_guard.path().to_path_buf();
             let state = root.join(".eg");
             let nested_state = root.join("src/.eg");
             fs::create_dir_all(&state).expect("state");

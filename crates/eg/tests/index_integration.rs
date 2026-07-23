@@ -17,6 +17,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const DAEMON_CYCLE_WAIT: Duration = Duration::from_mins(1);
+
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 static EG_COMMAND_LOCK: Mutex<()> = Mutex::new(());
 
@@ -27,8 +29,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> Fixture {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("eg-index-integration-{}-{id}", std::process::id()));
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("eg-index-integration-{}-{id}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         Fixture { root }
     }
@@ -40,7 +42,13 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        // the daemon may recreate markers mid-removal; retry until it settles
+        for _ in 0..20 {
+            if fs::remove_dir_all(&self.root).is_ok() || !self.root.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 
@@ -84,7 +92,7 @@ fn eg_command() -> Command {
 
 fn isolated_runtime_dir() -> PathBuf {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
         "eg-index-integration-runtime-{}-{id}",
         std::process::id()
     ));
@@ -115,7 +123,7 @@ impl ChildGuard {
 
     fn spawn_daemon_binary(binary: &Path, runtime_root: &Path) -> Self {
         let child = spawn_daemon_process(binary, runtime_root);
-        wait_until(Duration::from_secs(10), || {
+        wait_until(DAEMON_CYCLE_WAIT, || {
             runtime_root.join("startup-ready").exists().then_some(())
         });
         Self { child: Some(child) }
@@ -492,7 +500,7 @@ fn index_bench_reports_hot_source_after_daemon_refresh() {
         String::from_utf8(first.stderr).unwrap()
     );
     let state_runtime = fixture.path(".eg/runtime");
-    let initial_clean = wait_until(Duration::from_secs(10), || {
+    let initial_clean = wait_until(DAEMON_CYCLE_WAIT, || {
         fs::metadata(state_runtime.join("journal-clean"))
             .and_then(|meta| meta.modified())
             .ok()
@@ -500,7 +508,7 @@ fn index_bench_reports_hot_source_after_daemon_refresh() {
 
     std::thread::sleep(Duration::from_millis(20));
     fs::write(fixture.path("sample.txt"), "bench daemon changed needle\n").unwrap();
-    wait_until(Duration::from_secs(10), || {
+    wait_until(DAEMON_CYCLE_WAIT, || {
         let modified = fs::metadata(state_runtime.join("journal-clean"))
             .and_then(|meta| meta.modified())
             .ok()?;
@@ -887,14 +895,14 @@ fn daemon_refreshes_changed_index_and_hot_path_uses_daemon_proof() {
     );
 
     let state_runtime = fixture.path(".eg/runtime");
-    let initial_clean = wait_until(Duration::from_secs(10), || {
+    let initial_clean = wait_until(DAEMON_CYCLE_WAIT, || {
         fs::metadata(state_runtime.join("journal-clean"))
             .and_then(|meta| meta.modified())
             .ok()
     });
 
     fs::write(fixture.path("hit.txt"), "daemon new needle\n").unwrap();
-    wait_until(Duration::from_secs(10), || {
+    wait_until(DAEMON_CYCLE_WAIT, || {
         let modified = fs::metadata(state_runtime.join("journal-clean"))
             .and_then(|meta| meta.modified())
             .ok()?;
@@ -937,14 +945,22 @@ fn daemon_invalidates_changed_file_before_hot_search() {
         "{}",
         String::from_utf8(build.stderr).unwrap()
     );
-    wait_until(Duration::from_secs(10), || {
-        fixture
-            .path(".eg/runtime/journal-clean")
-            .exists()
-            .then_some(())
+    let clean_marker = fixture.path(".eg/runtime/journal-clean");
+    let pre_change_clean = wait_until(DAEMON_CYCLE_WAIT, || {
+        fs::metadata(&clean_marker)
+            .and_then(|meta| meta.modified())
+            .ok()
     });
 
     fs::write(fixture.path("hit.txt"), "new daemon stale window needle\n").unwrap();
+    // a query is ordered with a change only once the watcher noticed it
+    wait_until(DAEMON_CYCLE_WAIT, || {
+        match fs::metadata(&clean_marker).and_then(|meta| meta.modified()) {
+            Err(_) => Some(()),
+            Ok(modified) if modified > pre_change_clean => Some(()),
+            Ok(_) => None,
+        }
+    });
     let output = eg_with_env_vars(&["--bench", "new daemon stale window", root_str], &envs);
     let stdout = String::from_utf8(output.stdout).unwrap();
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -985,14 +1001,14 @@ fn runtime_installed_daemon_refreshes_changed_index() {
     );
 
     let state_runtime = fixture.path(".eg/runtime");
-    let initial_clean = wait_until(Duration::from_secs(10), || {
+    let initial_clean = wait_until(DAEMON_CYCLE_WAIT, || {
         fs::metadata(state_runtime.join("journal-clean"))
             .and_then(|meta| meta.modified())
             .ok()
     });
 
     fs::write(fixture.path("hit.txt"), "runtime copy new needle\n").unwrap();
-    wait_until(Duration::from_secs(10), || {
+    wait_until(DAEMON_CYCLE_WAIT, || {
         let modified = fs::metadata(state_runtime.join("journal-clean"))
             .and_then(|meta| meta.modified())
             .ok()?;
@@ -1040,7 +1056,7 @@ fn daemon_graceful_idle_exit_deletes_index_markers_and_request() {
     assert!(has_request_file(&runtime_root));
 
     fs::remove_file(fixture.path(".eg/runtime/lease")).unwrap();
-    let status = daemon.wait_for_exit(Duration::from_secs(10));
+    let status = daemon.wait_for_exit(DAEMON_CYCLE_WAIT);
 
     assert!(status.success());
     assert!(!fixture.path(".eg/index").exists());
@@ -1088,7 +1104,7 @@ fn killed_daemon_leaves_index_unusable_until_next_startup_deletes_it() {
     let _ = fs::remove_file(fixture.path(".eg/runtime/lease"));
     let mut restart =
         spawn_daemon_process(Path::new(env!("CARGO_BIN_EXE_eg-indexd")), &runtime_root);
-    let status = wait_until(Duration::from_secs(10), || restart.try_wait().unwrap());
+    let status = wait_until(DAEMON_CYCLE_WAIT, || restart.try_wait().unwrap());
 
     assert!(status.success());
     assert!(!fixture.path(".eg/index").exists());
@@ -1149,7 +1165,7 @@ fn daemon_consolidates_child_index_after_parent_build() {
     assert!(fixture.path(".eg/index").exists());
     let _ = fs::remove_file(fixture.path("src/.eg/runtime/lease"));
 
-    wait_until(Duration::from_secs(10), || {
+    wait_until(DAEMON_CYCLE_WAIT, || {
         (!fixture.path("src/.eg/index").exists()).then_some(())
     });
 

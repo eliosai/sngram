@@ -22,10 +22,13 @@
 //!
 //! - [`scan`] extracts sparse n-grams and metadata from one byte stream.
 //! - [`query`] decomposes one regex pattern into a planned gram prefilter.
+//! - `weights` (tier features such as `12tb`) loads the embedded table.
 //! - `learn` module (feature `learn`) trains fresh weight tables.
 
 mod query;
 mod scan;
+#[cfg(feature = "12tb")]
+mod weights;
 
 #[cfg(feature = "learn")]
 pub mod learn;
@@ -35,3 +38,5 @@ pub use scan::scan;
 pub use sngram_types::{
     DfStats, GramNeedle, LearnError, PlanExpr, QueryError, QueryPlan, ScanError, ScanNeed,
 };
+#[cfg(feature = "12tb")]
+pub use weights::weights;

@@ -90,25 +90,18 @@ pub fn has_decoding_bom(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
 
     use super::{
         BINARY_SCAN_BYTES, has_decoding_bom, is_binary, is_binary_path, is_high_entropy,
         is_oversized,
     };
 
-    fn scratch_path(name: &str) -> PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("eg-classify-{}-{stamp}", std::process::id()));
-        fs::create_dir_all(&root).expect("scratch dir");
-        root.join(name)
+    fn scratch(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("eg-classify-{name}-"))
+            .tempdir()
+            .expect("scratch dir")
     }
 
     #[test]
@@ -161,25 +154,21 @@ mod tests {
 
     #[test]
     fn path_binary_detection_scans_past_the_first_chunk() {
-        let path = scratch_path("late-nul.bin");
+        let dir = scratch("late-nul");
+        let path = dir.path().join("late-nul.bin");
         let mut bytes = vec![b'a'; BINARY_SCAN_BYTES + 7];
         bytes.push(0);
         fs::write(&path, bytes).expect("write fixture");
 
         assert!(is_binary_path(&path).expect("classify path"));
-
-        fs::remove_file(&path).expect("remove fixture");
-        fs::remove_dir(path.parent().expect("parent")).expect("remove scratch dir");
     }
 
     #[test]
     fn path_bom_text_is_not_reclassified_by_utf16_nuls() {
-        let path = scratch_path("utf16.txt");
+        let dir = scratch("utf16");
+        let path = dir.path().join("utf16.txt");
         fs::write(&path, [0xFF, 0xFE, b'a', 0x00, b'b', 0x00]).expect("write fixture");
 
         assert!(!is_binary_path(&path).expect("classify path"));
-
-        fs::remove_file(&path).expect("remove fixture");
-        fs::remove_dir(path.parent().expect("parent")).expect("remove scratch dir");
     }
 }

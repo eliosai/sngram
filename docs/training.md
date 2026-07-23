@@ -39,14 +39,14 @@ discount sweeps performed worse than `Tuning::OFF`.
 
 ## Acceptance
 
-Inspect the resulting tiers before replacing the embedded table:
+Inspect the minted table before embedding it:
 
 ```sh
-uv run sngram inspect bins/10tb_weights.bin
-uv run sngram fs-validate bins/10tb_weights.bin ~/ripos/linux
+uv run sngram inspect runs/r1/final_weights.bin
+uv run sngram fs-validate runs/r1/final_weights.bin ~/ripos/linux
 ```
 
-After replacing `crates/weights/data/final_weights.bin`, rebuild and run both
+After replacing the table in `crates/lib/data/`, rebuild and run both
 corpora:
 
 ```sh

@@ -16,8 +16,8 @@ use sngram_types::{
 pub const SUMMARY_FILE_NAME: &str = "summaries.bin";
 
 const MAGIC: [u8; 8] = *b"EGSUM1\0\0";
-const VERSION: u32 = 3;
-const HEADER_SIZE: usize = 32;
+const VERSION: u32 = 4;
+const HEADER_SIZE: usize = 40;
 const RECORD_SIZE: usize = 240;
 const STATUS_SKIPPED: u8 = 0;
 const STATUS_UNKNOWN_TEXT: u8 = 1;
@@ -67,6 +67,7 @@ pub struct SummaryIndex {
     base: SummarySegment,
     doc_count: usize,
     text_count: usize,
+    text_bytes: u64,
 }
 
 impl SummaryIndex {
@@ -83,13 +84,16 @@ impl SummaryIndex {
         doc_count: usize,
         mode: SummaryOpen,
     ) -> anyhow::Result<Option<Self>> {
-        let Some((base, text_count)) = SummarySegment::open(base_path, doc_count, mode)? else {
+        let Some((base, text_count, text_bytes)) =
+            SummarySegment::open(base_path, doc_count, mode)?
+        else {
             return Ok(None);
         };
         Ok(Some(Self {
             base,
             doc_count,
             text_count,
+            text_bytes,
         }))
     }
 
@@ -102,10 +106,12 @@ impl SummaryIndex {
             );
         }
         let text_count = base.count_text();
+        let text_bytes = base.text_bytes();
         Ok(Self {
             base,
             doc_count,
             text_count,
+            text_bytes,
         })
     }
 
@@ -127,12 +133,7 @@ impl SummaryIndex {
     }
 
     pub fn text_bytes(&self) -> u64 {
-        (0..self.doc_count)
-            .map(|ord| match self.status(ord) {
-                SummaryStatus::Known(summary) => summary.byte_len,
-                _ => 0,
-            })
-            .sum()
+        self.text_bytes
     }
 
     pub fn ordinals_satisfying(&self, need: &ScanNeed) -> Vec<usize> {
@@ -182,7 +183,7 @@ impl SummarySegment {
         path: &Path,
         doc_count: usize,
         mode: SummaryOpen,
-    ) -> anyhow::Result<Option<(Self, usize)>> {
+    ) -> anyhow::Result<Option<(Self, usize, u64)>> {
         let file = match File::open(path) {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -199,7 +200,7 @@ impl SummarySegment {
             return Ok(None);
         }
         let mmap = mmap_file(&file, path)?;
-        let Some(text_count) = validate_open_file(&mmap, doc_count, mode) else {
+        let Some((text_count, text_bytes)) = validate_open_file(&mmap, doc_count, mode) else {
             log::debug!("eg index: invalid summary file {}", path.display());
             return Ok(None);
         };
@@ -208,6 +209,7 @@ impl SummarySegment {
                 storage: SummaryStorage::Mmap(Arc::new(mmap)),
             },
             text_count,
+            text_bytes,
         )))
     }
 
@@ -239,6 +241,13 @@ impl SummarySegment {
             .count()
     }
 
+    fn text_bytes(&self) -> u64 {
+        self.body()
+            .chunks_exact(RECORD_SIZE)
+            .filter_map(|bytes| read_known_byte_len(bytes))
+            .sum()
+    }
+
     fn dense_status(&self, ord: u32) -> Option<SummaryStatus> {
         let idx = usize::try_from(ord).ok()?;
         Some(self.record(idx)?.status)
@@ -266,10 +275,14 @@ pub fn write_records(path: &Path, records: &mut Vec<SummaryRecord>) -> anyhow::R
         .iter()
         .filter(|record| record.status().is_text())
         .count();
+    let text_bytes = records
+        .iter()
+        .filter_map(|record| known_byte_len(record.status()))
+        .sum();
     for &record in records.iter() {
         body.extend_from_slice(&encode_record(record));
     }
-    let mut file = header(records.len(), checksum(&body), text_count).to_vec();
+    let mut file = header(records.len(), checksum(&body), text_count, text_bytes).to_vec();
     file.extend_from_slice(&body);
     durable_write(path, &file)
 }
@@ -323,22 +336,24 @@ fn mmap_file(file: &File, path: &Path) -> anyhow::Result<Mmap> {
         .with_context(|| format!("failed to mmap {}", path.display()))
 }
 
-fn validate_open_file(bytes: &[u8], doc_count: usize, mode: SummaryOpen) -> Option<usize> {
+fn validate_open_file(bytes: &[u8], doc_count: usize, mode: SummaryOpen) -> Option<(usize, u64)> {
     let Some(body) = open_file_body(bytes) else {
         return None;
     };
     if body.len() / RECORD_SIZE != doc_count {
         return None;
     }
+    let header = bytes.get(..HEADER_SIZE)?;
+    let text_count = usize::try_from(read_u32(header, 12)).ok()?;
+    let text_bytes = read_u64(header, 32);
     if matches!(mode, SummaryOpen::Trusted) {
-        return Some(usize::try_from(read_u32(bytes.get(..HEADER_SIZE)?, 12)).ok()?);
+        return Some((text_count, text_bytes));
     }
     if checksum(body) != read_u64(bytes.get(..HEADER_SIZE)?, 24) {
         return None;
     }
-    let text_count = body_covers_base_and_count_text(body, doc_count)?;
-    (usize::try_from(read_u32(bytes.get(..HEADER_SIZE)?, 12)).ok()? == text_count)
-        .then_some(text_count)
+    let (actual_count, actual_bytes) = body_covers_base_and_count_text(body, doc_count)?;
+    (text_count == actual_count && text_bytes == actual_bytes).then_some((text_count, text_bytes))
 }
 
 fn open_file_body(bytes: &[u8]) -> Option<&[u8]> {
@@ -365,11 +380,12 @@ fn body_covers_base(body: &[u8], doc_count: usize) -> bool {
     body_covers_base_and_count_text(body, doc_count).is_some()
 }
 
-fn body_covers_base_and_count_text(body: &[u8], doc_count: usize) -> Option<usize> {
+fn body_covers_base_and_count_text(body: &[u8], doc_count: usize) -> Option<(usize, u64)> {
     if body.len() / RECORD_SIZE != doc_count {
         return None;
     }
     let mut text_count = 0usize;
+    let mut text_bytes = 0u64;
     for (idx, record) in body.chunks_exact(RECORD_SIZE).enumerate() {
         let Some(record) = decode_record(idx as u32, record) else {
             return None;
@@ -377,18 +393,33 @@ fn body_covers_base_and_count_text(body: &[u8], doc_count: usize) -> Option<usiz
         if record.status().is_text() {
             text_count += 1;
         }
+        if let Some(byte_len) = known_byte_len(record.status()) {
+            text_bytes = text_bytes.saturating_add(byte_len);
+        }
     }
-    Some(text_count)
+    Some((text_count, text_bytes))
 }
 
-fn header(count: usize, checksum: u64, text_count: usize) -> [u8; HEADER_SIZE] {
+fn header(count: usize, checksum: u64, text_count: usize, text_bytes: u64) -> [u8; HEADER_SIZE] {
     let mut header = [0u8; HEADER_SIZE];
     header[..8].copy_from_slice(&MAGIC);
     header[8..12].copy_from_slice(&VERSION.to_le_bytes());
     header[12..16].copy_from_slice(&u32::try_from(text_count).unwrap_or(u32::MAX).to_le_bytes());
     header[16..24].copy_from_slice(&(count as u64).to_le_bytes());
     header[24..32].copy_from_slice(&checksum.to_le_bytes());
+    header[32..40].copy_from_slice(&text_bytes.to_le_bytes());
     header
+}
+
+fn known_byte_len(status: SummaryStatus) -> Option<u64> {
+    match status {
+        SummaryStatus::Known(summary) => Some(summary.byte_len),
+        SummaryStatus::Skipped | SummaryStatus::UnknownText => None,
+    }
+}
+
+fn read_known_byte_len(bytes: &[u8]) -> Option<u64> {
+    (*bytes.first()? == STATUS_KNOWN).then(|| read_u64(bytes, 1))
 }
 
 fn encode_record(record: SummaryRecord) -> [u8; RECORD_SIZE] {
@@ -621,7 +652,7 @@ mod tests {
 
     #[test]
     fn open_rejects_corrupted_checksum() {
-        let path = scratch("summary-corrupt").join(SUMMARY_FILE_NAME);
+        let (_dir, path) = scratch("summary-corrupt");
         let record = SummaryRecord::new(0, SummaryStatus::Known(empty_summary()));
         let mut bytes = summary_file(&[record]);
         bytes[HEADER_SIZE + 8] ^= 0xFF;
@@ -632,21 +663,20 @@ mod tests {
 
     #[test]
     fn open_rejects_wrong_document_count() {
-        let path = scratch("summary-count").join(SUMMARY_FILE_NAME);
+        let (_dir, path) = scratch("summary-count");
         let record = SummaryRecord::new(0, SummaryStatus::Known(empty_summary()));
         fs::write(&path, summary_file(&[record])).unwrap();
 
         assert!(SummaryIndex::open(&path, 2).unwrap().is_none());
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("eg-summary-{name}-{stamp}"));
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn scratch(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("eg-summary-{name}-"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join(SUMMARY_FILE_NAME);
+        (dir, path)
     }
 
     fn summary_file(records: &[SummaryRecord]) -> Vec<u8> {
@@ -655,10 +685,14 @@ mod tests {
             .iter()
             .filter(|record| record.status().is_text())
             .count();
+        let text_bytes = records
+            .iter()
+            .filter_map(|record| known_byte_len(record.status()))
+            .sum();
         for &record in records {
             body.extend_from_slice(&encode_record(record));
         }
-        let mut file = header(records.len(), checksum(&body), text_count).to_vec();
+        let mut file = header(records.len(), checksum(&body), text_count, text_bytes).to_vec();
         file.extend_from_slice(&body);
         file
     }

@@ -10,6 +10,7 @@ readme = "README.md"
 keywords = ["regex", "search", "ngram", "index", "code-search"]
 categories = ["text-processing", "algorithms", "data-structures"]
 publish = true
+exclude = ["data/.checkpoint"]
 
 [features]
 # stream reserves async integration dependencies without changing the sync scan core
@@ -17,12 +18,17 @@ stream = ["dep:tokio"]
 # learn adds the bigram counters used to train weight tables; off by default
 # because it is useless without a training pipeline driving it
 learn = ["dep:crc32fast"]
+# one feature per minted weight tier; enable exactly one to embed its table
+"12tb" = []
 
 [dependencies]
 sngram-types = { workspace = true }
 regex-syntax = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["io-util"] }
 crc32fast = { workspace = true, optional = true }
+
+[build-dependencies]
+sngram-types = { workspace = true }
 
 [dev-dependencies]
 crc32fast = { workspace = true }

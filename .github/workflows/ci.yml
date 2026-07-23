@@ -37,7 +37,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
-      - run: cargo test -p sngram-weights --features production
+      - run: cargo test -p sngram --features 12tb
 
   python:
     runs-on: ubuntu-latest
@@ -55,6 +55,27 @@ jobs:
       - run: uv run pytest -q
         working-directory: train
 
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx maturin build --release
+        working-directory: crates/python
+      - run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python target/wheels/sngram-*.whl
+          /tmp/smoke/bin/python -c "
+          import sngram
+          table = sngram.weights()
+          result = sngram.scan(table, b'fn main() {}')
+          assert result.grams and result.summary.byte_len == 12
+          assert sngram.query(table, 'main').op == 'and'
+          print('wheel ok:', sngram.__version__)
+          "
+
   semver:
     runs-on: ubuntu-latest
     steps:
@@ -64,5 +85,5 @@ jobs:
       - name: cargo-semver-checks
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
-          package: sngram-types, sngram, sngram-weights
+          package: sngram-types, sngram
           feature-group: default-features

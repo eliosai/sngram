@@ -3,7 +3,6 @@
 use std::{
     collections::BTreeSet,
     mem,
-    path::Path,
     sync::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
@@ -18,7 +17,7 @@ use crate::{
     haystack::Haystack,
 };
 
-use super::{bench, manifest, roots::absolute_path};
+use super::{bench, manifest};
 
 pub struct CandidateVerifier<'a, 'b> {
     args: &'a HiArgs,
@@ -90,7 +89,7 @@ fn all_ordered(snapshot: &manifest::CurrentSnapshot) -> Vec<usize> {
 }
 
 /// Smallest candidate set that a multi-threaded verify is worth spawning for.
-const PARALLEL_VERIFY_MIN: usize = 4096;
+const PARALLEL_VERIFY_MIN: usize = 128;
 
 /// Return true when the mode reports on the whole corpus, not just matches.
 fn is_full_corpus_mode(args: &HiArgs, mode: SearchMode) -> bool {
@@ -115,11 +114,22 @@ fn verify_for_bench(
     report: &mut bench::BenchReport,
 ) -> anyhow::Result<bool> {
     let started_at = Instant::now();
-    let ordered = if is_full_corpus_mode(args, mode) {
+    let full_corpus = is_full_corpus_mode(args, mode);
+    let ordered = if full_corpus {
         all_ordered(snapshot)
     } else {
         ordered_candidates(snapshot, candidates)
     };
+    if !full_corpus && verify_worker_count(args, ordered.len()) > 1 {
+        let facts = verify_candidates_for_bench(args, mode, snapshot, &ordered)?;
+        report.set_verification(
+            facts.verified_files,
+            facts.matched_files,
+            facts.bytes_verified,
+        );
+        report.timing_mut().set_verify_haystacks(started_at);
+        return Ok(facts.matched_any);
+    }
     let mut facts = BenchFacts::default();
     let sink = termcolor::NoColor::new(Vec::new());
     let mut searcher =
@@ -145,6 +155,66 @@ fn verify_for_bench(
     Ok(facts.matched_any)
 }
 
+fn verify_candidates_for_bench(
+    args: &HiArgs,
+    mode: SearchMode,
+    snapshot: &manifest::CurrentSnapshot,
+    ordered: &[usize],
+) -> anyhow::Result<BenchFacts> {
+    let next_pos = AtomicUsize::new(0);
+    std::thread::scope(|scope| -> anyhow::Result<BenchFacts> {
+        let mut handles = Vec::with_capacity(verify_worker_count(args, ordered.len()));
+        for _ in 0..verify_worker_count(args, ordered.len()) {
+            let sink = termcolor::NoColor::new(Vec::new());
+            let searcher =
+                args.search_worker(args.matcher()?, args.searcher()?, args.printer(mode, sink))?;
+            handles.push(
+                scope.spawn(|| bench_worker(args, mode, snapshot, ordered, &next_pos, searcher)),
+            );
+        }
+        collect_bench_workers(handles)
+    })
+}
+
+fn bench_worker(
+    args: &HiArgs,
+    mode: SearchMode,
+    snapshot: &manifest::CurrentSnapshot,
+    ordered: &[usize],
+    next_pos: &AtomicUsize,
+    mut searcher: crate::search::SearchWorker<termcolor::NoColor<Vec<u8>>>,
+) -> anyhow::Result<BenchFacts> {
+    let mut facts = BenchFacts::default();
+    loop {
+        let pos = next_pos.fetch_add(1, AtomicOrdering::Relaxed);
+        let Some(&ord) = ordered.get(pos) else {
+            return Ok(facts);
+        };
+        let Some(file) = snapshot.file(ord) else {
+            continue;
+        };
+        let Some(search_result) = bench_search(args, mode, true, &mut facts, &mut searcher, &file)?
+        else {
+            continue;
+        };
+        facts.record_match(search_result.has_match(), true);
+    }
+}
+
+fn collect_bench_workers(
+    handles: Vec<std::thread::ScopedJoinHandle<'_, anyhow::Result<BenchFacts>>>,
+) -> anyhow::Result<BenchFacts> {
+    let mut facts = BenchFacts::default();
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(worker_facts)) => facts.merge(worker_facts),
+            Ok(Err(err)) => return Err(err),
+            Err(_) => bail!("indexed benchmark worker thread panicked"),
+        }
+    }
+    Ok(facts)
+}
+
 fn bench_search(
     args: &HiArgs,
     mode: SearchMode,
@@ -158,9 +228,7 @@ fn bench_search(
     }
     let search_result = if in_candidates {
         facts.verified_files += 1;
-        facts.bytes_verified = facts
-            .bytes_verified
-            .saturating_add(file_len(args.cwd(), &file.path));
+        facts.bytes_verified = facts.bytes_verified.saturating_add(file.len());
         let haystack = Haystack::from_index_path(file.path.clone(), file.is_explicit());
         searcher.search(&haystack)
     } else if file.is_skipped_binary() {
@@ -194,6 +262,13 @@ impl BenchFacts {
                 self.matched_files += 1;
             }
         }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.matched_any |= other.matched_any;
+        self.matched_files += other.matched_files;
+        self.verified_files += other.verified_files;
+        self.bytes_verified = self.bytes_verified.saturating_add(other.bytes_verified);
     }
 }
 
@@ -420,8 +495,4 @@ fn verify_one(
             .unwrap_or_else(std::sync::PoisonError::into_inner) += search_stats;
     }
     Ok(())
-}
-
-fn file_len(cwd: &Path, path: &Path) -> u64 {
-    std::fs::metadata(absolute_path(cwd, path)).map_or(0, |metadata| metadata.len())
 }
