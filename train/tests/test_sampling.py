@@ -1,47 +1,32 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import sngram
 
-from sngram_train.sampling import count_weighted, sample_weight
+from sngram_train.sampling import CountSink, WeightedSlice, count_slices
 
 
-def test_large_files_are_always_selected():
-    assert sample_weight("content-a", 16 * 1024) == 1
-    assert sample_weight("content-b", 2 * 1024 * 1024) == 1
+def test_slices_expand_weighted_documents_exactly():
+    batch = count_slices([WeightedSlice(b"ab", 4, 0, 8)])
 
-
-def test_small_file_sampling_is_deterministic_and_unbiased():
-    decisions = [sample_weight(f"content-{index}", 4096) for index in range(4096)]
-
-    assert decisions == [sample_weight(f"content-{index}", 4096) for index in range(4096)]
-    selected = [weight for weight in decisions if weight is not None]
-    assert set(selected) == {4}
-    assert 900 <= len(selected) <= 1150
-
-
-def test_weighted_count_scales_pairs_and_bytes():
-    batch = count_weighted([(b"ab", 4), (b"bc", 1)], limit=9)
-
-    assert isinstance(batch.counter, sngram.BigramCounter)
-    assert batch.counter.bytes_processed == 9
+    assert batch.counter.bytes_processed == 8
     assert batch.counter.count(ord("a"), ord("b")) == 4
-    assert batch.effective_bytes == 9
-    assert batch.documents == 2
+    assert batch.effective_bytes == 8
+    assert batch.documents == 1
 
 
-def test_weighted_count_trims_to_exact_effective_limit():
-    batch = count_weighted([(b"abcd", 4)], limit=10)
+def test_partial_slices_resume_mid_document():
+    first = count_slices([WeightedSlice(b"abcd", 4, 0, 10)])
+    second = count_slices([WeightedSlice(b"abcd", 4, 10, 6)])
 
-    assert batch.effective_bytes == 10
-    assert batch.counter.bytes_processed == 10
-    assert batch.counter.count(ord("a"), ord("b")) == 3
+    assert first.counter.bytes_processed == 10
+    assert second.counter.bytes_processed == 6
+    pairs = first.counter.count(ord("a"), ord("b")) + second.counter.count(
+        ord("a"), ord("b")
+    )
+    assert pairs == 4
 
 
 def test_count_sink_matches_synchronous_counting():
-    from concurrent.futures import ThreadPoolExecutor
-
-    import sngram
-
-    from sngram_train.sampling import CountSink, WeightedSlice, count_slices
-
     slices = tuple(
         WeightedSlice(bytes([65 + i]) * 40, 4, 0, 160) for i in range(8)
     )

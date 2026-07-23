@@ -1,68 +1,65 @@
-"""Published manifest datasets on the Hugging Face Hub."""
+"""Published manifest dataset on the Hugging Face Hub."""
 
 from __future__ import annotations
 
+import json
 import os
-import tempfile
+from collections.abc import Callable
+from itertools import groupby
+from operator import itemgetter
 from pathlib import Path
 
-from . import dataset
+from .catalog import Catalog, build_catalog
+from .config import GROUP_LABELS
 from .errors import ConfigurationError
+from .manifest import ManifestWriter
 
 DEFAULT_ASSETS_REPO = "eliosai/sngram-train"
+MANIFEST_META = "manifest.json"
 
-_CARD = """---
-license: other
-configs:
-- config_name: default
-  data_files:
-  - split: train
-    path: {data}/train-*.parquet
----
+Report = Callable[[str], None]
 
-# sngram-train corpus manifest
-
-Sampled Stack v2 object manifest for sngram weight-table training.
-Corpus revision `{revision}`.
-
-Each row is one sampled object to fetch and count. Columns:
-`format_id`, `blob_id`, `encoding`, `length`, `weight`.
-"""
+_AREA_BY_LABEL = {label: area for area, label in GROUP_LABELS.items()}
 
 
 def assets_repo() -> str:
     return os.environ.get("SNGRAM_ASSETS_REPO", DEFAULT_ASSETS_REPO)
 
 
-def fetch_dataset(manifest_path: Path, token: str | None) -> str:
+def fetch_dataset(manifest_path: Path, token: str | None, report: Report | None = None) -> str:
     """Download the published dataset and import it to a local manifest."""
 
     repo = assets_repo()
     local = Path(_snapshot(repo, token))
-    if not (local / dataset.MANIFEST_META).exists():
-        raise ConfigurationError(
-            f"{repo} has no published manifest; "
-            "run `sngram manifest build --publish` once"
-        )
-    dataset.import_dataset(local, manifest_path)
+    if not (local / MANIFEST_META).exists():
+        raise ConfigurationError(f"{repo} has no published manifest sidecar")
+    import_dataset(local, manifest_path, report)
     return repo
 
 
-def publish_dataset(manifest_path: Path, token: str) -> str:
-    """Export the local manifest to Parquet and upload it as a dataset."""
+def import_dataset(
+    dataset_dir: Path, manifest_path: Path, report: Report | None = None
+) -> str:
+    """Rebuild a SQLite manifest from downloaded jsonl shards."""
 
-    repo = assets_repo()
-    with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp)
-        sidecar = dataset.export_dataset(manifest_path, out)
-        _write_card(out, sidecar)
-        _upload_folder(repo, out, token)
-    return repo
-
-
-def _write_card(out_dir: Path, sidecar: dict) -> None:
-    card = _CARD.format(data=dataset.DATA_DIR, revision=sidecar.get("revision"))
-    (out_dir / "README.md").write_text(card)
+    meta = json.loads((dataset_dir / MANIFEST_META).read_text())
+    catalog = _catalog_from(meta)
+    roster = catalog.roster_hash(meta["revision"])
+    if roster != meta["roster_hash"]:
+        raise ConfigurationError("published roster does not match this corpus contract")
+    shards = sorted((dataset_dir / "data").glob("train-*.jsonl.gz"))
+    if not shards:
+        raise ConfigurationError(f"{dataset_dir} has no jsonl shards")
+    with ManifestWriter(manifest_path, meta["revision"], roster) as writer:
+        for entry in meta["formats"]:
+            writer.register(entry["id"], entry["exhausted"])
+        for index, shard in enumerate(shards):
+            _add_shard(writer, shard)
+            if report is not None:
+                report(f"imported shard {index + 1}/{len(shards)}")
+        writer.set_targets(meta.get("built_target"), meta.get("effective_target"))
+        _check_counts(writer, meta["formats"])
+    return roster
 
 
 def _snapshot(repo: str, token: str | None) -> str:
@@ -74,17 +71,72 @@ def _snapshot(repo: str, token: str | None) -> str:
             repo,
             repo_type="dataset",
             token=token,
-            allow_patterns=[f"{dataset.DATA_DIR}/*", dataset.MANIFEST_META],
+            allow_patterns=["data/*.jsonl.gz", MANIFEST_META],
         )
     except RepositoryNotFoundError as error:
-        raise ConfigurationError(
-            f"{repo} does not exist; run `sngram manifest build --publish` once"
-        ) from error
+        raise ConfigurationError(f"{repo} does not exist or this token cannot read it") from error
 
 
-def _upload_folder(repo: str, folder: Path, token: str) -> None:
-    from huggingface_hub import HfApi
+def _add_shard(writer: ManifestWriter, path: Path) -> None:
+    for batch in _read_batches(path):
+        _add_batch(writer, batch)
 
-    api = HfApi(token=token)
-    api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
-    api.upload_folder(folder_path=str(folder), repo_id=repo, repo_type="dataset")
+
+def _read_batches(path: Path):
+    import pyarrow as pa
+    from pyarrow import json as pajson
+
+    options = pajson.ParseOptions(explicit_schema=_schema())
+    with pa.OSFile(str(path), "rb") as file:
+        with pa.CompressedInputStream(file, "gzip") as stream:
+            table = pajson.read_json(stream, parse_options=options)
+    return table.to_batches()
+
+
+def _schema():
+    import pyarrow as pa
+
+    return pa.schema(
+        [
+            ("group", pa.string()),
+            ("language", pa.string()),
+            ("extension", pa.string()),
+            ("license", pa.string()),
+            ("blob_id", pa.string()),
+            ("encoding", pa.string()),
+            ("length", pa.int64()),
+            ("weight", pa.int64()),
+        ]
+    )
+
+
+def _add_batch(writer: ManifestWriter, batch) -> None:
+    ids = [
+        f"{_AREA_BY_LABEL[label]}/{language}"
+        for label, language in zip(
+            batch.column("group").to_pylist(), batch.column("language").to_pylist()
+        )
+    ]
+    rows = zip(
+        batch.column("blob_id").to_pylist(),
+        batch.column("encoding").to_pylist(),
+        batch.column("length").to_pylist(),
+        batch.column("weight").to_pylist(),
+        batch.column("extension").to_pylist(),
+        batch.column("license").to_pylist(),
+    )
+    for format_id, group_rows in groupby(zip(ids, rows), key=itemgetter(0)):
+        writer.add_rows(format_id, (row for _id, row in group_rows))
+
+
+def _check_counts(writer: ManifestWriter, formats: list[dict]) -> None:
+    for entry in formats:
+        if writer.candidates(entry["id"]) != entry["candidates"]:
+            raise ConfigurationError(
+                f"imported rows for {entry['id']} do not match the published sidecar"
+            )
+
+
+def _catalog_from(meta: dict) -> Catalog:
+    configs = sorted({entry["id"].split("/", 1)[1] for entry in meta["formats"]})
+    return build_catalog(configs)

@@ -7,7 +7,7 @@ from sngram_train import cli
 from sngram_train.errors import ConfigurationError
 
 
-def test_train_defaults_to_canonical_ten_tb(monkeypatch, tmp_path):
+def test_train_defaults_to_the_canonical_six_tb(monkeypatch, tmp_path):
     captured = {}
 
     class FakeTrainer:
@@ -21,7 +21,6 @@ def test_train_defaults_to_canonical_ten_tb(monkeypatch, tmp_path):
         captured.update(kwargs)
         return FakeTrainer()
 
-    monkeypatch.setattr(cli, "hf_token", lambda: "token")
     monkeypatch.setattr(cli, "_production_trainer", fake_build)
 
     result = CliRunner().invoke(
@@ -30,7 +29,7 @@ def test_train_defaults_to_canonical_ten_tb(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["target"] == 10_000_000_000_000
+    assert captured["target"] == 6_000_000_000_000
     assert captured["ran"] is True
     assert "complete" in result.output
 
@@ -54,7 +53,6 @@ def test_train_bounds_hugging_face_request_time(monkeypatch, tmp_path):
 
     monkeypatch.delenv("HF_HUB_DOWNLOAD_TIMEOUT", raising=False)
     monkeypatch.delenv("HF_HUB_ETAG_TIMEOUT", raising=False)
-    monkeypatch.setattr(cli, "hf_token", lambda: "token")
     monkeypatch.setattr(cli, "_production_trainer", lambda **_kwargs: FakeTrainer())
 
     result = CliRunner().invoke(

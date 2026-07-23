@@ -10,17 +10,7 @@ from pathlib import Path
 
 # Dashboard event kinds
 TAIL_KINDS = frozenset(
-    {
-        "error",
-        "warn",
-        "mint",
-        "stall",
-        "stall_end",
-        "content_skips",
-        "target_clamped",
-        "manifest_extend",
-        "format_depleted",
-    }
+    {"mint", "content_skips", "target_clamped", "format_depleted"}
 )
 
 

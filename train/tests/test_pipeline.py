@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from sngram_train.catalog import Catalog, FormatSpec
-from sngram_train.manifest import Candidate, ManifestBuilder, open_manifest
+from sngram_train.manifest import ManifestWriter, open_manifest
 from sngram_train.pipeline import Trainer, TrainerConfig
 
 
@@ -39,18 +39,19 @@ def setup_run(tmp_path: Path, lengths: dict[str, list[int]], target: int):
     roster_hash = catalog.roster_hash("revision")
     manifest_path = tmp_path / "manifest.sqlite3"
     content = {}
-    with ManifestBuilder(manifest_path, "revision", roster_hash) as builder:
+    with ManifestWriter(manifest_path, "revision", roster_hash) as writer:
         for spec in formats:
-            builder.register(spec.id)
+            writer.register(spec.id)
+            rows = []
             for index, length in enumerate(lengths[spec.id]):
                 blob_id = f"{spec.id}-{index}"
                 content[blob_id] = bytes([65 + index]) * length
-                builder.add(Candidate(spec.id, blob_id, "utf-8", length, 1))
+                rows.append((blob_id, "utf-8", length, 1, "", ""))
+            writer.add_rows(spec.id, rows)
     manifest = open_manifest(manifest_path, roster_hash)
     config = TrainerConfig(
         mint_dir=tmp_path / "bins",
         target=target,
-        mint_cadence=target // 2,
         workers=4,
         checkpoint_interval=3600,
         resume=False,
@@ -67,16 +68,17 @@ def mint_events(tmp_path: Path):
     ]
 
 
-def test_every_mint_has_exact_area_and_format_balance(tmp_path: Path):
+def test_final_mint_has_exact_area_and_format_balance(tmp_path: Path):
     trainer = setup_run(tmp_path, {"a": [20] * 4, "b": [20] * 4}, target=120)
 
     trainer.run()
 
     events = mint_events(tmp_path)
-    assert [event["effective_bytes"] for event in events] == [60, 120]
-    assert events[0]["formats"] == {"a": 30, "b": 30}
-    assert events[1]["formats"] == {"a": 60, "b": 60}
+    assert [event["label"] for event in events] == ["final"]
+    assert events[0]["effective_bytes"] == 120
+    assert events[0]["formats"] == {"a": 60, "b": 60}
     assert trainer.counter.bytes_processed == 120
+    assert (tmp_path / "bins" / "final_weights.bin").exists()
 
 
 def test_exhausted_format_quota_moves_inside_its_area(tmp_path: Path):

@@ -2,64 +2,64 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Optional
 
 import typer
 
-from .config import CANONICAL_TARGET_BYTES, hf_token
-from .publishing import hub_timeouts, manifest_app, open_trained_manifest
-
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
     help="Sparse n-gram weight tables: train, inspect, validate.",
 )
-app.add_typer(manifest_app, name="manifest")
 
 
 @app.command()
 def train(
     mint_dir: Path = typer.Option(Path("./bins"), help="Output and durable run state."),
-    target: str = typer.Option("10TB", help="Effective bytes to train."),
-    mint_every: str = typer.Option("1TB", help="Mint cadence after bootstrap mints."),
+    target: str = typer.Option("6TB", help="Effective bytes to train."),
     workers: Optional[int] = typer.Option(None, help="Concurrent bounded content reads."),
     limit: Optional[str] = typer.Option(None, help="Override target for a smoke run."),
     checkpoint_every: float = typer.Option(60.0, help="Checkpoint period in seconds."),
     resume: bool = typer.Option(True, help="Resume the manifest and checkpoint."),
     dashboard: bool = typer.Option(True, help="Show the live terminal dashboard."),
 ) -> None:
-    """Mint durable weight tables from the published corpus manifest."""
+    """Train the final weight table from the published corpus manifest."""
 
     import sys
 
+    from .errors import ConfigurationError
     from .units import parse_size
-
-    from .resources import default_workers
 
     # short GIL slices keep the coordinator responsive beside many fetch threads
     sys.setswitchinterval(0.002)
-    hub_timeouts()
+    _hub_timeouts()
     view = _run_view() if dashboard else None
     build = lambda resume_now: _production_trainer(
         mint_dir=mint_dir,
         target=parse_size(limit or target),
-        mint_cadence=parse_size(mint_every),
-        workers=workers or default_workers(),
+        workers=workers or _default_workers(),
         checkpoint_interval=checkpoint_every,
         resume=resume_now,
-        token=hf_token(),
         view=view,
     )
-    from .errors import ConfigurationError, CorpusExhausted
-
     try:
         trainer = _dashboard_run(build, resume, view)
-    except (ConfigurationError, CorpusExhausted) as error:
+    except ConfigurationError as error:
         typer.echo(f"error: {error}")
         raise typer.Exit(2) from error
     typer.echo(f"done: {trainer.describe_progress()}")
+
+
+def _hub_timeouts() -> None:
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+
+
+def _default_workers() -> int:
+    return min(max((os.cpu_count() or 4) * 16, 64), 256)
 
 
 def _run_view():
@@ -80,46 +80,60 @@ def _dashboard_run(build, resume: bool, view):
 def _production_trainer(
     *,
     mint_dir: Path,
-    target: int = CANONICAL_TARGET_BYTES,
-    mint_cadence: int,
+    target: int,
     workers: int,
     checkpoint_interval: float,
     resume: bool,
-    token: str | None,
     view=None,
 ):
-    from .assets import assets_repo, fetch_dataset
     from .config import STACK_V2_BUCKET_CAPS
     from .content import SwhContent
     from .pipeline import Trainer, TrainerConfig
 
-    path = mint_dir / ".manifest.sqlite3"
-    if not path.exists():
-        typer.echo(f"fetching manifest dataset from {assets_repo()} (one-time import)")
-        fetch_dataset(path, token)
-    catalog, manifest = open_trained_manifest(path)
-    _warn_clamped(manifest, target)
-    config = TrainerConfig(
-        mint_dir, target, mint_cadence, workers, checkpoint_interval, resume
-    )
+    manifest = _open_manifest(mint_dir, view)
+    _warn_clamped(manifest, target, view)
+    config = TrainerConfig(mint_dir, target, workers, checkpoint_interval, resume)
+    catalog = _catalog_for(manifest.path)
     return Trainer(
         catalog, manifest, SwhContent(workers=workers), config, STACK_V2_BUCKET_CAPS
     )
 
 
-def _warn_clamped(manifest, target: int) -> None:
+def _open_manifest(mint_dir: Path, view):
+    from .assets import assets_repo, fetch_dataset
+    from .config import STACK_V2_REVISION, hf_token
+    from .manifest import open_manifest
+
+    path = mint_dir / ".manifest.sqlite3"
+    if not path.exists():
+        report = view.note if view is not None else typer.echo
+        report(f"fetching manifest dataset from {assets_repo()} (one-time import)")
+        fetch_dataset(path, hf_token(), report)
+    return open_manifest(path, _catalog_for(path).roster_hash(STACK_V2_REVISION))
+
+
+def _catalog_for(path: Path):
+    from .catalog import build_catalog
+    from .manifest import stored_format_ids
+
+    configs = sorted({fid.split("/", 1)[1] for fid in stored_format_ids(path)})
+    return build_catalog(configs)
+
+
+def _warn_clamped(manifest, target: int, view) -> None:
     from .units import fmt_bytes
 
     effective = manifest.effective_target
     if effective is not None and effective < target:
-        typer.echo(
-            f"warning: corpus supplies {fmt_bytes(effective)} of the requested "
+        report = view.note if view is not None else typer.echo
+        report(
+            f"corpus supplies {fmt_bytes(effective)} of the requested "
             f"{fmt_bytes(target)}; training to the achievable target"
         )
 
 
 def _run_until_done(build, resume: bool, view):
-    from .errors import ConfigurationError, CorpusExhausted, is_transient
+    from .errors import ConfigurationError, is_transient
 
     attempt = 0
     delay = 5.0
@@ -136,7 +150,7 @@ def _run_until_done(build, resume: bool, view):
                 raise
             typer.echo("\ninterrupted; checkpoint saved")
             return trainer
-        except (ConfigurationError, CorpusExhausted):
+        except ConfigurationError:
             raise
         except Exception as error:
             if not is_transient(error):

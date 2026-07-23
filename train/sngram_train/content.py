@@ -44,13 +44,8 @@ class SwhContent:
             return transport
         with self._transport_lock:
             if self._transport_value is None:
-                self._transport_value = self._new_transport()
+                self._transport_value = _AnonymousTransport(self.workers)
             return self._transport_value
-
-    def _new_transport(self):
-        if os.environ.get("SNG_SWH_ANONYMOUS", "1") != "0":
-            return _AnonymousTransport(self.workers)
-        return _SignedTransport(self.workers)
 
 
 class _AnonymousTransport:
@@ -78,34 +73,6 @@ class _AnonymousTransport:
         return response.data
 
 
-class _SignedTransport:
-    """Credentialed boto3 reads for private content mirrors."""
-
-    def __init__(self, workers: int) -> None:
-        import boto3
-        from botocore.config import Config
-
-        config = Config(
-            max_pool_connections=max(workers, 8),
-            retries={"max_attempts": 8, "mode": "adaptive"},
-        )
-        self._client = boto3.client(
-            "s3", region_name=_region() or "us-east-1", config=config
-        )
-
-    def fetch(self, bucket: str, key: str) -> bytes:
-        try:
-            body = self._client.get_object(Bucket=bucket, Key=key)["Body"]
-        except Exception as error:
-            if _is_missing(error):
-                raise FileNotFoundError(f"s3://{bucket}/{key}") from error
-            raise
-        try:
-            return body.read()
-        finally:
-            body.close()
-
-
 def _region() -> str | None:
     return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
 
@@ -128,9 +95,3 @@ def _gunzip_bounded(raw: bytes, max_bytes: int) -> bytes:
     if not stream.eof:
         raise ValueError("content is not a complete gzip stream")
     return data
-
-
-def _is_missing(error: Exception) -> bool:
-    response = getattr(error, "response", {})
-    code = str(response.get("Error", {}).get("Code", ""))
-    return code in {"404", "NoSuchKey", "NotFound"}

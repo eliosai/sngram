@@ -70,11 +70,6 @@ def kl_divergence(p_counts: list[int], q_counts: list[int], eps: float = 1.0) ->
     return kl(probs_from_counts(p_counts, eps), probs_from_counts(q_counts, eps))
 
 
-def snapshot_kl(current: bytes, previous: bytes) -> float:
-    """Compute smoothed KL between two counter snapshots."""
-    return kl_divergence(counts_from_snapshot(current), counts_from_snapshot(previous))
-
-
 def table_frequencies(table, floor: float = 1e-15) -> list[float]:
     """Recover normalized frequencies implied by a weight table."""
     inv = []

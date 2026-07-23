@@ -3,30 +3,33 @@ from collections import Counter
 from pathlib import Path
 
 from sngram_train.catalog import Catalog, FormatSpec
-from sngram_train.manifest import Candidate, ManifestBuilder, open_manifest
+from sngram_train.manifest import ManifestWriter, open_manifest
 from sngram_train.pipeline import Trainer, TrainerConfig
 
 LINE = b"fn main() { return 42; }\n"
 
 
-def build_trainer(tmp_path: Path, lengths, target, content, cadence=None, workers=16):
+def build_trainer(tmp_path: Path, lengths, target, content, workers=16):
     formats = tuple(
         FormatSpec(name, "code", name, target) for name in sorted(lengths)
     )
     catalog = Catalog(formats, tuple(sorted(lengths)))
     roster_hash = catalog.roster_hash("revision")
     path = tmp_path / "manifest.sqlite3"
-    with ManifestBuilder(path, "revision", roster_hash) as builder:
+    with ManifestWriter(path, "revision", roster_hash) as writer:
         for spec in formats:
-            builder.register(spec.id)
-            for index, length in enumerate(lengths[spec.id]):
-                builder.add(Candidate(spec.id, f"{spec.id}-{index}", "utf-8", length, 1))
-            builder.set_exhausted(spec.id)
+            writer.register(spec.id, exhausted=True)
+            writer.add_rows(
+                spec.id,
+                [
+                    (f"{spec.id}-{index}", "utf-8", length, 1, "", "")
+                    for index, length in enumerate(lengths[spec.id])
+                ],
+            )
     manifest = open_manifest(path, roster_hash)
     config = TrainerConfig(
         mint_dir=tmp_path / "bins",
         target=target,
-        mint_cadence=cadence or target,
         workers=workers,
         checkpoint_interval=3600,
         resume=False,
@@ -96,15 +99,14 @@ def test_many_formats_do_not_throttle_the_planner(tmp_path: Path):
     assert objects / wall > 400
 
 
-def test_partial_documents_carry_across_thresholds_without_refetch(tmp_path: Path):
+def test_a_target_inside_a_document_fetches_each_object_once(tmp_path: Path):
     doc = len(LINE) * 280
     content = LatencyContent({})
-    trainer = build_trainer(
-        tmp_path, {"only": [doc] * 10}, doc * 10, content, cadence=15_000
-    )
+    target = doc * 9 + doc // 2
+    trainer = build_trainer(tmp_path, {"only": [doc] * 10}, target, content)
 
     trainer.run()
 
-    assert trainer.counter.bytes_processed == doc * 10
+    assert trainer.counter.bytes_processed == target
     assert all(count == 1 for count in content.reads.values())
     assert len(content.reads) == 10

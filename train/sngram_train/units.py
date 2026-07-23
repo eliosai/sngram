@@ -34,12 +34,3 @@ def fmt_bytes(n: float) -> str:
 
 def fmt_rate(bytes_per_s: float) -> str:
     return f"{bytes_per_s / 10**6:,.0f} MB/s"
-
-
-def mint_label(threshold: int) -> str:
-    """Label for a mint threshold: 5_000_000_000_000 -> "5tb"."""
-    if threshold % 10**12 == 0:
-        return f"{threshold // 10**12}tb"
-    if threshold % 10**9 == 0:
-        return f"{threshold // 10**9}gb"
-    return f"{threshold}b"

@@ -8,28 +8,10 @@ from pathlib import Path
 
 GB = 10**9
 TB = 10**12
-MIB = 1024 * 1024
 
 CANONICAL_TARGET_BYTES = 6 * TB
-AVAILABLE_CORPUS_BYTES = 12 * TB
-STACK_V2_METADATA_REPO = "bigcode/the-stack-v2-dedup"
 STACK_V2_REVISION = "94d47b4385264b30f228e28a5d63e9b2eee8c2c5"
 STACK_V2_CONTENT_PREFIX = "s3://softwareheritage/content/"
-STACK_V2_MAX_BYTES = 2 * MIB
-STACK_V2_DOC_MAX_BYTES = 4 * MIB
-
-STACK_V2_REQUIRED_COLUMNS = (
-    "blob_id",
-    "content_id",
-    "src_encoding",
-    "language",
-    "path",
-    "extension",
-    "license_type",
-    "is_vendor",
-    "is_generated",
-    "length_bytes",
-)
 
 # area weights double as apportionment ratios and per-format cap basis
 # measured Stack supply hard-caps code at 1.94 TB and prose at 0.72 TB, both exhausted
@@ -68,21 +50,6 @@ GROUP_LABELS = {
 
 # configs dropped entirely: bloated base64 JSON, no value for a code byte-pair table
 EXCLUDED_CONFIGS = frozenset({"Jupyter_Notebook"})
-
-# extensions dropped entirely: OCR layout dumps that read as markup but carry no code
-EXCLUDED_EXTENSIONS = frozenset({"hocr"})
-
-# per-config file-size ceilings that drop generated data blobs from bloat formats
-CONFIG_FILE_CAPS = {
-    "JSON": 192 * 1024,
-    "XML": 192 * 1024,
-    "YAML": 160 * 1024,
-    "CSV": 384 * 1024,
-    "TSV": 384 * 1024,
-    "HTML": 768 * 1024,
-    "SQL": 512 * 1024,
-    "Text": 256 * 1024,
-}
 
 CORE_LANGUAGES = {
     "C", "C++", "C#", "Java", "JavaScript", "TypeScript", "Python", "PHP",
@@ -125,15 +92,6 @@ DATA_LANGUAGES = {
     "HiveQL", "RAML", "API Blueprint",
 }
 
-DOC_PATH_PARTS = ("/docs/", "/doc/", "/documentation/", "/examples/", "/notebooks/")
-CONFIG_PATH_PARTS = ("/.github/workflows/",)
-DOC_EXTENSIONS = {"md", "markdown", "rst", "adoc", "asciidoc", "txt", "tex", "org"}
-CONFIG_EXTENSIONS = {
-    "json", "yaml", "yml", "toml", "xml", "ini", "cfg", "conf", "properties",
-    "lock", "mk", "cmake", "env", "editorconfig", "gitignore", "dockerignore",
-}
-DATA_EXTENSIONS = {"csv", "tsv", "sql", "graphql", "proto", "ttl", "rdf", "owl"}
-
 
 def stack_config_name(language: str) -> str | None:
     special = {
@@ -145,34 +103,6 @@ def stack_config_name(language: str) -> str | None:
     if language in special:
         return special[language]
     return language.replace(" ", "_")
-
-
-def stack_v2_bucket_for(
-    language: object, extension: object = None, path: object = None
-) -> str:
-    """Route one Stack row to its corpus area."""
-
-    lang = _norm(language)
-    ext = _norm(extension).lower().lstrip(".")
-    normalized_path = "/" + _norm(path).lower().lstrip("/")
-    if ext in DATA_EXTENSIONS:
-        return "data-query-schema"
-    if any(part in normalized_path for part in CONFIG_PATH_PARTS) or ext in CONFIG_EXTENSIONS:
-        return "config-build-infra"
-    if any(part in normalized_path for part in DOC_PATH_PARTS) or ext in DOC_EXTENSIONS:
-        return "docs-prose-markup"
-    groups = (
-        (CORE_LANGUAGES, "core-programming"),
-        (DOC_LANGUAGES, "docs-prose-markup"),
-        (CONFIG_LANGUAGES, "config-build-infra"),
-        (WEB_LANGUAGES, "web-ui-templates"),
-        (DATA_LANGUAGES, "data-query-schema"),
-    )
-    return next((area for languages, area in groups if lang in languages), "long-tail")
-
-
-def _norm(value: object) -> str:
-    return str(value or "").strip()
 
 
 def hf_token() -> str | None:

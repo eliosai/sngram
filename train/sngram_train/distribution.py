@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
-
-from .units import mint_label
-
-GB = 10**9
 
 
 @dataclass(frozen=True)
@@ -111,22 +107,6 @@ def _hard_cap(supply: int | None, floor: int) -> int | None:
     return max(supply, floor)
 
 
-def schedule_targets(
-    thresholds: Sequence[int], weights: Mapping[str, int]
-) -> dict[int, dict[str, int]]:
-    """Cumulative per-area targets, monotone across the mint schedule."""
-
-    running = {key: 0 for key in weights}
-    targets: dict[int, dict[str, int]] = {}
-    previous = 0
-    for value in thresholds:
-        for key, amount in apportion(value - previous, weights).items():
-            running[key] += amount
-        targets[value] = dict(sorted(running.items()))
-        previous = value
-    return targets
-
-
 def feasible_delta(limit: int, weights: Mapping[str, int], room: Mapping[str, int]) -> int:
     """Largest delta whose apportionment fits inside every finite room."""
 
@@ -142,30 +122,3 @@ def feasible_delta(limit: int, weights: Mapping[str, int], room: Mapping[str, in
     ):
         delta -= 1
     return max(delta, 0)
-
-
-def mint_schedule(target: int, cadence: int) -> list[int]:
-    """Return bootstrap mints followed by cadence mints through target."""
-
-    if target <= 0 or cadence <= 0:
-        raise ValueError("target and cadence must be positive")
-    thresholds = {value for value in (100 * GB, 500 * GB) if value < target}
-    thresholds.update(range(cadence, target + 1, cadence))
-    thresholds.add(target)
-    return sorted(thresholds)
-
-
-def remaining_thresholds(schedule: Sequence[int], done: Sequence[str]) -> list[int]:
-    """Schedule entries whose mint labels are not finished yet."""
-
-    finished = set(done)
-    return [value for value in schedule if mint_label(value) not in finished]
-
-
-def minted_baseline(schedule: Sequence[int], done: Sequence[str]) -> int:
-    """Largest schedule entry already minted."""
-
-    finished = set(done)
-    return max(
-        (value for value in schedule if mint_label(value) in finished), default=0
-    )

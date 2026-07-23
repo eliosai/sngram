@@ -3,15 +3,30 @@ from pathlib import Path
 
 import pytest
 
-from sngram_train.manifest import Candidate, ManifestBuilder, open_manifest
+from sngram_train.manifest import ManifestWriter, open_manifest
+
+
+def row(blob_id, length, weight=1, encoding="utf-8"):
+    return (blob_id, encoding, length, weight, "", "")
+
+
+def write_manifest(path: Path, rows_by_format, exhausted=()):
+    with ManifestWriter(path, revision="abc", roster_hash="roster") as writer:
+        for format_id in rows_by_format:
+            writer.register(format_id, format_id in exhausted)
+        for format_id, rows in rows_by_format.items():
+            writer.add_rows(format_id, rows)
 
 
 def test_manifest_round_trip_and_cursor_are_stable(tmp_path: Path):
     path = tmp_path / "manifest.sqlite3"
-    with ManifestBuilder(path, revision="abc", roster_hash="roster") as builder:
-        builder.add(Candidate("core/Python", "one", "utf-8", 100, 4))
-        builder.add(Candidate("core/Python", "two", "utf-8", 200, 1))
-        builder.add(Candidate("docs/Markdown", "three", "utf-8", 50, 2))
+    write_manifest(
+        path,
+        {
+            "core/Python": [row("one", 100, 4), row("two", 200)],
+            "docs/Markdown": [row("three", 50, 2)],
+        },
+    )
 
     manifest = open_manifest(path, roster_hash="roster")
     first = manifest.read("core/Python", cursor=0, limit=1)
@@ -27,8 +42,7 @@ def test_manifest_round_trip_and_cursor_are_stable(tmp_path: Path):
 def test_manifest_compacts_hex_blob_ids_and_encodings(tmp_path: Path):
     path = tmp_path / "manifest.sqlite3"
     blob_id = "0123456789abcdef0123456789abcdef01234567"
-    with ManifestBuilder(path, revision="abc", roster_hash="roster") as builder:
-        builder.add(Candidate("core/Python", blob_id, "UTF-8", 100, 1))
+    write_manifest(path, {"core/Python": [row(blob_id, 100, encoding="UTF-8")]})
 
     manifest = open_manifest(path, roster_hash="roster")
     item = manifest.read("core/Python", cursor=0, limit=1).items[0]
@@ -45,45 +59,37 @@ def test_manifest_compacts_hex_blob_ids_and_encodings(tmp_path: Path):
 
 def test_manifest_rejects_a_different_roster(tmp_path: Path):
     path = tmp_path / "manifest.sqlite3"
-    with ManifestBuilder(path, revision="abc", roster_hash="old"):
-        pass
+    write_manifest(path, {"core/Python": [row("one", 100)]})
 
-    try:
+    with pytest.raises(RuntimeError, match="roster"):
         open_manifest(path, roster_hash="new")
-    except RuntimeError as error:
-        assert "roster" in str(error)
-    else:
-        raise AssertionError("manifest should reject a different roster")
 
 
-def test_manifest_rejects_a_concurrent_builder(tmp_path: Path):
+def test_manifest_records_exhausted_formats_and_targets(tmp_path: Path):
     path = tmp_path / "manifest.sqlite3"
-    with ManifestBuilder(path, revision="abc", roster_hash="roster"):
-        with pytest.raises(RuntimeError, match="another process"):
-            with ManifestBuilder(path, revision="abc", roster_hash="roster"):
-                pass
+    with ManifestWriter(path, revision="abc", roster_hash="roster") as writer:
+        writer.register("core/Python", exhausted=True)
+        writer.register("docs/Markdown")
+        writer.add_rows("core/Python", [row("one", 100)])
+        writer.set_targets(1_000, 600)
+
+    manifest = open_manifest(path, roster_hash="roster")
+
+    assert manifest.exhausted("core/Python") is True
+    assert manifest.exhausted("docs/Markdown") is False
+    assert manifest.effective_target == 600
 
 
-def test_manifest_resumes_completed_configs_and_rolls_back_partial_one(tmp_path: Path):
+def test_failed_write_leaves_no_manifest(tmp_path: Path):
     path = tmp_path / "manifest.sqlite3"
-    with pytest.raises(RuntimeError, match="interrupt"):
-        with ManifestBuilder(path, revision="abc", roster_hash="roster") as builder:
-            builder.add(Candidate("core/Python", "python", "utf-8", 100, 1))
-            builder.finish_config("Python", cursor=(3, 7))
-            builder.add(Candidate("core/Rust", "partial", "utf-8", 100, 1))
-            raise RuntimeError("interrupt")
+    with pytest.raises(RuntimeError, match="boom"):
+        with ManifestWriter(path, revision="abc", roster_hash="roster") as writer:
+            writer.register("core/Python")
+            writer.add_rows("core/Python", [row("one", 100)])
+            raise RuntimeError("boom")
 
-    with ManifestBuilder(path, revision="abc", roster_hash="roster") as builder:
-        assert builder.is_complete("Python")
-        assert builder.cursor("Python") == (3, 7)
-        builder.add(Candidate("core/Rust", "rust", "utf-8", 100, 1))
-        builder.finish_config("Rust")
-
-    manifest = open_manifest(path, "roster")
-    assert [item.blob_id for item in manifest.read("core/Python", 0, 10).items] == [
-        "python"
-    ]
-    assert [item.blob_id for item in manifest.read("core/Rust", 0, 10).items] == ["rust"]
+    assert not path.exists()
+    assert not path.with_suffix(path.suffix + ".tmp").exists()
 
 
 def test_manifest_reads_are_stable_across_the_read_ahead_window(tmp_path: Path):
@@ -91,9 +97,9 @@ def test_manifest_reads_are_stable_across_the_read_ahead_window(tmp_path: Path):
 
     path = tmp_path / "manifest.sqlite3"
     count = READ_AHEAD_ROWS + 50
-    with ManifestBuilder(path, revision="abc", roster_hash="roster") as builder:
-        for index in range(count):
-            builder.add(Candidate("core/Python", f"blob-{index:05d}", "utf-8", 10, 1))
+    write_manifest(
+        path, {"core/Python": [row(f"blob-{index:05d}", 10) for index in range(count)]}
+    )
 
     manifest = open_manifest(path, roster_hash="roster")
     bulk = manifest.read("core/Python", cursor=0, limit=count).items
@@ -109,20 +115,3 @@ def test_manifest_reads_are_stable_across_the_read_ahead_window(tmp_path: Path):
 
     assert [item.blob_id for item in stepped] == [item.blob_id for item in bulk]
     assert [item.blob_id for item in rewound] == [item.blob_id for item in bulk[3:10]]
-
-
-def test_legacy_roster_identity_is_adopted_in_place(tmp_path: Path):
-    from sngram_train.manifest import adopt_manifest
-
-    path = tmp_path / "manifest.sqlite3"
-    with ManifestBuilder(path, revision="rev", roster_hash="legacy") as builder:
-        builder.add(Candidate("core/Python", "one", "utf-8", 100, 1))
-
-    assert adopt_manifest(path, "modern", legacy_hash="wrong", built_target=10) is False
-    with pytest.raises(Exception):
-        open_manifest(path, roster_hash="modern")
-
-    assert adopt_manifest(path, "modern", legacy_hash="legacy", built_target=10) is True
-    manifest = open_manifest(path, roster_hash="modern")
-    assert manifest.roster_hash == "modern"
-    assert manifest.capacity("core/Python") == 100

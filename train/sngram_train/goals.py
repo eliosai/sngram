@@ -9,7 +9,6 @@ from .catalog import Catalog
 from .checkpoint import FormatProgress
 from .distribution import allocate, apportion, feasible_delta
 from .errors import ConfigurationError
-from .sampling import SAMPLE_FLOOR
 
 Progress = Callable[[str], FormatProgress]
 
@@ -26,13 +25,6 @@ def formats_by_area(
         if not areas.get(area):
             raise ConfigurationError(f"area {area} has no formats")
     return dict(areas)
-
-
-def extension_minimum(capacity: int, goal: int, progress_bytes: int) -> int:
-    """Manifest capacity that comfortably covers the remaining goal."""
-
-    remaining = max(goal - progress_bytes, 0)
-    return capacity + remaining + remaining // 4 + 2 * SAMPLE_FLOOR
 
 
 def area_goals(
@@ -73,42 +65,18 @@ def area_supplies(
     return supplies
 
 
-def validate_barrier(
-    threshold: int,
-    format_bytes: Mapping[str, int],
-    area_bytes: Mapping[str, int],
-    targets: Mapping[str, int],
-    goals: Mapping[str, int] | None,
-) -> None:
-    """Require exact format, area, and goal landing on a mint threshold."""
-
-    if sum(format_bytes.values()) != threshold:
-        raise RuntimeError("format progress does not match the counter")
-    if dict(area_bytes) != dict(targets):
-        raise RuntimeError("area progress does not match the mint contract")
-    if goals is None or any(
-        format_bytes[key] != goal for key, goal in goals.items()
-    ):
-        raise RuntimeError("format progress does not match the mint contract")
-
-
 def clamped_targets(
     targets: Mapping[str, int],
-    baseline: Mapping[str, int],
     weights: Mapping[str, int],
     supplies: Mapping[str, int | None],
     progress_by_area: Mapping[str, int],
 ) -> dict[str, int]:
     """Largest balanced targets that fit depleted areas, floored at progress."""
 
-    room = {
-        area: supply - baseline[area]
-        for area, supply in supplies.items()
-        if supply is not None
-    }
-    limit = sum(targets.values()) - sum(baseline.values())
+    room = {area: supply for area, supply in supplies.items() if supply is not None}
+    limit = sum(targets.values())
     delta = feasible_delta(limit, weights, room)
     return {
-        area: max(baseline[area] + amount, progress_by_area.get(area, 0))
+        area: max(amount, progress_by_area.get(area, 0))
         for area, amount in apportion(delta, weights).items()
     }

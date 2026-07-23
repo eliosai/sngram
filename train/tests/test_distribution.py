@@ -4,8 +4,6 @@ from sngram_train.distribution import (
     allocate,
     apportion,
     feasible_delta,
-    mint_schedule,
-    schedule_targets,
     waterlevel,
 )
 
@@ -107,20 +105,6 @@ def test_allocate_keeps_progress_floors_above_shrunken_caps():
     assert allocation.shortfall == 0
 
 
-def test_schedule_targets_are_monotone_for_adversarial_thresholds():
-    weights = {"core": 5_200, "docs": 2_300, "tail": 800}
-    thresholds = list(range(1, 2_000))
-
-    targets = schedule_targets(thresholds, weights)
-
-    previous = {key: 0 for key in weights}
-    for value in thresholds:
-        for key, amount in targets[value].items():
-            assert amount >= previous[key]
-        assert sum(targets[value].values()) == value
-        previous = targets[value]
-
-
 def test_feasible_delta_fits_every_finite_room():
     weights = {"core": 52, "docs": 23, "tail": 25}
 
@@ -133,14 +117,3 @@ def test_feasible_delta_fits_every_finite_room():
 def test_waterlevel_rejects_caps_below_floors():
     with pytest.raises(ValueError):
         waterlevel(10, {"a": 5}, {"a": 3})
-
-
-def test_canonical_schedule_runs_through_ten_tb():
-    gb = 10**9
-    tb = 10**12
-
-    assert mint_schedule(10 * tb, 1 * tb) == [
-        100 * gb,
-        500 * gb,
-        *range(1 * tb, 10 * tb + 1, 1 * tb),
-    ]

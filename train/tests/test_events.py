@@ -80,10 +80,10 @@ def test_resume_continues_numbering_without_clobber(tmp_path: Path):
 def test_checkpoint_excluded_from_dashboard_tail(tmp_path: Path):
     path = tmp_path / "train-events.jsonl"
     log = EventLog(path)
-    log.log("checkpoint", bytes=1)
-    log.log("error", stage="x")
-    log.log("mint", label="100gb")
+    log.log("progress", bytes=1)
+    log.log("content_skips", count=2)
+    log.log("mint", label="final")
     kinds = [e["kind"] for e in log.tail]
     log.close()
-    assert "checkpoint" not in kinds, "checkpoint status lives in the header now"
-    assert "error" in kinds and "mint" in kinds, "real events still surface"
+    assert "progress" not in kinds, "progress status lives in the header now"
+    assert "content_skips" in kinds and "mint" in kinds, "real events still surface"

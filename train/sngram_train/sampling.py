@@ -1,15 +1,12 @@
-"""Deterministic small-file sampling and inverse-weighted counting."""
+"""Inverse-weighted slice counting into the shared bigram counter."""
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
 import sngram
-
-SAMPLE_FLOOR = 16 * 1024
 
 
 class CountSink:
@@ -50,49 +47,6 @@ class WeightedSlice:
     length: int
 
 
-def sample_weight(content_id: str, size: int) -> int | None:
-    """Return a deterministic inverse sampling weight or skip the file."""
-
-    if size <= 0:
-        return None
-    weight = _sample_weight(size)
-    if weight == 1 or _hash(content_id) % weight == 0:
-        return weight
-    return None
-
-
-def _sample_weight(size: int) -> int:
-    ratio = (SAMPLE_FLOOR + size - 1) // size
-    return 1 << (ratio - 1).bit_length()
-
-
-def _hash(content_id: str) -> int:
-    digest = hashlib.blake2b(
-        content_id.encode(), digest_size=8, person=b"sngram-v3"
-    ).digest()
-    return int.from_bytes(digest, "little")
-
-
-def count_weighted(rows: Iterable[tuple[bytes, int]], limit: int) -> CountedBatch:
-    """Count weighted documents without crossing an effective-byte limit."""
-
-    if limit < 0:
-        raise ValueError("limit must be non-negative")
-    documents: list[bytes] = []
-    effective = 0
-    counted = 0
-    for data, weight in rows:
-        taken = min(len(data) * weight, limit - effective)
-        if taken <= 0:
-            break
-        _segment_rows(documents, data, weight, taken)
-        effective += taken
-        counted += 1
-    counter = _count_documents(documents)
-    counter.add_files(counted)
-    return CountedBatch(counter, effective, counted)
-
-
 def count_slices(rows: Iterable[WeightedSlice]) -> CountedBatch:
     """Count slices of conceptual inverse-weighted documents."""
 
@@ -122,17 +76,6 @@ def _slice_rows(documents: list[bytes], row: WeightedSlice) -> None:
     documents.extend([row.data] * copies)
     if prefix:
         documents.append(row.data[:prefix])
-
-
-def _segment_rows(
-    documents: list[bytes], data: bytes, weight: int, taken: int
-) -> None:
-    if not data or weight <= 0:
-        raise ValueError("weighted documents must be non-empty with a positive weight")
-    copies, prefix = divmod(taken, len(data))
-    documents.extend([data] * copies)
-    if prefix:
-        documents.append(data[:prefix])
 
 
 def _count_documents(documents: list[bytes]) -> sngram.BigramCounter:

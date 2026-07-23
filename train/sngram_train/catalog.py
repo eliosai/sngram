@@ -16,7 +16,6 @@ from .config import (
     STACK_V2_BUCKET_CAPS,
     WEB_LANGUAGES,
     stack_config_name,
-    stack_v2_bucket_for,
 )
 
 TEXT_AREAS = ("docs-prose-markup", "config-build-infra", "data-query-schema")
@@ -41,27 +40,10 @@ class Catalog:
                 return item
         raise KeyError(format_id)
 
-    def route(self, config: str, row: dict[str, object]) -> str:
-        if config == "Text":
-            area = stack_v2_bucket_for("Text", row.get("extension"), row.get("path"))
-            return f"{area}/Text"
-        for item in self.formats:
-            if item.config == config:
-                return item.id
-        raise KeyError(config)
-
     def roster_hash(self, revision: str) -> str:
         payload = [(item.id, item.config, item.cap_bytes) for item in self.formats]
         raw = json.dumps([revision, payload], separators=(",", ":")).encode()
         return hashlib.sha256(raw).hexdigest()
-
-
-def legacy_roster_hash(catalog: Catalog, revision: str, target: int | None) -> str:
-    """Roster identity from before targets left the manifest key."""
-
-    payload = [(item.id, item.config, item.cap_bytes) for item in catalog.formats]
-    raw = json.dumps([revision, target, payload], separators=(",", ":")).encode()
-    return hashlib.sha256(raw).hexdigest()
 
 
 def build_catalog(configs: list[str]) -> Catalog:

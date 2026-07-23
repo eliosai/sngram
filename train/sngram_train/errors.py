@@ -7,10 +7,6 @@ class ConfigurationError(RuntimeError):
     pass
 
 
-class CorpusExhausted(RuntimeError):
-    pass
-
-
 _TRANSIENT_TYPES = (OSError, TimeoutError, ConnectionError)
 
 _TRANSIENT_NAMES = {

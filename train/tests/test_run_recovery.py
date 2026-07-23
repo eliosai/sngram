@@ -2,22 +2,8 @@ import json
 from pathlib import Path
 
 from sngram_train.catalog import Catalog, FormatSpec
-from sngram_train.manifest import open_manifest
+from sngram_train.manifest import ManifestWriter, open_manifest
 from sngram_train.pipeline import Trainer, TrainerConfig
-from sngram_train.stack import build_stack_manifest, extend_manifest
-
-
-class FakeRows:
-    revision = "revision-1"
-
-    def __init__(self, rows):
-        self.rows = rows
-
-    def iter_rows(self, config, cursor=(0, 0)):
-        for index, value in enumerate(self.rows[config][cursor[1] :], cursor[1]):
-            item = dict(value)
-            item["_source_cursor"] = (0, index + 1)
-            yield item
 
 
 class LossyContent:
@@ -30,21 +16,6 @@ class LossyContent:
         return self.values[blob_id]
 
 
-def row(config, index, length, encoding="utf-8"):
-    return {
-        "blob_id": f"{config}-{index}",
-        "content_id": f"{config}-{index}",
-        "src_encoding": encoding,
-        "language": config,
-        "path": f"/{config}/{index}",
-        "extension": "x",
-        "is_vendor": False,
-        "is_generated": False,
-        "length_bytes": length,
-        "_sample_weight": 1,
-    }
-
-
 def lossy_corpus(configs, per_config, length):
     """Rows where every third blob shrinks by half and every tenth is missing."""
 
@@ -54,45 +25,38 @@ def lossy_corpus(configs, per_config, length):
         for index in range(per_config):
             blob = f"{config}-{index}"
             if index % 10 == 9:
-                config_rows.append(row(config, index, length))
+                config_rows.append((blob, "utf-8", length, 1, "", ""))
             elif index % 3 == 0:
                 text = "half sized text pair\n" * (length // 42)
                 raw = text.encode("utf-16")
                 content[blob] = raw
-                config_rows.append(row(config, index, len(raw), "utf-16"))
+                config_rows.append((blob, "utf-16", len(raw), 1, "", ""))
             else:
                 content[blob] = b"full sized code line\n" * (length // 21)
-                config_rows.append(row(config, index, length))
+                config_rows.append((blob, "utf-8", length, 1, "", ""))
         rows[config] = config_rows
     return rows, content
 
 
-def setup(tmp_path: Path, configs, target, rows, content, cadence=None):
+def setup(tmp_path: Path, configs, target, rows, content, effective_target=None):
     formats = tuple(FormatSpec(name, "code", name, target) for name in sorted(configs))
     catalog = Catalog(formats, tuple(sorted(configs)))
+    roster_hash = catalog.roster_hash("revision")
     manifest_path = tmp_path / "manifest.sqlite3"
-    source = FakeRows(rows)
-    roster_hash = build_stack_manifest(
-        manifest_path, catalog, source, target=target, area_weights={"code": 1}
-    )
+    with ManifestWriter(manifest_path, "revision", roster_hash) as writer:
+        for name in sorted(configs):
+            writer.register(name)
+            writer.add_rows(name, rows[name])
+        writer.set_targets(None, effective_target)
     manifest = open_manifest(manifest_path, roster_hash)
     config = TrainerConfig(
         mint_dir=tmp_path / "bins",
         target=target,
-        mint_cadence=cadence or max(target // 3, 1),
         workers=8,
         checkpoint_interval=3600,
         resume=False,
     )
-
-    def extend(format_id, minimum):
-        extend_manifest(manifest_path, catalog, source, roster_hash, format_id, minimum)
-        return open_manifest(manifest_path, roster_hash)
-
-    trainer = Trainer(
-        catalog, manifest, LossyContent(content), config, {"code": 1}, extend=extend
-    )
-    return trainer
+    return Trainer(catalog, manifest, LossyContent(content), config, {"code": 1})
 
 
 def events_of(tmp_path: Path, kind: str):
@@ -104,7 +68,7 @@ def events_of(tmp_path: Path, kind: str):
     ]
 
 
-def test_lossy_delivery_completes_exactly_through_manifest_extension(tmp_path: Path):
+def test_lossy_delivery_completes_exactly_from_manifest_headroom(tmp_path: Path):
     configs = ["a", "b", "c", "d"]
     rows, content = lossy_corpus(configs, per_config=400, length=2_100)
     trainer = setup(tmp_path, configs, target=800_000, rows=rows, content=content)
@@ -117,7 +81,7 @@ def test_lossy_delivery_completes_exactly_through_manifest_extension(tmp_path: P
     final = events_of(tmp_path, "mint")[-1]
     assert final["effective_bytes"] == 800_000
     assert (tmp_path / "bins" / "final_weights.bin").exists()
-    assert events_of(tmp_path, "manifest_extend")
+    assert events_of(tmp_path, "content_skips")
 
 
 def test_depleted_corpus_clamps_loudly_and_still_mints_final(tmp_path: Path):
@@ -136,27 +100,28 @@ def test_depleted_corpus_clamps_loudly_and_still_mints_final(tmp_path: Path):
     assert summary["complete"] is True and summary["clamped"] is True
 
 
-def test_inventory_clamp_flows_into_a_shorter_exact_schedule(tmp_path: Path):
+def test_manifest_effective_target_bounds_the_run_upfront(tmp_path: Path):
     configs = ["a", "b"]
-    rows = {name: [row(name, i, 2_100) for i in range(20)] for name in configs}
+    rows = {
+        name: [(f"{name}-{i}", "utf-8", 2_100, 1, "", "") for i in range(20)]
+        for name in configs
+    }
     content = {
         f"{name}-{i}": b"full sized code line\n" * 100
         for name in configs
         for i in range(20)
     }
     trainer = setup(
-        tmp_path, configs, target=10_000_000, rows=rows, content=content, cadence=10_000
+        tmp_path, configs, target=10_000_000, rows=rows, content=content,
+        effective_target=60_000,
     )
 
-    assert trainer.effective_target == trainer.manifest.effective_target
-    assert trainer.effective_target < 10_000_000
+    assert trainer.effective_target == 60_000
 
     trainer.run()
 
-    assert trainer.counter.bytes_processed == trainer.effective_target
+    assert trainer.counter.bytes_processed == 60_000
     assert not trainer.clamped
-    labels = [event["label"] for event in events_of(tmp_path, "mint")]
-    assert labels
     assert (tmp_path / "bins" / "final_weights.bin").exists()
 
 
@@ -190,13 +155,11 @@ def test_lossy_run_resumes_after_interrupt_to_the_identical_table(tmp_path: Path
         TrainerConfig(
             mint_dir=tmp_path / "run" / "bins",
             target=300_000,
-            mint_cadence=100_000,
             workers=8,
             checkpoint_interval=3600,
             resume=True,
         ),
         {"code": 1},
-        extend=interrupted.extend,
     )
     resumed.run()
     reference = setup(tmp_path / "reference", configs, 300_000, rows, content)

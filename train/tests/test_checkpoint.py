@@ -21,7 +21,6 @@ def test_checkpoint_round_trips_counter_and_format_progress(tmp_path: Path):
                 exhausted=True,
             )
         },
-        mints_done=["100gb"],
     )
 
     save(tmp_path / "checkpoint.sqlite3", counter, state)
@@ -29,7 +28,6 @@ def test_checkpoint_round_trips_counter_and_format_progress(tmp_path: Path):
 
     assert restored_counter.snapshot() == counter.snapshot()
     assert restored.formats == state.formats
-    assert restored.mints_done == ["100gb"]
     assert restored.revision == "revision"
 
 

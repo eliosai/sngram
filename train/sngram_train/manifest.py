@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import fcntl
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,98 +32,58 @@ class ManifestBatch:
 READ_AHEAD_ROWS = 1024
 
 
-class ManifestBuilder:
+class ManifestWriter:
+    """One-shot atomic manifest writer fed rows in per-format order."""
+
     def __init__(self, path: Path, revision: str, roster_hash: str) -> None:
         self.path = path
         self.revision = revision
         self.roster_hash = roster_hash
         self._tmp = path.with_suffix(path.suffix + ".tmp")
-        self._lock_path = path.with_suffix(path.suffix + ".lock")
-        self._lock_handle = None
         self._connection: sqlite3.Connection | None = None
         self._sequence: dict[str, int] = defaultdict(int)
         self._capacity: dict[str, int] = defaultdict(int)
-        self._exhausted: dict[str, bool] = {}
         self._keys: dict[str, int] = {}
+        self._exhausted: dict[str, bool] = {}
         self._encodings: dict[str, int] = {}
-        self._buffer: list[tuple[object, ...]] = []
-        self._completed: set[str] = set()
-        self._cursors: dict[str, tuple[int, int]] = {}
+        self._targets: dict[str, int] = {}
 
-    def __enter__(self) -> ManifestBuilder:
+    def __enter__(self) -> ManifestWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock_handle = self._lock_path.open("a+")
-        try:
-            fcntl.flock(self._lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            self._lock_handle.close()
-            self._lock_handle = None
-            raise ConfigurationError("another process is building this manifest") from error
-        new = not self._tmp.exists()
-        try:
-            self._connection = sqlite3.connect(self._tmp)
-            if new:
-                self._initialize()
-            else:
-                self._restore()
-        except Exception:
-            self._release_lock()
-            raise
+        self._tmp.unlink(missing_ok=True)
+        self._connection = sqlite3.connect(self._tmp)
+        self._connection.executescript(_SCHEMA)
+        self._connection.execute("PRAGMA journal_mode = OFF")
+        self._connection.execute("PRAGMA synchronous = OFF")
         return self
 
-    def _initialize(self) -> None:
+    def register(self, format_id: str, exhausted: bool = False) -> None:
+        if format_id not in self._keys:
+            self._keys[format_id] = len(self._keys)
+        self._exhausted[format_id] = exhausted or self._exhausted.get(format_id, False)
+
+    def add_rows(self, format_id: str, rows) -> None:
+        """Append ordered (blob_id, encoding, length, weight, extension, license) rows."""
+
         assert self._connection is not None
-        self._connection.executescript(_SCHEMA)
+        packed, capacity = self._pack(self._keys[format_id], self._sequence[format_id], rows)
         self._connection.executemany(
-            "INSERT INTO metadata VALUES (?, ?)",
-            (("revision", self.revision), ("roster_hash", self.roster_hash)),
+            "INSERT INTO candidates VALUES (?, ?, ?, ?, ?, ?, ?, ?)", packed
         )
-        self._connection.commit()
+        self._sequence[format_id] += len(packed)
+        self._capacity[format_id] += capacity
 
-    def _restore(self) -> None:
-        assert self._connection is not None
-        metadata = dict(self._connection.execute("SELECT key, value FROM metadata"))
-        identity = (metadata.get("revision"), metadata.get("roster_hash"))
-        if identity != (self.revision, self.roster_hash):
-            raise ConfigurationError("partial manifest does not match this roster")
-        for key, format_id, count, capacity, exhausted in self._connection.execute(
-            "SELECT format_key, id, candidates, capacity, exhausted FROM formats"
-        ):
-            self._keys[format_id] = key
-            self._sequence[format_id] = count
-            self._capacity[format_id] = capacity
-            self._exhausted[format_id] = bool(exhausted)
-        for config, shard, row in self._connection.execute(
-            "SELECT config, shard, row FROM completed_configs"
-        ):
-            self._completed.add(config)
-            self._cursors[config] = (shard, row)
-        self._encodings.update(
-            (name, key)
-            for key, name in self._connection.execute("SELECT key, name FROM encodings")
-        )
-
-    def add(self, candidate: Candidate) -> None:
-        if self._connection is None:
-            raise RuntimeError("manifest builder is not open")
-        self.register(candidate.format_id)
-        sequence = self._sequence[candidate.format_id]
-        self._buffer.append(
-            (
-                self._keys[candidate.format_id],
-                sequence,
-                _pack_blob_id(candidate.blob_id),
-                self._encoding_key(candidate.encoding),
-                candidate.length,
-                candidate.weight,
-                candidate.extension,
-                candidate.license,
+    def _pack(self, key: int, sequence: int, rows) -> tuple[list[tuple], int]:
+        packed = []
+        capacity = 0
+        for blob_id, encoding, length, weight, extension, license in rows:
+            packed.append(
+                (key, sequence, _pack_blob_id(blob_id), self._encoding_key(encoding),
+                 length, weight, extension, license)
             )
-        )
-        if len(self._buffer) >= 8192:
-            self._flush()
-        self._sequence[candidate.format_id] += 1
-        self._capacity[candidate.format_id] += candidate.length * candidate.weight
+            capacity += length * weight
+            sequence += 1
+        return packed, capacity
 
     def _encoding_key(self, encoding: str) -> int:
         if encoding in self._encodings:
@@ -135,105 +94,41 @@ class ManifestBuilder:
         self._encodings[encoding] = key
         return key
 
-    def register(self, format_id: str) -> None:
-        if format_id not in self._keys:
-            self._keys[format_id] = len(self._keys)
-        self._sequence.setdefault(format_id, 0)
-        self._capacity.setdefault(format_id, 0)
-        self._exhausted.setdefault(format_id, False)
-
-    def capacity(self, format_id: str) -> int:
-        return self._capacity.get(format_id, 0)
-
     def candidates(self, format_id: str) -> int:
         return self._sequence.get(format_id, 0)
 
-    def is_exhausted(self, format_id: str) -> bool:
-        return self._exhausted.get(format_id, False)
-
-    def set_exhausted(self, format_id: str) -> None:
-        self._exhausted[format_id] = True
-
-    def _flush(self) -> None:
-        assert self._connection is not None
-        self._connection.executemany(
-            "INSERT INTO candidates VALUES (?, ?, ?, ?, ?, ?, ?, ?)", self._buffer
-        )
-        self._buffer.clear()
-
-    def set_effective_target(self, value: int) -> None:
-        assert self._connection is not None
-        self._connection.execute(
-            "INSERT OR REPLACE INTO metadata VALUES ('effective_target', ?)",
-            (str(value),),
-        )
-
-    def set_built_target(self, value: int) -> None:
-        assert self._connection is not None
-        self._connection.execute(
-            "INSERT OR REPLACE INTO metadata VALUES ('built_target', ?)",
-            (str(value),),
-        )
-
-    def is_complete(self, config: str) -> bool:
-        return config in self._completed
-
-    def cursor(self, config: str) -> tuple[int, int]:
-        return self._cursors.get(config, (0, 0))
-
-    def finish_config(
-        self, config: str, cursor: tuple[int, int] | None = None
-    ) -> None:
-        assert self._connection is not None
-        self._flush()
-        self._write_formats()
-        cursor = cursor or self.cursor(config)
-        self._connection.execute(
-            "INSERT OR REPLACE INTO completed_configs VALUES (?, ?, ?)",
-            (config, *cursor),
-        )
-        self._connection.commit()
-        self._completed.add(config)
-        self._cursors[config] = cursor
+    def set_targets(self, built: int | None, effective: int | None) -> None:
+        if built is not None:
+            self._targets["built_target"] = built
+        if effective is not None:
+            self._targets["effective_target"] = effective
 
     def __exit__(self, exc_type, _exc, _traceback) -> None:
         if self._connection is None:
             return
         if exc_type is not None:
             self._connection.close()
-            self._release_lock()
+            self._tmp.unlink(missing_ok=True)
             return
-        self._flush()
-        self._write_formats()
+        self._write_tables()
         self._connection.commit()
         self._connection.close()
         os.replace(self._tmp, self.path)
-        self._release_lock()
 
-    def _release_lock(self) -> None:
-        if self._lock_handle is not None:
-            fcntl.flock(self._lock_handle, fcntl.LOCK_UN)
-            self._lock_handle.close()
-            self._lock_handle = None
-
-    def _write_formats(self) -> None:
+    def _write_tables(self) -> None:
         assert self._connection is not None
-        rows = [
-            (
-                self._keys[key],
-                key,
-                self._sequence[key],
-                self._capacity[key],
-                int(self._exhausted[key]),
-            )
-            for key in sorted(self._sequence)
-        ]
+        metadata = {"revision": self.revision, "roster_hash": self.roster_hash}
+        metadata.update({key: str(value) for key, value in self._targets.items()})
         self._connection.executemany(
-            "INSERT INTO formats VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(format_key) DO UPDATE SET "
-            "candidates=excluded.candidates, capacity=excluded.capacity, "
-            "exhausted=excluded.exhausted",
-            rows,
+            "INSERT INTO metadata VALUES (?, ?)", sorted(metadata.items())
+        )
+        self._connection.executemany(
+            "INSERT INTO formats VALUES (?, ?, ?, ?, ?)",
+            [
+                (key, format_id, self._sequence[format_id], self._capacity[format_id],
+                 int(self._exhausted[format_id]))
+                for format_id, key in self._keys.items()
+            ],
         )
 
 
@@ -304,7 +199,7 @@ class Manifest:
 def open_manifest(path: Path, roster_hash: str) -> Manifest:
     """Open a complete manifest and verify its roster identity."""
 
-    with sqlite3.connect(path) as connection:
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
         metadata = dict(connection.execute("SELECT key, value FROM metadata"))
         rows = connection.execute(
             "SELECT format_key, id, candidates, capacity, exhausted FROM formats"
@@ -324,32 +219,11 @@ def open_manifest(path: Path, roster_hash: str) -> Manifest:
     )
 
 
-def read_metadata(path: Path) -> dict[str, str]:
-    """Read the metadata table of a complete manifest."""
-
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
-        return dict(connection.execute("SELECT key, value FROM metadata"))
-
-
 def stored_format_ids(path: Path) -> list[str]:
     """List the format ids recorded in a complete manifest."""
 
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
         return [row[0] for row in connection.execute("SELECT id FROM formats ORDER BY id")]
-
-
-def adopt_manifest(path: Path, roster_hash: str, legacy_hash: str, built_target: int) -> bool:
-    """Rewrite a matching legacy roster identity in place."""
-
-    with sqlite3.connect(path) as connection:
-        stored = dict(connection.execute("SELECT key, value FROM metadata"))
-        if stored.get("roster_hash") != legacy_hash:
-            return False
-        connection.executemany(
-            "INSERT OR REPLACE INTO metadata VALUES (?, ?)",
-            (("roster_hash", roster_hash), ("built_target", str(built_target))),
-        )
-    return True
 
 
 def _pack_blob_id(blob_id: str) -> bytes:
@@ -373,11 +247,6 @@ PRAGMA journal_mode = DELETE;
 PRAGMA synchronous = NORMAL;
 PRAGMA cache_size = -65536;
 CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE completed_configs (
-    config TEXT PRIMARY KEY,
-    shard INTEGER NOT NULL,
-    row INTEGER NOT NULL
-);
 CREATE TABLE formats (
     format_key INTEGER PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
