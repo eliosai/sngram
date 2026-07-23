@@ -21,9 +21,8 @@ and training work.
 pip install sngram
 ```
 
-Wheels embed the trained weight table for the shipping tier. Building
-from source needs a Rust toolchain and enables the same tier feature by
-default.
+Wheels embed the trained production weight table. Building from source
+needs a Rust toolchain and embeds the same table by default.
 
 ## Scanning
 
@@ -103,13 +102,15 @@ regex would match is guaranteed to pass.
 ## Weight tables
 
 ```python
-table = sngram.weights()                       # embedded shipping table
+table = sngram.weights()                       # embedded production table
 table = sngram.WeightTable.from_path("my.bin") # a table you minted
 table.fingerprint                              # stable identity hash
+table.provenance                               # who minted it, from what
 table.to_bytes()                               # SPNG binary round trip
 ```
 
-`WeightTable.from_weight_fn(fn)` builds synthetic tables for tests, and
+`WeightTable.from_weight_fn(fn)` builds synthetic tables for tests,
+`with_provenance(record)` stamps a table before it ships, and
 `table.matrix()` exposes all 65,536 weights as little-endian u32 bytes.
 
 ## Training counters

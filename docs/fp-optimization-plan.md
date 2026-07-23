@@ -7,7 +7,7 @@ Optimize the sngram library, the eg index shape, and query execution together.
 
 - Aggregate FP: 33.51% (640,009 candidates, 425,567 matches, 214,442 false positives)
 - Indexed vs scan wall: 1.55x, vs rg: 1.49x
-- Index: ~7.0GB mmap for ~1.5GB corpus — table.bin 3.97GB (198M gram records, 20B each), postings.bin 2.94GB (raw u32 doc ordinals), summaries 37MB
+- Index: ~7.0GB mmap for ~1.5GB corpus: table.bin 3.97GB (198M gram records, 20B each), postings.bin 2.94GB (raw u32 doc ordinals), summaries 37MB
 - Unsupported (fallback to scan): 34/242 queries via the 30% selectivity ceiling
 
 Worst FP classes:
@@ -32,7 +32,7 @@ execution are.
 ## Structural findings
 
 1. Postings are doc-granular. Gram AND is set membership, so co-occurrence, order,
-   and adjacency are invisible. This is the entire 90–99% FP tail.
+   and adjacency are invisible. This is the entire 90 to 99% FP tail.
 2. 10 of 12 ScanNeed predicates are dead. Scan computes them, summaries persist them
    (400B/doc), the executor evaluates them, the planner never emits them:
    StartsWith/EndsWith, LineStartsWithAnyByte/LineEndsWithAnyByte, HasFlags,
@@ -63,7 +63,7 @@ execution are.
 
 ## Phases
 
-### Phase 0 — measurement hardening
+### Phase 0: measurement hardening
 
 - Enrich `crates/eg/src/index/data/fp-queries.tsv`: more gap shapes, anchors,
   word-boundary, `-i`/`-w`/`-U`/`--crlf` modes, non-C-shaped queries (prose, paths,
@@ -76,7 +76,7 @@ execution are.
 - Simple human queries are first-class targets: plain words and phrases
   ("hello world", TODO, single -w words) get their own suite classes.
 
-### Phase 1 — wire the dead ScanNeeds (free precision)
+### Phase 1: wire the dead ScanNeeds (free precision)
 
 Planner emits every need it can prove; index format unchanged.
 
@@ -95,7 +95,7 @@ Planner emits every need it can prove; index format unchanged.
 - Watch: AnyOf-need union paths walk all summaries, O(doc_count); keep needs on
   candidate-bounded paths or bench the walk.
 
-### Phase 2 — shrink the index (done 2026-07-07)
+### Phase 2: shrink the index (done 2026-07-07)
 
 - Delta-varint postings (postings-v6): linux postings 2.94GB → 0.80GB.
 - Gram-cap sweep {100, 64, 32, 24, 16} with full suite per point: cap 16 won every
@@ -106,26 +106,26 @@ Planner emits every need it can prove; index format unchanged.
 - Result: linux 7.0GB → 1.68GB (ratio 1.06), guard 5.12 → 1.47, speedup 1.55x →
   1.97x, FN=0 throughout.
 - The ≤0.50 ratio target needs a deeper table restructure (two-level hash directory,
-  dedicated df=1 packing — table is 0.84GB for 70.5M grams). Schedule it with the
+  dedicated df=1 packing; table is 0.84GB for 70.5M grams). Schedule it with the
   Phase 3 format bump so corpora rebuild once.
 
-### Phase 3 — line-block postings (postings-v7, done 2026-07-07)
+### Phase 3: line-block postings (postings-v7, done 2026-07-07)
 
 - Each posting carries an 8-bucket scaled line mask (+1 byte/posting); executor
   intersects masks in AllOf, unions in AnyOf, `-U` falls back to doc granularity;
   newline-spanning grams set both blocks.
-- tune() keeps all grams under the stop threshold (cap 32, was 3) — df-only thinning
+- tune() keeps all grams under the stop threshold (cap 32, was 3); df-only thinning
   starved cross-literal intersections of one literal's grams entirely.
 - Linux: aggregate FP 37.44 → 32.62, speedup 2.23x, FN=0, ratio 1.06 → 1.42.
   Broad wins: ci −16pp, crlf −22pp, opt −16pp, lazy −14pp, pf −13pp, field −12pp.
-- Honest miss: gap stayed ~90% — spin_lock-class grams occur 20+ times per large
+- Honest miss: gap stayed ~90%: spin_lock-class grams occur 20+ times per large
   file and saturate any fixed-block mask. Same force limits wide/simple residuals.
 - Follow-on design (phase 3.5, after 4/5): per-line positions for selective grams
   only (df·occurrences below a budget), Zoekt's rarest-pair distance check without
   Zoekt's full positional cost. Remaining FP mass: gap 110k, simple 52k, wide 23k,
   seam 14.5k of 257k total.
 
-### Phase 4 — mint-time tuning sweep (done 2026-07-07)
+### Phase 4: mint-time tuning sweep (done 2026-07-07)
 
 - Minted discount {1, 4, 16, 64} (floor 1) from the 100GB checkpoint counts;
   rebuild + full suite per variant, same counts so only tuning varies.
@@ -138,9 +138,9 @@ Planner emits every need it can prove; index format unchanged.
 - **Deliverable: the final training run mints with Tuning::OFF**, matching
   current production behavior.
 - Bonus: the 100GB untuned table nearly matches the 12tb tier on this suite
-  (32.50 vs 31.82) — corpus scale has flat returns for FP here.
+  (32.50 vs 31.82); corpus scale has flat returns for FP here.
 
-### Phase 5b — word-edge posting bits (postings-v8, done 2026-07-07)
+### Phase 5b: word-edge posting bits (postings-v8, done 2026-07-07)
 
 - The simple-class FP mass was -w word queries: the index found substrings
   ("domain" for `main -w`) and neither -w nor -x ever reached the planner.
@@ -150,9 +150,9 @@ Planner emits every need it can prove; index format unchanged.
   indexed pattern.
 - Linux: aggregate 31.82 → 28.92, boundary 48.9 → 1.7, simple 44.8 → 21.5,
   FN=0. Guard: 49.8 → 37.1. Residual: per-occurrence pairing (START from one
-  occurrence, END from another) — falls to phase 3.5 positions if pursued.
+  occurrence, END from another); falls to phase 3.5 positions if pursued.
 
-### Phase 6 — postings-v9: the final format (2026-07-07)
+### Phase 6: postings-v9, the final format (2026-07-07)
 
 One format bump carrying every size and precision decision from the
 adversarial design round. Measured findings that shaped it:
@@ -160,7 +160,7 @@ adversarial design round. Measured findings that shaped it:
 - The fixed u40 offset column made table.bin the single largest waste:
   delta-coding hash gaps and letting offsets accumulate from per-block
   directory entries collapses 12B records to ~3B.
-- Max gram df on linux is 90,031 — a u16 count would truncate; counts are
+- Max gram df on linux is 90,031, so a u16 count would truncate; counts are
   exact uvarints now (the old u24 saturation is gone).
 - Varint posting gaps measured within 14% of the Elias-Fano floor; kept.
   Roaring/PEF/SIMD-BP128 all lose on the 68% df=1 gram majority.
@@ -168,7 +168,7 @@ adversarial design round. Measured findings that shaped it:
   postings touch and the size varint.
 - Masks split into a per-list column after the gaps.
 - Scaled line blocks scaled with file size, so big files degraded to
-  doc-granularity. Buckets are now hash(line) % 5 — collision probability
+  doc-granularity. Buckets are now hash(line) % 5; collision probability
   is file-size independent. The sixth bit becomes WORD_BOTH: some single
   occurrence carries both word edges, demanded by whole-literal `-w` plans
   (split START/END from different occurrences no longer slip through).
@@ -192,12 +192,12 @@ Rejected with reasons:
   90-100% FP for no wall win; stays 2.
 - 40-bit table keys: hash32 collisions measured +31 candidates per 848k.
 - Wider bucket masks (+1B/posting): gap-class grams occur 20+ times per
-  file and saturate any bucket count — gap stayed ~90.5% after the
+  file and saturate any bucket count; gap stayed ~90.5% after the
   hashing fix, so more buckets buy nothing there.
 - The gap class is the structural floor of doc+bucket granularity; real
   positions would fix it and were rejected on size.
 
-### Phase 5 — residual classes
+### Phase 5: residual classes
 
 - Wide-class seams: boundary-byte-set representation so the seam contributes a
   constraint instead of nothing.
@@ -218,7 +218,7 @@ Rejected with reasons:
 
 The seam-constant sweep (MAX_SEAM_CROSS 4096/8192, BOUNDARY_KEEP 12/16,
 MAX_CONCAT_ALTERNATIVES 16, and the combination) found the shipped
-constants optimal — every variant measured equal or worse.
+constants optimal: every variant measured equal or worse.
 
 What remains is the gap class (~90% FP, half the FP mass): occurrence
 ordering and distance are invisible to doc+bucket granularity, and real

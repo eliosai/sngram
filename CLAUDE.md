@@ -36,7 +36,7 @@ The `learn` feature exposes training counters. Keep training-specific code behin
 
 ### `weights`
 
-The `sngram` crate embeds trained weight tables behind one Cargo feature per training-data tier (`crates/lib/src/weights.rs`, binaries under `crates/lib/data`). Enable exactly one tier feature (currently `12tb`) and load it with `sngram::weights()`. Historical tier tables live in git history and are re-mintable from training checkpoints.
+The `sngram` crate embeds the trained production weight table behind the single `weights` feature (`crates/lib/src/weights.rs`, the binary at `crates/lib/data/weights.bin`). Enable `weights` and load it with `sngram::weights()`. Superseded tables live in git history and are re-mintable from training checkpoints.
 
 Use:
 
@@ -50,7 +50,7 @@ Do not expose table internals, filenames, constants, or low-level lookup helpers
 
 `crates/python` is the standalone `sngram` Python library. It is a maturin project: the pyo3 bindings crate, the `sngram/` wrapper package, the pyproject, and the lib tests live together in that one directory. It exposes the scan/query core, the embedded production weight table, and the GIL-free training counters. It ships no CLI and no runtime dependencies. This is the package that goes to PyPI.
 
-`train/` is the `sngram-train` project: the corpus training pipeline and the `sngram` training CLI. It depends on the library by path and streams blended corpora, counts byte pairs through Rust, checkpoints, mints weight tables, and resumes from saved state. Keep `.env` under `train/.env`; training uses Hugging Face credentials there.
+`train/` is the `sngram-train` project: the corpus training pipeline and the `sngram` training CLI. It depends on the library by path, imports the published corpus manifest from the Hugging Face Hub once, streams content from the public Software Heritage bucket, counts byte pairs through Rust, checkpoints every minute, resumes from saved state, and mints one provenance-stamped final table. Keep `.env` under `train/.env`; reading the manifest dataset uses the Hugging Face token there.
 
 Useful commands:
 
@@ -63,8 +63,8 @@ cd train
 uv sync
 uv run pytest
 uv run sngram train --limit 1GB
-uv run sngram train --mint-dir ./bins
-uv run sngram inspect bins/final_weights.bin
+uv run sngram train --mint-dir ./runs/r1
+uv run sngram inspect runs/r1/final_weights.bin
 ```
 
 ### `eg`
@@ -90,7 +90,7 @@ Rust training lives behind `sngram`'s `learn` feature:
 sngram = { path = "crates/lib", features = ["learn"] }
 ```
 
-Use `sngram::learn::BigramCounter` for local counting and table bytes. Use the Python trainer for full corpus minting. The Python trainer is the source of production tables because it handles dataset streaming, worker coordination, checkpointing, mint cadence, and event logs.
+Use `sngram::learn::BigramCounter` for local counting and table bytes. Use the Python trainer for full corpus minting. The Python trainer is the source of production tables because it handles dataset streaming, worker coordination, checkpointing, provenance stamping, and event logs.
 
 Generated `.bin` weight tables load through `WeightTable::from_bytes`. Released tables move into `crates/lib/data` and get exposed through Cargo features.
 
@@ -103,7 +103,7 @@ Rust workspace:
 ```sh
 cargo test -p sngram-types --offline
 cargo test -p sngram --offline
-cargo test -p sngram --features 12tb --offline
+cargo test -p sngram --features weights --offline
 cargo test -p elgrep --offline
 cargo clippy -p elgrep --all-targets --offline -- -D warnings
 cargo fmt --all -- --check

@@ -1,47 +1,58 @@
 # Training Data Contract
 
-Decision date: 2026-07-09.
+Decision date: 2026-07-23.
 
-The canonical run trains on **10 TB of effective UTF-8 bytes**. The available
-Stack v2 roster has a 12 TB capacity envelope. Effective bytes include the
-inverse weights applied to sampled small files; fetched bytes measure content
-read from object storage.
+The production run trains on **5.11 TB of effective UTF-8 bytes**, the full
+supply of the curated corpus under a 6 TB balanced target. Effective bytes
+include the inverse weights applied to sampled small files; fetched bytes
+measure content read from object storage.
 
 ## Sources
 
-- Metadata: `bigcode/the-stack-v2-dedup` at one pinned revision
-- Content: `s3://softwareheritage/content/{blob_id}`
-- Encoding: each row's `src_encoding`, normalized to UTF-8 before counting
+- Manifest: the `eliosai/sngram-train` dataset on the Hugging Face Hub,
+  153,213,295 sampled objects as sharded jsonl plus a `manifest.json` sidecar
+- Content: `s3://softwareheritage/content/{blob_id}`, public, read anonymously
+- Metadata origin: `bigcode/the-stack-v2-dedup` at the revision pinned in
+  `sngram_train/config.py`
 
-The trainer lists the pinned repository tree once. Each dataset config becomes
-one format and gets scanned once. Unknown configs become separate long-tail
-formats. `Text` rows split into docs, config, and data formats by path and
-extension without rescanning the physical config.
+The published dataset is the corpus. Training never scans Stack metadata; it
+imports the dataset once into a local SQLite manifest and verifies the roster
+hash recorded in the sidecar against the catalog the code builds. A drifted
+contract fails loudly instead of training on the wrong distribution.
 
 ## Areas
 
-| Area | Capacity | Share |
-| --- | ---: | ---: |
-| Core programming | 5.20 TB | 43.33% |
-| Docs / prose / markup | 2.30 TB | 19.17% |
-| Config / build / infra | 1.50 TB | 12.50% |
-| Web / UI / templates | 1.20 TB | 10.00% |
-| Data / query / schema | 1.00 TB | 8.33% |
-| Long-tail floor | 0.80 TB | 6.67% |
+Measured supply hard-caps the two areas that matter most: clean deduplicated
+source code tops out at 1.94 TB and prose at 0.72 TB. Only JSON, HTML, and
+CSV can grow past their balanced share. The area weights below put code at
+the largest share that still clears 5 TB of total corpus and size the
+elastic formats to balance near 9 percent each.
 
-Every mint applies these shares to its cumulative effective-byte threshold with
-exact integer apportionment. Format allocation inside each area uses max-min
-fairness. All live formats advance at the same byte level. When a format
-exhausts, the trainer redistributes its missing bytes equally among the remaining
-formats in that area. One format cannot exceed 6% of its area's 12 TB capacity.
+| Area | Weight | Share |
+| --- | ---: | ---: |
+| Core programming | 2.28 TB | 38.0% |
+| Config / build / infra | 1.18 TB | 19.7% |
+| Docs / prose / markup | 0.84 TB | 14.0% |
+| Web / UI / templates | 0.82 TB | 13.7% |
+| Data / query / schema | 0.70 TB | 11.6% |
+| Long-tail | 0.18 TB | 3.0% |
+
+The trainer apportions its target across areas by these weights with exact
+integer arithmetic. Inside each area, max-min fairness levels every format
+up together; no format exceeds its area's per-format share cap. When a
+format exhausts, its missing bytes redistribute across the remaining formats
+in the area.
 
 ## Row Admission
 
-The inventory rejects vendor, generated, empty, incomplete, and oversized rows.
-The size ceiling is 2 MiB, or 4 MiB for docs. It has no minimum file size.
+The corpus rejects vendor, generated, empty, and oversized rows. The size
+ceiling is 2 MiB, or 4 MiB for docs. Formats prone to generated blobs carry
+tighter per-file ceilings, from 160 KiB for YAML to 768 KiB for HTML.
+Jupyter notebooks and hOCR dumps are excluded outright: base64 cells and OCR
+layout markup teach a byte-pair table nothing about code.
 
-Files below 16 KiB use deterministic inverse-probability sampling. For a file
-of size `n`, the trainer computes:
+Files below 16 KiB use deterministic inverse-probability sampling. For a
+file of size `n`:
 
 ```text
 w = next_power_of_two(ceil(16 KiB / n))
@@ -49,63 +60,29 @@ inclusion probability = 1 / w
 effective counts = sampled counts * w
 ```
 
-Files at least 16 KiB have weight one. This estimator gives every eligible byte
-the correct expected contribution while avoiding hundreds of millions of small
-S3 reads. A format containing only small files keeps its effective-byte target.
-If its full eligible corpus is smaller than that target, normal exhaustion
-redistribution applies.
+Files at least 16 KiB have weight one. Every eligible byte keeps the correct
+expected contribution without hundreds of millions of small S3 reads.
 
-## Inventory
+## Training Flow
 
-The trainer writes `.manifest.sqlite3` under the mint directory. The manifest
-stores sampled object references, weights, per-format capacity, the pinned
-revision, and the roster hash. Buffered integer-key inserts keep its memory and
-disk overhead bounded.
+1. Download and import the published manifest, once
+2. Apportion the effective target across areas, then max-min across formats
+3. Fetch candidates concurrently from the content bucket, bounded per format
+4. Decode to UTF-8 and count byte pairs through the Rust `BigramCounter`
+5. Checkpoint the counter and per-format cursors every minute
+6. Mint one final provenance-stamped table when the target fills
 
-Each physical config commits in one SQLite transaction. An interrupted build
-keeps completed configs and rolls back the current partial config. Resume starts
-at the first incomplete config. A changed revision or format roster requires a
-new mint directory.
-
-## Counting
-
-The canonical mint schedule is 100 GB, 500 GB, then every 1 TB through 10 TB.
-For each threshold the trainer:
-
-1. Computes exact cumulative area targets
-2. Computes max-min cumulative format targets
-3. Fetches at most one object per worker
-4. Decodes and counts one bounded round through the Rust `BigramCounter`
-5. Commits counts, format cursors, and progress as one durable cut
-6. Mints only after every area and format reaches the barrier
-
-No preview or in-flight counter enters a mint. A transient content failure aborts
-the uncommitted round and resumes from the prior checkpoint. Missing objects,
-invalid encodings, and empty decoded content are logged and skipped.
-
-Gzip decompression stops at each row's declared length. With 64 workers and the
-4 MiB document ceiling, fetched content occupies at most 256 MiB before the
-bounded Arrow counting buffer. The trainer does not depend on allocator trimming
-or an after-the-fact RSS soft limit.
-
-## State And Telemetry
-
-`.checkpoint.sqlite3` atomically stores the Rust count snapshot, effective and
-fetched totals, format cursors, partial-object offsets, exhaustion state, mint
-history, and the previous mint distribution for KL comparison.
-
-Each `mint` event records its exact durable area and format composition. Summary
-events separate fetched bytes from effective bytes. The dashboard shows both,
-plus area targets, format deficits, RSS, rate, and KL from the previous mint.
+Missing objects, invalid encodings, and empty decoded content are logged and
+skipped; the measured loss rate is around one object in 200,000. A killed
+run resumes from its last checkpoint and reproduces the identical table.
 
 ## Environment
 
-- `HF_TOKEN`: access to `bigcode/the-stack-v2-dedup`
-- AWS credentials: optional when the Software Heritage bucket permits anonymous reads
-- `SNG_SWH_ANONYMOUS=0`: force the boto credential chain
+- `HF_TOKEN`: read access to the manifest dataset, from the environment or
+  `train/.env`; content needs no credentials
 
 ```sh
 cd train
 uv sync
-uv run sngram train --mint-dir ./bins
+uv run sngram train --mint-dir ./runs/r1
 ```

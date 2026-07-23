@@ -14,26 +14,23 @@ and the real regex verifies the candidates it admits.
 
 The weight table decides where gram borders land. Rare byte pairs score
 high and common pairs score low, so selectivity comes from the training
-data. The tables are trained on terabytes of blended source code and
-multilingual web text.
+data. The production table is trained on 5 TB of curated source code,
+config, prose, and web text from Stack v2, and ships inside the library.
 
-The project ships four surfaces.
+The project has four surfaces: a Rust crate, a Python package, a code
+search CLI, and the trainer that mints weight tables.
 
-## The Rust crates
+## The Rust crate
 
-`sngram` is the core library and `sngram-types` holds the shared value
-types. Trained weight tables are embedded in `sngram` behind one Cargo
-feature per training-data tier.
-
-```toml
-[dependencies]
-sngram = { version = "0.6", features = ["12tb"] }
-sngram-types = "0.6"
+```sh
+cargo add sngram --features weights
 ```
 
+The `weights` feature embeds the trained production table. Everything
+the API needs is exported from the one crate.
+
 ```rust
-use sngram::{query, scan};
-use sngram_types::ScanEvent;
+use sngram::{query, scan, ScanEvent};
 use std::io::Cursor;
 
 let table = sngram::weights();
@@ -53,21 +50,18 @@ let plan = query(&table, r"max_\w+_size")?;
 `scan` reads one `BufRead` stream, allocates nothing per gram, and ends
 with a `ScanEvent::Finish` summary of document metadata mined in the
 same pass. `query` returns a `QueryPlan` whose needles carry the same
-keys `scan` emits. Concerns like fixed-string escaping, smart case, and
-multi-pattern OR joining belong above `query`, encoded into the single
-pattern you pass in.
-
-Training from Rust lives behind the `learn` feature as
-`sngram::learn::BigramCounter`. The README in [crates/lib](crates/lib)
-covers the library in more depth.
+keys `scan` emits. Training from Rust lives behind the `learn` feature
+as `sngram::learn::BigramCounter`. The README in
+[crates/lib](crates/lib) covers the library in depth.
 
 ## The Python package
 
-`crates/python` is the standalone `sngram` package for Python, built
-with maturin over the same Rust core. It has no runtime dependencies
-and mirrors the Rust surface: scan, query planning, weight tables, and
-the GIL-free training counters. It lands on PyPI with v1 once the final
-tables are minted.
+```sh
+pip install sngram
+```
+
+The same Rust core, built with maturin. No runtime dependencies, and
+scan and training work release the GIL.
 
 ```python
 import sngram
@@ -85,51 +79,55 @@ plan.needs[0].satisfied_by(result.summary)
 [crates/python/README.md](crates/python/README.md) documents the full
 surface, including plan tuning and a worked inverted-index example.
 
+## The elgrep CLI
+
+```sh
+cargo install elgrep
+```
+
+`eg` is a code search tool built on the index: a ripgrep-style searcher
+that prefilters files through the sparse index and verifies candidates
+with the real regex engine. Its `eg-indexd` daemon builds, watches, and
+refreshes indexes in the background, so every query after the first
+build hits a warm index.
+
+```sh
+eg 'max_\w+_size' ~/src/linux
+eg --no-index 'max_\w+_size' ~/src/linux   # plain scan for comparison
+```
+
+On the Linux kernel tree the indexed path answers common patterns 4x to
+18x faster than ripgrep, with an index at 0.90x the corpus size and
+zero false negatives. [crates/eg/README.md](crates/eg/README.md) covers
+the CLI, the daemon, and the benchmark modes.
+
 ## The trainer
 
-`train/` is the `sngram-train` project, the pipeline that mints weight
-tables. It streams the Stack v2 and Software Heritage blend, counts
-byte pairs through the Rust core at around 3 GB/s per core, checkpoints
-continuously, and mints a table every terabyte.
+`train/` mints weight tables. It reads the published corpus manifest
+from the Hugging Face Hub, streams content from the public Software
+Heritage bucket, counts byte pairs through the Rust core, checkpoints
+every minute, and mints one provenance-stamped table at the end.
 
 ```sh
 cd train
 uv sync
 uv run sngram train --limit 1GB     # smoke run
-uv run sngram train --mint-dir ./bins
-uv run sngram inspect bins/final_weights.bin
+uv run sngram train --mint-dir ./runs/r1
+uv run sngram inspect runs/r1/final_weights.bin
 ```
 
-Credentials go in `train/.env`. [docs/training.md](docs/training.md)
-specifies the one remaining production run and its acceptance gates.
+[docs/training.md](docs/training.md) specifies the production run and
+its acceptance gates.
 
-## The eg CLI
-
-`crates/eg` is a code search tool built on the index: a ripgrep-style
-searcher that prefilters files through the sparse index and verifies
-candidates with the real regex engine. Its `eg-indexd` daemon builds,
-watches, and refreshes indexes in the background, so queries after the
-first build hit a warm index.
-
-```sh
-just eg release
-target/release/eg 'max_\w+_size' ~/src/linux
-target/release/eg --bench 'max_\w+_size' ~/src/linux
-```
-
-On the Linux kernel tree the indexed path runs the benchmark suite 2.3x
-faster than scanning, with an index at 0.90x the corpus size and zero
-false negatives. [crates/eg/README.md](crates/eg/README.md) covers the
-CLI, the daemon, and the benchmark modes.
-
-## Docs
+## Documentation
 
 - [docs/architecture.md](docs/architecture.md) the system in one page
 - [docs/index-format.md](docs/index-format.md) postings-v9 on disk
 - [docs/query-planning.md](docs/query-planning.md) regex to plan to candidates
 - [docs/daemon.md](docs/daemon.md) who builds and owns indexes
 - [docs/benchmarking.md](docs/benchmarking.md) how to measure claims
-- [docs/training.md](docs/training.md) the final training run
+- [docs/training.md](docs/training.md) the production training run
+- [docs/training-data.md](docs/training-data.md) the corpus contract
 
 ## License
 

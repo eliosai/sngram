@@ -1,12 +1,9 @@
 # sngram-types
 
-Core types for sparse n-gram extraction and weight tables, underneath
-the `sngram` crate.
-
-```toml
-[dependencies]
-sngram-types = "0.6"
-```
+The value types under the [`sngram`](https://crates.io/crates/sngram)
+crate. Depend on `sngram`; it re-exports everything applications need,
+and this crate exists so the library, its build script, and the
+bindings share one definition of each shape.
 
 - `WeightTable` is the 256x256 grid of byte-pair weights. It loads from
   and serializes to the validated `SPNG` binary format with `from_bytes`
@@ -22,9 +19,6 @@ sngram-types = "0.6"
   frequencies.
 - `Gram`, `HashKey`, and `Content` are the byte-string, hashing, and
   binary-detection primitives underneath.
-
-These are the value types the `sngram` crate builds its scan and query
-API on.
 
 ## License
 

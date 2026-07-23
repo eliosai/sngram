@@ -1,9 +1,10 @@
 # elgrep
 
-`elgrep` is a high-performance ripgrep alternative using a sparse n-gram
-index. The `eg` command carries rg's search path with sparse n-gram index
-integration. Indexing and index maintenance are handled by the `eg-indexd`
-background daemon.
+`elgrep` is an indexed ripgrep alternative. The `eg` command carries
+ripgrep's search path and adds a sparse n-gram prefilter: the index
+narrows each query to candidate files, and the real regex engine
+verifies them, so results match a plain scan exactly. The `eg-indexd`
+daemon builds and maintains indexes in the background.
 
 ## Installation
 
@@ -11,7 +12,7 @@ background daemon.
 cargo install elgrep
 ```
 
-This installs `eg` for foreground searches and `eg-indexd` next to it for
+This installs `eg` for searches and `eg-indexd` next to it for
 background index maintenance.
 
 ## Usage

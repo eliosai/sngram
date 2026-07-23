@@ -3,11 +3,13 @@
 Sparse n-gram extraction and regex query planning for code search.
 Stateless, `Send + Sync`.
 
-```toml
-[dependencies]
-sngram = "0.6"
-sngram-types = "0.6"
+```sh
+cargo add sngram --features weights
 ```
+
+The `weights` feature embeds the trained production weight table.
+Leave it off to bring your own table through
+`WeightTable::from_bytes`.
 
 ## How it works
 
@@ -29,9 +31,10 @@ it never misses a match. The real regex then verifies the candidates.
 
 ## API
 
+Everything below is exported from this one crate.
+
 ```rust,no_run
-use sngram::{query, scan};
-use sngram_types::ScanEvent;
+use sngram::{query, scan, ScanEvent};
 use std::io::Cursor;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -80,24 +83,25 @@ CLI concerns such as fixed-string escaping, smart case, multi-pattern
 OR joining, and CRLF mode belong above `query`, encoded into the single
 pattern you pass in.
 
-## Training
+## Features
 
-The `learn` feature, off by default, adds `sngram::learn::BigramCounter`,
-the byte-pair counter that trains fresh weight tables. Count with
-`process` or `process_batch`, merge staging counters with `merge`, and
-serialize with `to_table_bytes` in the format `WeightTable::from_bytes`
-loads.
+| feature | adds |
+|---|---|
+| `weights` | the embedded production weight table, loaded with `sngram::weights()` |
+| `learn` | `sngram::learn::BigramCounter`, the byte-pair counter that trains fresh tables |
 
-`WeightTable` lives in `sngram-types`. This crate embeds trained tables
-behind one feature per training-data tier (currently `12tb`). Enable
-exactly one tier and load it with `sngram::weights()`.
+Count with `process` or `process_batch`, merge staging counters with
+`merge`, and serialize with `to_table_bytes` in the format
+`WeightTable::from_bytes` loads. Tables minted by the full pipeline
+carry a provenance record naming the corpus revision and counted
+totals; read it back with `table.provenance()`.
 
-## 0.5 migration
+## Compatibility
 
-`scan` now takes a `BufRead` input and emits `ScanEvent::Gram` plus one
-`ScanEvent::Finish` per stream. `query` takes one regex pattern and
-returns `QueryPlan`. Index keys changed to the emitted `GramKey`, so
-reindex when upgrading: old index keys will not match new query keys.
+0.6 changed index keys to the emitted `GramKey`, so reindex when
+upgrading: old index keys will not match new query keys. `scan` takes a
+`BufRead` input and emits `ScanEvent::Gram` plus one
+`ScanEvent::Finish` per stream.
 
 ## License
 

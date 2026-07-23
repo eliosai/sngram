@@ -11,12 +11,14 @@ engine. The index may return false positives. It must never miss a match.
 | crate | role |
 |---|---|
 | `crates/types` | shared data shapes: `WeightTable`, `GramKey`, `ScanEvent`, `QueryPlan`, `GramNeedle`, `ScanNeed` |
-| `crates/lib` | the public API: `sngram::scan`, `sngram::query`, and embedded weight tables behind per-tier features; training counters behind `learn` |
+| `crates/lib` | the public API: `sngram::scan`, `sngram::query`, the embedded production table behind `weights`, and training counters behind `learn` |
 | `crates/python` | the standalone `sngram` Python package: scan, query, weight tables, and GIL-free training counters |
 | `crates/eg` | the application: a ripgrep fork that prefilters through the index, plus the `eg-indexd` daemon |
 
 The training pipeline lives outside the workspace in `train/`, a uv
-project that depends on the Python package and mints weight tables.
+project that depends on the Python package. It draws the published
+corpus manifest from the Hugging Face Hub and mints the production
+weight table.
 
 ## How a gram is chosen
 
