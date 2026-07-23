@@ -7,7 +7,7 @@ from sngram_train import cli
 from sngram_train.errors import ConfigurationError
 
 
-def test_train_defaults_to_the_canonical_six_tb(monkeypatch, tmp_path):
+def test_train_defaults_to_the_full_corpus(monkeypatch, tmp_path):
     captured = {}
 
     class FakeTrainer:
@@ -29,7 +29,7 @@ def test_train_defaults_to_the_canonical_six_tb(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["target"] == 6_000_000_000_000
+    assert captured["limit"] is None
     assert captured["ran"] is True
     assert "complete" in result.output
 
@@ -84,7 +84,7 @@ def test_startup_transport_failure_retries_but_configuration_error_does_not(monk
     assert calls == 2
 
     def invalid(_resume):
-        raise ConfigurationError("bad roster")
+        raise ConfigurationError("bad revision")
 
     with pytest.raises(ConfigurationError):
         cli._run_until_done(invalid, resume=False, view=None)

@@ -9,7 +9,7 @@ from collections import deque
 from pathlib import Path
 
 # event kinds kept in the tail
-_TAIL_KINDS = frozenset({"mint", "content_skips", "target_clamped", "format_depleted"})
+_TAIL_KINDS = frozenset({"mint", "content_skips"})
 
 
 class EventLog:

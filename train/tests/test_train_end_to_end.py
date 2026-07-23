@@ -5,13 +5,11 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from sngram_train import cli
-from sngram_train.catalog import build_catalog
-from sngram_train.config import GROUP_LABELS, STACK_V2_REVISION
 
-CONFIGS = ["HTML", "JSON", "Markdown", "Python", "SQL", "Weird"]
+GROUPS = ["code", "config", "docs", "web", "data", "other"]
 LINE = b"fn main() { return 42; }\n"
-DOC = len(LINE) * 800
-PER_CONFIG = 120
+DOC = len(LINE) * 40
+PER_GROUP = 50
 
 CONTENT: dict[str, bytes] = {}
 
@@ -24,55 +22,53 @@ class FakeSwhContent:
         return CONTENT[blob_id]
 
 
-def publish_fake_dataset(repo_dir: Path):
-    catalog = build_catalog(CONFIGS)
+def publish_fake_corpus(repo_dir: Path):
     (repo_dir / "data").mkdir(parents=True, exist_ok=True)
+    rows = []
+    for group in GROUPS:
+        for index in range(PER_GROUP):
+            blob = f"{group}-{index}"
+            CONTENT[blob] = LINE * 40
+            rows.append({
+                "group": group, "language": "X", "extension": "x",
+                "license": "permissive", "blob_id": blob,
+                "encoding": "UTF-8", "length": DOC, "weight": 1,
+            })
     with gzip.open(
         repo_dir / "data" / "train-00000-of-00001.jsonl.gz", "wt", encoding="utf-8"
     ) as handle:
-        for item in catalog.formats:
-            for index in range(PER_CONFIG):
-                blob = f"{item.config}-{index}"
-                CONTENT[blob] = LINE * 800
-                handle.write(json.dumps(_row(item, blob)) + "\n")
-    (repo_dir / "manifest.json").write_text(json.dumps(_sidecar(catalog)))
-
-
-def _row(item, blob):
-    return {
-        "group": GROUP_LABELS[item.area],
-        "language": item.config,
-        "extension": "x",
-        "license": "permissive",
-        "blob_id": blob,
-        "encoding": "UTF-8",
-        "length": DOC,
-        "weight": 1,
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+    sidecar = {
+        "revision": "rev-e2e",
+        "rows": len(rows),
+        "raw_bytes": len(rows) * DOC,
+        "effective_bytes": len(rows) * DOC,
+        "groups": {group: PER_GROUP * DOC for group in GROUPS},
     }
-
-
-def _sidecar(catalog):
-    return {
-        "revision": STACK_V2_REVISION,
-        "roster_hash": catalog.roster_hash(STACK_V2_REVISION),
-        "built_target": None,
-        "effective_target": len(catalog.formats) * PER_CONFIG * DOC,
-        "formats": [
-            {"id": item.id, "candidates": PER_CONFIG, "exhausted": True}
-            for item in catalog.formats
-        ],
-    }
+    (repo_dir / "manifest.json").write_text(json.dumps(sidecar))
 
 
 def patch_hub(monkeypatch, tmp_path: Path):
-    import sngram_train.assets
     import sngram_train.content
+    import sngram_train.stream
 
     repo_dir = tmp_path / "repo"
     if not repo_dir.exists():
-        publish_fake_dataset(repo_dir)
+        publish_fake_corpus(repo_dir)
+
+    def load(_repo, _token):
+        from datasets import load_dataset
+
+        return load_dataset(
+            "json", data_files=str(repo_dir / "data" / "*.jsonl.gz"),
+            split="train", streaming=True,
+        )
+
+    monkeypatch.setattr(sngram_train.stream, "_load", load)
     monkeypatch.setattr(
-        sngram_train.assets, "_snapshot", lambda _repo, _token: str(repo_dir)
+        "huggingface_hub.hf_hub_download",
+        lambda *_args, **_kwargs: str(repo_dir / "manifest.json"),
     )
     monkeypatch.setattr(sngram_train.content, "SwhContent", FakeSwhContent)
 
@@ -94,75 +90,56 @@ def events_of(tmp_path: Path, kind: str):
     ]
 
 
-def test_train_fetches_the_dataset_and_mints_the_final_table(monkeypatch, tmp_path):
-    result = train_command(
-        monkeypatch, tmp_path, "--limit", "600KB", "--no-dashboard", "--workers", "8"
-    )
+def test_train_streams_the_corpus_and_mints_the_final_table(monkeypatch, tmp_path):
+    result = train_command(monkeypatch, tmp_path, "--no-dashboard", "--workers", "8")
 
     assert result.exit_code == 0, result.output
-    assert "fetching manifest dataset" in result.output
     assert "done:" in result.output
     assert (tmp_path / "bins" / "final_weights.bin").exists()
     mints = events_of(tmp_path, "mint")
-    assert mints[-1]["effective_bytes"] == 600_000
-    assert set(mints[-1]["areas"]) == {
-        "config-build-infra",
-        "core-programming",
-        "data-query-schema",
-        "docs-prose-markup",
-        "long-tail",
-        "web-ui-templates",
-    }
+    assert mints[-1]["effective_bytes"] == len(GROUPS) * PER_GROUP * DOC
+    assert set(mints[-1]["groups"]) == set(GROUPS)
 
 
 def test_train_command_renders_the_dashboard(monkeypatch, tmp_path):
-    result = train_command(monkeypatch, tmp_path, "--limit", "600KB", "--workers", "8")
+    result = train_command(monkeypatch, tmp_path, "--workers", "8")
 
     assert result.exit_code == 0, result.output
     assert "done:" in result.output
-    assert (tmp_path / "bins" / "final_weights.bin").exists()
     assert "sngram train" in result.output
 
 
-def test_second_train_reuses_the_imported_manifest(monkeypatch, tmp_path):
-    first = train_command(
-        monkeypatch, tmp_path, "--limit", "600KB", "--no-dashboard", "--workers", "8"
-    )
-    assert first.exit_code == 0, first.output
-
-    second = train_command(
-        monkeypatch, tmp_path, "--limit", "600KB", "--no-dashboard", "--workers", "8"
-    )
-
-    assert second.exit_code == 0, second.output
-    assert "fetching manifest dataset" not in second.output
-
-
-def test_train_clamps_an_infeasible_target_with_a_warning(monkeypatch, tmp_path):
+def test_limit_bounds_a_smoke_run(monkeypatch, tmp_path):
     result = train_command(
-        monkeypatch, tmp_path, "--limit", "500MB", "--no-dashboard", "--workers", "8"
+        monkeypatch, tmp_path, "--limit", "10KB", "--no-dashboard", "--workers", "8"
     )
 
     assert result.exit_code == 0, result.output
-    assert "corpus supplies" in result.output
-    assert "done:" in result.output
-    assert (tmp_path / "bins" / "final_weights.bin").exists()
     summary = events_of(tmp_path, "summary")[-1]
-    assert summary["complete"] is True
+    assert 10_000 <= summary["effective_bytes"] < len(GROUPS) * PER_GROUP * DOC
 
 
-def test_train_without_a_published_dataset_fails_with_guidance(monkeypatch, tmp_path):
-    import sngram_train.assets
+def test_completed_run_resumes_as_a_no_op(monkeypatch, tmp_path):
+    first = train_command(monkeypatch, tmp_path, "--no-dashboard", "--workers", "8")
+    assert first.exit_code == 0, first.output
 
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    monkeypatch.setattr(
-        sngram_train.assets, "_snapshot", lambda _repo, _token: str(empty)
-    )
+    second = train_command(monkeypatch, tmp_path, "--no-dashboard", "--workers", "8")
+
+    assert second.exit_code == 0, second.output
+    assert "done:" in second.output
+
+
+def test_train_without_a_published_corpus_fails_with_guidance(monkeypatch, tmp_path):
+    from huggingface_hub.errors import EntryNotFoundError
+
+    def missing(*_args, **_kwargs):
+        raise EntryNotFoundError("no manifest")
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", missing)
     result = CliRunner().invoke(
         cli.app,
         ["train", "--mint-dir", str(tmp_path / "bins"), "--no-dashboard"],
     )
 
     assert result.exit_code == 2
-    assert "no published manifest sidecar" in result.output
+    assert "no published corpus sidecar" in result.output

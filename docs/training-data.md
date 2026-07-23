@@ -9,16 +9,17 @@ measure content read from object storage.
 
 ## Sources
 
-- Manifest: the `eliosai/sngram-train` dataset on the Hugging Face Hub,
-  153,213,295 sampled objects as sharded jsonl plus a `manifest.json` sidecar
+- Corpus: the `eliosai/sngram-train` dataset on the Hugging Face Hub,
+  132,621,482 sampled objects as sharded jsonl plus a `manifest.json` sidecar
 - Content: `s3://softwareheritage/content/{blob_id}`, public, read anonymously
-- Metadata origin: `bigcode/the-stack-v2-dedup` at the revision pinned in
-  `sngram_train/config.py`
+- Metadata origin: `bigcode/the-stack-v2-dedup` at the revision recorded in
+  the sidecar
 
-The published dataset is the corpus. Training never scans Stack metadata; it
-imports the dataset once into a local SQLite manifest and verifies the roster
-hash recorded in the sidecar against the catalog the code builds. A drifted
-contract fails loudly instead of training on the wrong distribution.
+The published dataset is the exact corpus: the balanced distribution below
+is baked into its rows, so training streams the dataset and consumes every
+row once, with no local index and no runtime allocation logic. The sidecar
+names the corpus revision, and a checkpoint from a different revision fails
+loudly instead of training on the wrong distribution.
 
 ## Areas
 
@@ -37,11 +38,11 @@ elastic formats to balance near 9 percent each.
 | Data / query / schema | 0.70 TB | 11.6% |
 | Long-tail | 0.18 TB | 3.0% |
 
-The trainer apportions its target across areas by these weights with exact
-integer arithmetic. Inside each area, max-min fairness levels every format
-up together; no format exceeds its area's per-format share cap. When a
-format exhausts, its missing bytes redistribute across the remaining formats
-in the area.
+These shares were applied when the corpus was published: the target was
+apportioned across areas with exact integer arithmetic, and inside each
+area max-min fairness leveled every format up together, with exhausted
+formats redistributing their missing bytes across the rest of the area.
+The published rows are that allocation, so the trainer needs none of it.
 
 ## Row Admission
 
@@ -65,12 +66,11 @@ expected contribution without hundreds of millions of small S3 reads.
 
 ## Training Flow
 
-1. Download and import the published manifest, once
-2. Apportion the effective target across areas, then max-min across formats
-3. Fetch candidates concurrently from the content bucket, bounded per format
-4. Decode to UTF-8 and count byte pairs through the Rust `BigramCounter`
-5. Checkpoint the counter and per-format cursors every minute
-6. Mint one final provenance-stamped table when the target fills
+1. Stream corpus rows from the Hub dataset
+2. Fetch each object concurrently from the content bucket, bounded reads
+3. Decode to UTF-8 and count byte pairs through the Rust `BigramCounter`
+4. Checkpoint the counter and the stream position every minute
+5. Mint one final provenance-stamped table when the stream ends
 
 Missing objects, invalid encodings, and empty decoded content are logged and
 skipped; the measured loss rate is around one object in 200,000. A killed
@@ -78,7 +78,7 @@ run resumes from its last checkpoint and reproduces the identical table.
 
 ## Environment
 
-- `HF_TOKEN`: read access to the manifest dataset, from the environment or
+- `HF_TOKEN`: read access to the corpus dataset, from the environment or
   `train/.env`; content needs no credentials
 
 ```sh

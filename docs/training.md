@@ -10,10 +10,10 @@ The Python project in `train/` owns the production run. Rust's
 
 ## Production Run
 
-The run asks for 6 TB of effective bytes and clamps to what the corpus
-supplies, 5.11 TB. It checkpoints every minute and mints one final table at
-the end, stamped with a provenance record naming the corpus revision and the
-counted totals.
+The published dataset is the exact corpus, so the run streams it row by
+row and consumes every object once: 5.11 TB effective. It checkpoints
+every minute and mints one final table when the stream ends, stamped with
+a provenance record naming the corpus revision and the counted totals.
 
 ```sh
 cd train
@@ -22,12 +22,11 @@ uv run pytest
 uv run sngram train --mint-dir ./runs/r1
 ```
 
-The first run downloads the published corpus manifest from the Hugging Face
-Hub and imports it to a local SQLite manifest, a one-time step of about
-fifteen minutes. Content then streams from the public Software Heritage
-bucket with anonymous bounded reads. A 20-core machine with 95 ms of latency
-to the bucket sustains 85 to 90 MB/s of effective counting, which puts the
-full run around sixteen hours.
+Corpus rows stream from the Hugging Face Hub while content streams from
+the public Software Heritage bucket with anonymous bounded reads; nothing
+is prefetched. A 20-core machine with 95 ms of latency to the bucket
+sustains 85 to 90 MB/s of effective counting, which puts the full run
+around sixteen hours.
 
 Use `--limit` for a smoke run without changing the production default:
 
@@ -35,10 +34,10 @@ Use `--limit` for a smoke run without changing the production default:
 uv run sngram train --mint-dir ./smoke --limit 1GB --no-dashboard
 ```
 
-Interrupt or kill the run at any point; it resumes from the manifest and
-checkpoint under the same mint directory and reproduces the identical final
-table. Do not reuse a mint directory after changing the target, pinned
-revision, or format roster.
+Interrupt or kill the run at any point; it resumes from the checkpoint
+under the same mint directory and reproduces the identical final table. A
+checkpoint is bound to one corpus revision; a republished corpus needs a
+fresh mint directory.
 
 ## Measured Context
 

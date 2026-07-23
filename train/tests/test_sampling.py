@@ -1,42 +1,36 @@
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 import sngram
 
-from sngram_train.sampling import CountSink, WeightedSlice, count_slices
+from sngram_train.sampling import CountSink, WeightedDoc, count_documents
 
 
-def test_slices_expand_weighted_documents_exactly():
-    batch = count_slices([WeightedSlice(b"ab", 4, 0, 8)])
+def test_documents_expand_by_their_inverse_weight():
+    batch = count_documents([WeightedDoc(b"ab", 4), WeightedDoc(b"bc", 1)])
 
-    assert batch.counter.bytes_processed == 8
+    assert batch.counter.bytes_processed == 10
     assert batch.counter.count(ord("a"), ord("b")) == 4
-    assert batch.effective_bytes == 8
-    assert batch.documents == 1
+    assert batch.effective_bytes == 10
+    assert batch.documents == 2
 
 
-def test_partial_slices_resume_mid_document():
-    first = count_slices([WeightedSlice(b"abcd", 4, 0, 10)])
-    second = count_slices([WeightedSlice(b"abcd", 4, 10, 6)])
-
-    assert first.counter.bytes_processed == 10
-    assert second.counter.bytes_processed == 6
-    pairs = first.counter.count(ord("a"), ord("b")) + second.counter.count(
-        ord("a"), ord("b")
-    )
-    assert pairs == 4
+def test_empty_or_weightless_documents_are_rejected():
+    with pytest.raises(ValueError):
+        count_documents([WeightedDoc(b"", 1)])
+    with pytest.raises(ValueError):
+        count_documents([WeightedDoc(b"ab", 0)])
 
 
 def test_count_sink_matches_synchronous_counting():
-    slices = tuple(
-        WeightedSlice(bytes([65 + i]) * 40, 4, 0, 160) for i in range(8)
-    )
+    docs = tuple(WeightedDoc(bytes([65 + i]) * 40, 4) for i in range(8))
     sink = CountSink(sngram.BigramCounter())
     with ThreadPoolExecutor(max_workers=2) as pool:
         sink.pool = pool
         for start in range(0, 8, 2):
-            sink.submit(slices[start : start + 2])
+            sink.submit(docs[start : start + 2])
         sink.drain()
 
-    reference = count_slices(slices)
+    reference = count_documents(docs)
     assert sink.counter.snapshot() == reference.counter.snapshot()
     assert sink.counter.bytes_processed == reference.counter.bytes_processed

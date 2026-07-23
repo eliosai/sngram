@@ -19,20 +19,19 @@ app = typer.Typer(
 @app.command()
 def train(
     mint_dir: Path = typer.Option(Path("./bins"), help="Output and durable run state."),
-    target: str = typer.Option("6TB", help="Effective bytes to train."),
     workers: Optional[int] = typer.Option(None, help="Concurrent bounded content reads."),
-    limit: Optional[str] = typer.Option(None, help="Override target for a smoke run."),
+    limit: Optional[str] = typer.Option(None, help="Effective-byte cap for a smoke run."),
     checkpoint_every: float = typer.Option(60.0, help="Checkpoint period in seconds."),
-    resume: bool = typer.Option(True, help="Resume the manifest and checkpoint."),
+    resume: bool = typer.Option(True, help="Resume from the checkpoint."),
     dashboard: bool = typer.Option(True, help="Show the live terminal dashboard."),
 ) -> None:
-    """Train the final weight table from the published corpus manifest."""
+    """Stream the published corpus and mint the final weight table."""
 
     from .errors import ConfigurationError
 
     _tune_runtime()
     view = _run_view() if dashboard else None
-    build = _trainer_factory(mint_dir, limit or target, workers, checkpoint_every, view)
+    build = _trainer_factory(mint_dir, workers, limit, checkpoint_every, view)
     try:
         trainer = _dashboard_run(build, resume, view)
     except ConfigurationError as error:
@@ -42,21 +41,24 @@ def train(
 
 
 def _trainer_factory(
-    mint_dir: Path, target: str, workers: Optional[int], checkpoint_every: float, view
+    mint_dir: Path,
+    workers: Optional[int],
+    limit: Optional[str],
+    checkpoint_every: float,
+    view,
 ):
     from .units import parse_size
 
-    size = parse_size(target)
+    cap = parse_size(limit) if limit else None
     concurrency = workers or _default_workers()
 
     def build(resume_now: bool):
         return _production_trainer(
             mint_dir=mint_dir,
-            target=size,
             workers=concurrency,
+            limit=cap,
             checkpoint_interval=checkpoint_every,
             resume=resume_now,
-            view=view,
         )
 
     return build
@@ -92,56 +94,21 @@ def _dashboard_run(build, resume: bool, view):
 def _production_trainer(
     *,
     mint_dir: Path,
-    target: int,
     workers: int,
+    limit: Optional[int],
     checkpoint_interval: float,
     resume: bool,
-    view=None,
 ):
-    from .config import STACK_V2_BUCKET_CAPS
+    from .config import hf_token
     from .content import SwhContent
     from .pipeline import Trainer, TrainerConfig
+    from .stream import CorpusStream, corpus_meta
 
-    manifest = _open_manifest(mint_dir, view)
-    _warn_clamped(manifest, target, view)
-    config = TrainerConfig(mint_dir, target, workers, checkpoint_interval, resume)
-    catalog = _catalog_for(manifest.path)
-    return Trainer(
-        catalog, manifest, SwhContent(workers=workers), config, STACK_V2_BUCKET_CAPS
-    )
-
-
-def _open_manifest(mint_dir: Path, view):
-    from .assets import assets_repo, fetch_dataset
-    from .config import STACK_V2_REVISION, hf_token
-    from .manifest import open_manifest
-
-    path = mint_dir / ".manifest.sqlite3"
-    if not path.exists():
-        report = view.note if view is not None else typer.echo
-        report(f"fetching manifest dataset from {assets_repo()} (one-time import)")
-        fetch_dataset(path, hf_token(), report)
-    return open_manifest(path, _catalog_for(path).roster_hash(STACK_V2_REVISION))
-
-
-def _catalog_for(path: Path):
-    from .catalog import build_catalog
-    from .manifest import stored_format_ids
-
-    configs = sorted({fid.split("/", 1)[1] for fid in stored_format_ids(path)})
-    return build_catalog(configs)
-
-
-def _warn_clamped(manifest, target: int, view) -> None:
-    from .units import fmt_bytes
-
-    effective = manifest.effective_target
-    if effective is not None and effective < target:
-        report = view.note if view is not None else typer.echo
-        report(
-            f"corpus supplies {fmt_bytes(effective)} of the requested "
-            f"{fmt_bytes(target)}; training to the achievable target"
-        )
+    token = hf_token()
+    corpus = corpus_meta(token)
+    config = TrainerConfig(mint_dir, workers, checkpoint_interval, limit, resume)
+    factory = lambda state: CorpusStream.open(token, state)
+    return Trainer(factory, SwhContent(workers=workers), config, corpus)
 
 
 def _run_until_done(build, resume: bool, view):
@@ -259,10 +226,7 @@ def fs_validate(
     counts, _stats = fsvalidate.filesystem_histogram(
         [str(root) for root in roots], cap=parse_size(cap) if cap else None
     )
-    _echo_validation(fsvalidate.validate(counts, table, top=top))
-
-
-def _echo_validation(report) -> None:
+    report = fsvalidate.validate(counts, table, top=top)
     typer.echo(f"KL(filesystem || table) = {report.kl:.4f} nats")
     for label, rows in (("under-represented", report.under_weighted),
                         ("over-represented", report.over_weighted)):

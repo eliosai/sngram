@@ -127,10 +127,11 @@ surface, including plan tuning and a worked inverted-index example.
 
 ## The trainer
 
-`train/` mints weight tables. It reads the published corpus manifest
-from the Hugging Face Hub, streams content from the public Software
-Heritage bucket, counts byte pairs through the Rust core, checkpoints
-every minute, and mints one provenance-stamped table at the end.
+`train/` mints weight tables. It streams the published corpus row by
+row from the Hugging Face Hub, fetches each object from the public
+Software Heritage bucket, counts byte pairs through the Rust core,
+checkpoints every minute, and mints one provenance-stamped table when
+the stream ends. Nothing is prefetched.
 
 ```sh
 cd train

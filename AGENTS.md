@@ -50,7 +50,7 @@ Do not expose table internals, filenames, constants, or low-level lookup helpers
 
 `crates/python` is the standalone `sngram` Python library. It is a maturin project: the pyo3 bindings crate, the `sngram/` wrapper package, the pyproject, and the lib tests live together in that one directory. It exposes the scan/query core, the embedded production weight table, and the GIL-free training counters. It ships no CLI and no runtime dependencies. This is the package that goes to PyPI.
 
-`train/` is the `sngram-train` project: the corpus training pipeline and the `sngram` training CLI. It depends on the library by path, imports the published corpus manifest from the Hugging Face Hub once, streams content from the public Software Heritage bucket, counts byte pairs through Rust, checkpoints every minute, resumes from saved state, and mints one provenance-stamped final table. Keep `.env` under `train/.env`; reading the manifest dataset uses the Hugging Face token there.
+`train/` is the `sngram-train` project: the corpus training pipeline and the `sngram` training CLI. It depends on the library by path, streams the published corpus rows from the Hugging Face Hub, fetches content from the public Software Heritage bucket, counts byte pairs through Rust, checkpoints every minute, resumes from saved state, and mints one provenance-stamped final table. Keep `.env` under `train/.env`; reading the corpus dataset uses the Hugging Face token there.
 
 Useful commands:
 

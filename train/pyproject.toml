@@ -12,6 +12,7 @@ license = "MIT"
 authors = [{ name = "Joshua Smotritsky" }]
 dependencies = [
     "sngram",
+    "datasets>=3.2",
     "huggingface-hub>=0.27",
     "pyarrow>=17",
     "rich>=13",

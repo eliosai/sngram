@@ -2,109 +2,74 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from sngram_train.catalog import Catalog, FormatSpec
-from sngram_train.manifest import ManifestWriter, open_manifest
 from sngram_train.pipeline import Trainer, TrainerConfig
+from sngram_train.stream import CorpusMeta, CorpusRow
+from tests.test_pipeline import ListStream
 
 LINE = b"fn main() { return 42; }\n"
 
 
-def build_trainer(tmp_path: Path, lengths, target, content, workers=16):
-    formats = tuple(FormatSpec(name, "code", name, target) for name in sorted(lengths))
-    catalog = Catalog(formats, tuple(sorted(lengths)))
-    roster_hash = catalog.roster_hash("revision")
-    path = tmp_path / "manifest.sqlite3"
-    with ManifestWriter(path, "revision", roster_hash) as writer:
-        for spec in formats:
-            writer.register(spec.id, exhausted=True)
-            writer.add_rows(
-                spec.id,
-                [
-                    (f"{spec.id}-{index}", "utf-8", length, 1, "", "")
-                    for index, length in enumerate(lengths[spec.id])
-                ],
-            )
-    manifest = open_manifest(path, roster_hash)
-    config = TrainerConfig(
-        mint_dir=tmp_path / "bins",
-        target=target,
-        workers=workers,
-        checkpoint_interval=3600,
-        resume=False,
-    )
-    return Trainer(catalog, manifest, content, config, {"code": 1})
-
-
 class LatencyContent:
-    def __init__(self, delays):
-        self.delays = delays
+    def __init__(self, delay, slow=frozenset(), slow_delay=0.0):
+        self.delay = delay
+        self.slow = slow
+        self.slow_delay = slow_delay
         self.reads = Counter()
 
     def read(self, blob_id, max_bytes):
         self.reads[blob_id] += 1
-        format_id, _, _index = blob_id.rpartition("-")
-        time.sleep(self.delays.get(format_id, 0.0))
+        time.sleep(self.slow_delay if blob_id in self.slow else self.delay)
         return LINE * (max_bytes // len(LINE))
 
 
-def test_slow_format_does_not_stall_the_other_formats(tmp_path: Path):
+def build(tmp_path: Path, count, doc, content, workers=16):
+    rows = [CorpusRow("code", f"code-{i}", "utf-8", doc, 1) for i in range(count)]
+    meta = CorpusMeta("revision", count, count * doc, count * doc, {"code": count * doc})
+    factory = lambda state: ListStream(rows, (state or {}).get("position", 0))
+    config = TrainerConfig(
+        mint_dir=tmp_path / "bins",
+        workers=workers,
+        checkpoint_interval=3600,
+        resume=False,
+    )
+    return Trainer(factory, content, config, meta)
+
+
+def test_uniform_latency_overlaps_fetches(tmp_path: Path):
     doc = len(LINE) * 80
-    lengths = {"slow": [doc] * 6}
-    lengths.update({f"fast{i}": [doc] * 40 for i in range(7)})
-    total = doc * (6 + 7 * 40)
-    delays = {"slow": 0.3}
-    delays.update({f"fast{i}": 0.001 for i in range(7)})
-    content = LatencyContent(delays)
-    trainer = build_trainer(tmp_path, lengths, total, content)
+    content = LatencyContent(0.02)
+    trainer = build(tmp_path, 200, doc, content)
 
     started = time.monotonic()
     trainer.run()
     wall = time.monotonic() - started
 
-    assert trainer.counter.bytes_processed == total
-    assert wall < 2.0
-
-
-def test_uniform_latency_overlaps_fetches_across_formats(tmp_path: Path):
-    doc = len(LINE) * 80
-    lengths = {f"f{i}": [doc] * 25 for i in range(8)}
-    total = doc * 8 * 25
-    content = LatencyContent({f"f{i}": 0.02 for i in range(8)})
-    trainer = build_trainer(tmp_path, lengths, total, content)
-
-    started = time.monotonic()
-    trainer.run()
-    wall = time.monotonic() - started
-
-    ideal = 8 * 25 * 0.02 / 16
-    assert trainer.counter.bytes_processed == total
+    ideal = 200 * 0.02 / 16
+    assert trainer.counter.bytes_processed == 200 * doc
     assert wall < ideal * 2.5 + 0.3
 
 
-def test_many_formats_do_not_throttle_the_planner(tmp_path: Path):
-    doc = len(LINE) * 1000
-    lengths = {f"f{i:03d}": [doc] * 24 for i in range(330)}
-    total = doc * 24 * 330 // 3
-    content = LatencyContent({})
-    trainer = build_trainer(tmp_path, lengths, total, content, workers=64)
+def test_one_slow_object_does_not_stall_the_stream(tmp_path: Path):
+    doc = len(LINE) * 80
+    content = LatencyContent(0.001, slow={"code-5"}, slow_delay=0.3)
+    trainer = build(tmp_path, 200, doc, content)
 
     started = time.monotonic()
     trainer.run()
     wall = time.monotonic() - started
 
-    objects = sum(item.objects for item in trainer.state.formats.values())
-    assert trainer.counter.bytes_processed == total
-    assert objects / wall > 400
+    assert trainer.counter.bytes_processed == 200 * doc
+    assert wall < 1.5
 
 
-def test_a_target_inside_a_document_fetches_each_object_once(tmp_path: Path):
-    doc = len(LINE) * 280
-    content = LatencyContent({})
-    target = doc * 9 + doc // 2
-    trainer = build_trainer(tmp_path, {"only": [doc] * 10}, target, content)
+def test_the_coordinator_keeps_pace_with_many_small_objects(tmp_path: Path):
+    doc = len(LINE) * 40
+    content = LatencyContent(0.0)
+    trainer = build(tmp_path, 8_000, doc, content, workers=64)
 
+    started = time.monotonic()
     trainer.run()
+    wall = time.monotonic() - started
 
-    assert trainer.counter.bytes_processed == target
-    assert all(count == 1 for count in content.reads.values())
-    assert len(content.reads) == 10
+    assert trainer.counter.bytes_processed == 8_000 * doc
+    assert 8_000 / wall > 1_000

@@ -1,42 +1,28 @@
-"""Atomic durable state for one balanced training run."""
+"""Atomic durable state for one streaming training run."""
 
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import sngram
 
 from .errors import ConfigurationError
 
-_VERSION = 5
-
-
-@dataclass(frozen=True)
-class FormatProgress:
-    cursor: int = 0
-    offset: int = 0
-    effective_bytes: int = 0
-    fetched_bytes: int = 0
-    objects: int = 0
-    exhausted: bool = False
-
-
-_EMPTY_PROGRESS = FormatProgress()
+_VERSION = 6
 
 
 @dataclass
 class RunState:
-    roster_hash: str
     revision: str
-    target: int
-    formats: dict[str, FormatProgress] = field(default_factory=dict)
-
-    def progress(self, format_id: str) -> FormatProgress:
-        return self.formats.get(format_id, _EMPTY_PROGRESS)
+    stream_state: dict | None = None
+    rows: int = 0
+    skips: int = 0
+    fetched: int = 0
+    groups: dict[str, int] = field(default_factory=dict)
 
 
 def write_table(
@@ -62,40 +48,41 @@ def save(path: Path, counter: sngram.BigramCounter, state: RunState) -> None:
     with sqlite3.connect(temporary) as connection:
         connection.execute(_SCHEMA)
         connection.execute(
-            "INSERT INTO checkpoint VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO checkpoint VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             _record(counter, state),
         )
     os.replace(temporary, path)
 
 
-def load(
-    path: Path, roster_hash: str, target: int, revision: str = ""
-) -> tuple[sngram.BigramCounter, RunState]:
+def load(path: Path, revision: str) -> tuple[sngram.BigramCounter, RunState]:
     """Load a matching checkpoint or return a fresh run."""
 
     if not path.exists():
-        return sngram.BigramCounter(), RunState(roster_hash, revision, target)
+        return sngram.BigramCounter(), RunState(revision)
     with sqlite3.connect(path) as connection:
         row = connection.execute("SELECT * FROM checkpoint").fetchone()
-    identity = (_VERSION, roster_hash, target)
-    if row is None or (row[0], row[1], row[3]) != identity:
+    if row is None or (row[0], row[1]) != (_VERSION, revision):
         raise ConfigurationError(
-            "checkpoint does not match this roster and target; "
+            "checkpoint does not match this corpus revision; "
             "pass --no-resume or a fresh --mint-dir to restart"
         )
     counter = sngram.BigramCounter()
-    counter.restore(row[5], row[6], row[7], row[8])
-    return counter, _state(row[1], row[2], row[3], row[4])
+    counter.restore(row[4], row[5], row[6], row[7])
+    return counter, _state(row[1], row[2], row[3])
 
 
 def _record(counter: sngram.BigramCounter, state: RunState) -> tuple[object, ...]:
-    formats = {key: asdict(value) for key, value in state.formats.items()}
+    progress = {
+        "rows": state.rows,
+        "skips": state.skips,
+        "fetched": state.fetched,
+        "groups": state.groups,
+    }
     return (
         _VERSION,
-        state.roster_hash,
         state.revision,
-        state.target,
-        json.dumps(formats),
+        json.dumps(state.stream_state) if state.stream_state is not None else None,
+        json.dumps(progress),
         counter.snapshot(),
         counter.pairs_processed,
         counter.bytes_processed,
@@ -103,17 +90,23 @@ def _record(counter: sngram.BigramCounter, state: RunState) -> tuple[object, ...
     )
 
 
-def _state(roster_hash: str, revision: str, target: int, payload: str) -> RunState:
-    formats = {key: FormatProgress(**value) for key, value in json.loads(payload).items()}
-    return RunState(roster_hash, revision, target, formats)
+def _state(revision: str, stream_json: str | None, progress_json: str) -> RunState:
+    progress = json.loads(progress_json)
+    return RunState(
+        revision,
+        json.loads(stream_json) if stream_json is not None else None,
+        progress["rows"],
+        progress["skips"],
+        progress["fetched"],
+        dict(progress["groups"]),
+    )
 
 
 _SCHEMA = """
 CREATE TABLE checkpoint (
     version INTEGER NOT NULL,
-    roster_hash TEXT NOT NULL,
     revision TEXT NOT NULL,
-    target INTEGER NOT NULL,
+    stream_json TEXT,
     state_json TEXT NOT NULL,
     counts BLOB NOT NULL,
     pairs INTEGER NOT NULL,

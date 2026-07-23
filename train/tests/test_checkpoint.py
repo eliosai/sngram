@@ -1,51 +1,52 @@
 from pathlib import Path
 
+import pytest
 import sngram
 
-from sngram_train.checkpoint import FormatProgress, RunState, load, save
+from sngram_train.checkpoint import RunState, load, save, write_table
+from sngram_train.errors import ConfigurationError
 
 
-def test_checkpoint_round_trips_counter_and_format_progress(tmp_path: Path):
+def test_checkpoint_round_trips_counter_and_stream_state(tmp_path: Path):
     counter = sngram.BigramCounter()
     counter.process(b"fn main() {}")
     state = RunState(
-        roster_hash="roster",
         revision="revision",
-        target=10_000,
-        formats={
-            "core/Python": FormatProgress(
-                cursor=7,
-                effective_bytes=12,
-                fetched_bytes=9,
-                objects=3,
-                exhausted=True,
-            )
-        },
+        stream_state={"shard": 3, "offset": 512},
+        rows=42,
+        skips=2,
+        fetched=9_000,
+        groups={"code": 7_000, "docs": 2_000},
     )
 
     save(tmp_path / "checkpoint.sqlite3", counter, state)
-    restored_counter, restored = load(tmp_path / "checkpoint.sqlite3", "roster", 10_000)
+    restored_counter, restored = load(tmp_path / "checkpoint.sqlite3", "revision")
 
     assert restored_counter.snapshot() == counter.snapshot()
-    assert restored.formats == state.formats
-    assert restored.revision == "revision"
+    assert restored == state
 
 
-def test_checkpoint_rejects_roster_or_target_changes(tmp_path: Path):
+def test_checkpoint_rejects_a_revision_change(tmp_path: Path):
     path = tmp_path / "checkpoint.sqlite3"
-    save(path, sngram.BigramCounter(), RunState("old", "revision", 100))
+    save(path, sngram.BigramCounter(), RunState("old"))
 
-    for roster, target in (("new", 100), ("old", 200)):
-        try:
-            load(path, roster, target)
-        except RuntimeError as error:
-            assert "checkpoint" in str(error)
-        else:
-            raise AssertionError("changed run identity should be rejected")
+    with pytest.raises(ConfigurationError, match="revision"):
+        load(path, "new")
 
 
 def test_missing_checkpoint_returns_fresh_state(tmp_path: Path):
-    counter, state = load(tmp_path / "missing.sqlite3", "roster", 42, revision="rev")
+    counter, state = load(tmp_path / "missing.sqlite3", "rev")
 
     assert counter.bytes_processed == 0
-    assert state == RunState("roster", "rev", 42)
+    assert state == RunState("rev")
+
+
+def test_written_table_carries_the_provenance(tmp_path: Path):
+    counter = sngram.BigramCounter()
+    counter.process(b"fn main() {}")
+
+    write_table(tmp_path, "final", counter, "stack-v2@abc 12 effective bytes")
+
+    table = sngram.WeightTable.from_path(tmp_path / "final_weights.bin")
+    assert table.provenance == "stack-v2@abc 12 effective bytes"
+    assert table.version == 2
