@@ -12,10 +12,11 @@ _UNSEEN_WEIGHT = 2**32 - 1
 
 
 class RateMeter:
-    """Average and windowed byte rates for one run."""
+    """Average and windowed byte rates above a resumed baseline."""
 
-    def __init__(self, window_s: float = 30.0) -> None:
+    def __init__(self, window_s: float = 30.0, baseline: int = 0) -> None:
         self.started_at = time.monotonic()
+        self.baseline = baseline
         self._window_s = window_s
         self._samples: deque[tuple[float, int]] = deque()
 
@@ -27,7 +28,7 @@ class RateMeter:
 
     def rate_avg(self, processed: int) -> float:
         elapsed = max(time.monotonic() - self.started_at, 1e-6)
-        return processed / elapsed
+        return max(processed - self.baseline, 0) / elapsed
 
     def rate_now(self, processed: int) -> float:
         if len(self._samples) < 2:

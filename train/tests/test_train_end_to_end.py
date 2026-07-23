@@ -41,6 +41,7 @@ def publish_fake_corpus(repo_dir: Path):
             handle.write(json.dumps(row) + "\n")
     sidecar = {
         "revision": "rev-e2e",
+        "corpus_id": "corpus-e2e",
         "rows": len(rows),
         "raw_bytes": len(rows) * DOC,
         "effective_bytes": len(rows) * DOC,

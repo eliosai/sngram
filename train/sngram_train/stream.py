@@ -20,6 +20,7 @@ def corpus_repo() -> str:
 @dataclass(frozen=True)
 class CorpusMeta:
     revision: str
+    corpus_id: str
     rows: int
     raw_bytes: int
     effective_bytes: int
@@ -52,6 +53,7 @@ def corpus_meta(token: str | None) -> CorpusMeta:
     data = json.loads(Path(path).read_text())
     return CorpusMeta(
         data["revision"],
+        data["corpus_id"],
         data["rows"],
         data["raw_bytes"],
         data["effective_bytes"],

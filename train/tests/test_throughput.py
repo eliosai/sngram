@@ -24,7 +24,9 @@ class LatencyContent:
 
 def build(tmp_path: Path, count, doc, content, workers=16):
     rows = [CorpusRow("code", f"code-{i}", "utf-8", doc, 1) for i in range(count)]
-    meta = CorpusMeta("revision", count, count * doc, count * doc, {"code": count * doc})
+    meta = CorpusMeta(
+        "revision", "corpus-1", count, count * doc, count * doc, {"code": count * doc}
+    )
     factory = lambda state: ListStream(rows, (state or {}).get("position", 0))
     config = TrainerConfig(
         mint_dir=tmp_path / "bins",

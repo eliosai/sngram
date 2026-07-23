@@ -80,15 +80,16 @@ class Trainer:
         self.effective_target = min(
             self.config.limit or corpus.effective_bytes, corpus.effective_bytes
         )
-        self.meter = metrics.RateMeter()
+        self.meter = metrics.RateMeter(baseline=self.committed_bytes)
         self.last_checkpoint_at: float | None = None
         self._sink = CountSink(self.counter)
         self._batch: list[WeightedDoc] = []
 
     def _load_state(self) -> tuple[sngram.BigramCounter, RunState]:
+        corpus = self.corpus
         if not self.config.resume:
-            return sngram.BigramCounter(), RunState(self.corpus.revision)
-        return load(self._checkpoint_path, self.corpus.revision)
+            return sngram.BigramCounter(), RunState(corpus.revision, corpus.corpus_id)
+        return load(self._checkpoint_path, corpus.revision, corpus.corpus_id)
 
     def run(self) -> None:
         """Stream the corpus through the counter and mint the final table."""

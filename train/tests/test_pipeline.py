@@ -59,7 +59,8 @@ def corpus(spec):
     for row in rows:
         groups[row.group] = groups.get(row.group, 0) + row.length * row.weight
     meta = CorpusMeta(
-        "revision", len(rows), sum(r.length for r in rows), sum(groups.values()), groups
+        "revision", "corpus-1", len(rows),
+        sum(r.length for r in rows), sum(groups.values()), groups,
     )
     return rows, content, meta
 
@@ -145,7 +146,9 @@ def test_checkpoint_rejects_a_different_corpus_revision(tmp_path: Path):
     trainer = build(tmp_path, rows, MemoryContent(content), meta)
     trainer.run()
 
-    drifted = CorpusMeta("other", meta.rows, meta.raw_bytes, meta.effective_bytes, meta.groups)
+    from dataclasses import replace
+
+    drifted = replace(meta, revision="other")
     with pytest.raises(ConfigurationError, match="revision"):
         build(tmp_path, rows, MemoryContent(content), drifted, resume=True)
 
@@ -158,3 +161,24 @@ def test_no_resume_starts_a_fresh_run(tmp_path: Path):
     fresh.run()
 
     assert fresh.counter.bytes_processed == meta.effective_bytes
+
+
+def test_resumed_run_average_rate_starts_from_zero(tmp_path: Path):
+    rows, content, meta = corpus([("code", 8, 100_000, 1)])
+    build(tmp_path, rows, MemoryContent(content), meta).run()
+
+    resumed = build(tmp_path, rows, MemoryContent(content), meta, resume=True)
+
+    assert resumed.committed_bytes == meta.effective_bytes
+    assert resumed.meter.rate_avg(resumed.committed_bytes) < 1.0
+
+
+def test_checkpoint_rejects_a_reshuffled_corpus(tmp_path: Path):
+    from dataclasses import replace
+
+    rows, content, meta = corpus([("code", 4, 100, 1)])
+    build(tmp_path, rows, MemoryContent(content), meta).run()
+
+    reshuffled = replace(meta, corpus_id="other-order")
+    with pytest.raises(ConfigurationError, match="corpus"):
+        build(tmp_path, rows, MemoryContent(content), reshuffled, resume=True)

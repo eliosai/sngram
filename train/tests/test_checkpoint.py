@@ -12,6 +12,7 @@ def test_checkpoint_round_trips_counter_and_stream_state(tmp_path: Path):
     counter.process(b"fn main() {}")
     state = RunState(
         revision="revision",
+        corpus_id="corpus-1",
         stream_state={"shard": 3, "offset": 512},
         rows=42,
         skips=2,
@@ -20,25 +21,29 @@ def test_checkpoint_round_trips_counter_and_stream_state(tmp_path: Path):
     )
 
     save(tmp_path / "checkpoint.sqlite3", counter, state)
-    restored_counter, restored = load(tmp_path / "checkpoint.sqlite3", "revision")
+    restored_counter, restored = load(
+        tmp_path / "checkpoint.sqlite3", "revision", "corpus-1"
+    )
 
     assert restored_counter.snapshot() == counter.snapshot()
     assert restored == state
 
 
-def test_checkpoint_rejects_a_revision_change(tmp_path: Path):
+def test_checkpoint_rejects_identity_changes(tmp_path: Path):
     path = tmp_path / "checkpoint.sqlite3"
-    save(path, sngram.BigramCounter(), RunState("old"))
+    save(path, sngram.BigramCounter(), RunState("rev", "corpus-a"))
 
     with pytest.raises(ConfigurationError, match="revision"):
-        load(path, "new")
+        load(path, "other", "corpus-a")
+    with pytest.raises(ConfigurationError, match="corpus"):
+        load(path, "rev", "corpus-b")
 
 
 def test_missing_checkpoint_returns_fresh_state(tmp_path: Path):
-    counter, state = load(tmp_path / "missing.sqlite3", "rev")
+    counter, state = load(tmp_path / "missing.sqlite3", "rev", "corpus-a")
 
     assert counter.bytes_processed == 0
-    assert state == RunState("rev")
+    assert state == RunState("rev", "corpus-a")
 
 
 def test_written_table_carries_the_provenance(tmp_path: Path):

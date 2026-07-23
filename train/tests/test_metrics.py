@@ -93,3 +93,10 @@ def test_table_frequencies_has_no_zeros_for_kl_safety():
     q = metrics.table_frequencies(table)
     assert all(x > 0.0 for x in q)
     assert metrics.kl(metrics.probs_from_counts([1, 1], eps=1.0), [0.5, 0.5]) >= 0.0
+
+
+def test_rate_average_counts_only_progress_above_the_baseline():
+    meter = metrics.RateMeter(baseline=1_000_000)
+
+    assert meter.rate_avg(1_000_000) == 0.0
+    assert meter.rate_avg(1_000_100) > 0.0

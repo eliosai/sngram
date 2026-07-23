@@ -25,6 +25,7 @@ def publish(tmp_path: Path):
                 handle.write(json.dumps(item) + "\n")
     sidecar = {
         "revision": "rev-1",
+        "corpus_id": "corpus-rev-1",
         "rows": len(ROWS),
         "raw_bytes": sum(item["length"] for item in ROWS),
         "effective_bytes": sum(item["length"] * item["weight"] for item in ROWS),
@@ -79,6 +80,7 @@ def test_corpus_meta_reads_the_sidecar(tmp_path: Path, monkeypatch):
     meta = stream.corpus_meta(token=None)
 
     assert meta.revision == "rev-1"
+    assert meta.corpus_id == "corpus-rev-1"
     assert meta.rows == 10
     assert meta.groups["code"] == meta.effective_bytes
 
