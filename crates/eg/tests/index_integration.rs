@@ -1960,19 +1960,18 @@ fn indexed_search_skips_binary_files_instead_of_forcing_them() {
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert_eq!(Some(1), output.status.code(), "{stderr}");
-    assert_eq!("", stdout);
-    assert!(
-        stderr.contains("backend prepare+lookup produced 0 candidates"),
-        "binary files should not enter the forced-candidate set: {stderr}"
+    assert_eq!(
+        "", stdout,
+        "the scan path reports nothing here, so indexed search must not either"
     );
     assert!(
-        !stderr.contains("found binary data"),
-        "binary files should not be searched by indexed verification: {stderr}"
+        !stderr.contains("forced candidate"),
+        "binary files should not enter the forced-candidate set: {stderr}"
     );
 }
 
 #[test]
-fn indexed_search_skips_late_nul_binary_files() {
+fn indexed_search_matches_the_scan_path_on_late_nul_binary_files() {
     let fixture = Fixture::new();
     let mut bytes = b"late binary needle\n".to_vec();
     bytes.extend(std::iter::repeat_n(b'a', 16 * 1024));
@@ -1980,21 +1979,62 @@ fn indexed_search_skips_late_nul_binary_files() {
     fs::write(fixture.path("late.bin"), bytes).unwrap();
     fs::write(fixture.path("text.txt"), "plain text miss\n").unwrap();
 
-    let output = eg(&[
-        "--debug",
+    let indexed = eg(&[
         "--index=auto",
         "--files-with-matches",
         "late binary needle",
         fixture.root.to_str().unwrap(),
     ]);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let scanned = eg(&[
+        "--no-index",
+        "--files-with-matches",
+        "late binary needle",
+        fixture.root.to_str().unwrap(),
+    ]);
 
-    assert_eq!(Some(1), output.status.code(), "{stderr}");
-    assert_eq!("", stdout);
+    assert_eq!(
+        String::from_utf8(scanned.stdout).unwrap(),
+        String::from_utf8(indexed.stdout).unwrap(),
+        "indexed search must report exactly what the scan path reports"
+    );
+    assert_eq!(scanned.status.code(), indexed.status.code());
+}
+
+/// A match in a buffer before the one holding the first NUL is reported by the
+/// scan path, so the index has to cover it.
+#[test]
+fn indexed_search_finds_a_match_before_a_far_off_nul() {
+    let fixture = Fixture::new();
+    let mut bytes = vec![b'\n'; 4096];
+    bytes.extend_from_slice(b"far off needle\n");
+    bytes.extend(std::iter::repeat_n(b'a', 2 * 1024 * 1024));
+    bytes.push(0);
+    bytes.extend_from_slice(b"tail\n");
+    fs::write(fixture.path("blob.pb"), bytes).unwrap();
+    fs::write(fixture.path("text.txt"), "plain text miss\n").unwrap();
+
+    let indexed = eg(&[
+        "--index=auto",
+        "--files-with-matches",
+        "far off needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let scanned = eg(&[
+        "--no-index",
+        "--files-with-matches",
+        "far off needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let scanned_stdout = String::from_utf8(scanned.stdout).unwrap();
+
     assert!(
-        stderr.contains("backend prepare+lookup produced 0 candidates"),
-        "late-NUL binary files should not be gram-indexed: {stderr}"
+        scanned_stdout.contains("blob.pb"),
+        "fixture must reproduce a scan-path hit before the NUL: {scanned_stdout}"
+    );
+    assert_eq!(
+        scanned_stdout,
+        String::from_utf8(indexed.stdout).unwrap(),
+        "the index must not drop a match the scan path reports"
     );
 }
 

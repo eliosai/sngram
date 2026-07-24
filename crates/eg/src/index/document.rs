@@ -59,15 +59,6 @@ pub fn scan(
     }
     let bytes = read_file(&file.path, use_mmap, len)?;
     let bytes = bytes.as_ref();
-    if super::classify::is_binary(bytes) {
-        return Ok(document(
-            ord,
-            path_hash,
-            false,
-            Vec::new(),
-            SummaryStatus::Skipped,
-        ));
-    }
     if super::classify::has_decoding_bom(bytes) {
         return Ok(document(
             ord,
@@ -75,6 +66,16 @@ pub fn scan(
             true,
             Vec::new(),
             SummaryStatus::UnknownText,
+        ));
+    }
+    let bytes = super::classify::searchable_prefix(bytes);
+    if bytes.is_empty() {
+        return Ok(document(
+            ord,
+            path_hash,
+            false,
+            Vec::new(),
+            SummaryStatus::Skipped,
         ));
     }
     let Some((hashes, summary)) = scan_bytes(table, bytes)? else {
