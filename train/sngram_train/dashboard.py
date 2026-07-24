@@ -48,11 +48,12 @@ def render(trainer: Trainer):
 
 
 def _header(trainer: Trainer) -> Text:
+    done = trainer.committed_bytes / max(trainer.effective_target, 1)
     header = Text()
     header.append(
         f"{fmt_bytes(trainer.committed_bytes)} effective", style="bold green"
     )
-    header.append(f" / {fmt_bytes(trainer.effective_target)}{_eta(trainer)}")
+    header.append(f" / {fmt_bytes(trainer.effective_target)} ({done:.1%}){_eta(trainer)}")
     header.append(f"   {fmt_bytes(trainer.state.fetched)} fetched", style="cyan")
     header.append(f"   now {fmt_rate(trainer.rate_now())}", style="cyan")
     header.append(f"   avg {fmt_rate(trainer.meter.rate_avg(trainer.committed_bytes))}")
@@ -75,16 +76,19 @@ def _groups(trainer: Trainer) -> Table:
     corpus = trainer.corpus.groups
     total = sum(corpus.values()) or 1
     committed = trainer.group_bytes()
+    trained = sum(committed.values()) or 1
     table = Table(box=None, pad_edge=False, header_style="dim")
     table.add_column("group", min_width=10)
     table.add_column("effective", justify="right")
-    table.add_column("of corpus", justify="right")
     table.add_column("share", justify="right")
+    table.add_column("target", justify="right")
     for group, target in sorted(corpus.items(), key=lambda item: -item[1]):
         amount = committed.get(group, 0)
-        fill = amount / target if target else 1.0
         table.add_row(
-            group, fmt_bytes(amount), f"{fill:6.1%}", f"{100 * target / total:4.1f}%"
+            group,
+            fmt_bytes(amount),
+            f"{amount / trained:6.1%}",
+            f"{100 * target / total:4.1f}%",
         )
     return table
 
