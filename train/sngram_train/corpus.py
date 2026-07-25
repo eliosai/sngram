@@ -11,6 +11,13 @@ DEFAULT_REPO = "HuggingFaceCode/stack-v3-train"
 
 _BLOCK_SIZE = 8 * 2**20
 
+# seconds before one shard listing attempt is abandoned
+_LISTING_TIMEOUT = 30.0
+
+_LISTING_ATTEMPTS = 5
+
+_LISTING_BACKOFF = 3.0
+
 
 def corpus_repo() -> str:
     return os.environ.get("SNGRAM_DATASET_REPO", DEFAULT_REPO)
@@ -39,16 +46,10 @@ class Corpus:
         return Corpus(self.repo, self.revision, self.shards[:count])
 
 
-def resolve_corpus(token: str | None) -> Corpus:
+def resolve_corpus(token: str | None, note=None) -> Corpus:
     """Pin the dataset revision and list its parquet shards with sizes."""
 
-    from huggingface_hub import HfApi
-    from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
-
-    try:
-        info = HfApi(token=token).dataset_info(corpus_repo(), files_metadata=True)
-    except (RepositoryNotFoundError, GatedRepoError) as error:
-        raise ConfigurationError(f"cannot read dataset {corpus_repo()}") from error
+    info = _dataset_info(token, note)
     shards = tuple(
         Shard(entry.rfilename, entry.size or 0)
         for entry in sorted(info.siblings, key=lambda entry: entry.rfilename)
@@ -57,6 +58,35 @@ def resolve_corpus(token: str | None) -> Corpus:
     if not shards:
         raise ConfigurationError(f"{corpus_repo()} has no parquet shards under data/")
     return Corpus(corpus_repo(), info.sha, shards)
+
+
+def _dataset_info(token: str | None, note):
+    """Fetch the listing, bounding every attempt so a stalled socket cannot hang."""
+
+    import time
+
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+
+    from .errors import is_transient
+
+    api = HfApi(token=token)
+    for attempt in range(_LISTING_ATTEMPTS):
+        if note is not None:
+            note(f"listing {corpus_repo()} shards (attempt {attempt + 1})")
+        try:
+            return api.dataset_info(
+                corpus_repo(), files_metadata=True, timeout=_LISTING_TIMEOUT
+            )
+        except (RepositoryNotFoundError, GatedRepoError) as error:
+            raise ConfigurationError(f"cannot read dataset {corpus_repo()}") from error
+        except Exception as error:
+            if not is_transient(error) or attempt + 1 == _LISTING_ATTEMPTS:
+                raise
+            if note is not None:
+                note(f"listing failed ({error}); retrying")
+            time.sleep(_LISTING_BACKOFF * (attempt + 1))
+    raise ConfigurationError(f"cannot list {corpus_repo()} shards")
 
 
 class HubShards:

@@ -11,7 +11,9 @@ SHARDS = [code_repos(8) for _ in range(3)]
 
 def patch_hub(monkeypatch, tmp_path: Path):
     corpus, source = write_corpus(tmp_path / "corpus", SHARDS)
-    monkeypatch.setattr("sngram_train.corpus.resolve_corpus", lambda token: corpus)
+    monkeypatch.setattr(
+        "sngram_train.corpus.resolve_corpus", lambda token, note=None: corpus
+    )
     monkeypatch.setattr(
         "sngram_train.corpus.HubShards", lambda corpus, token: source
     )
@@ -83,7 +85,7 @@ def test_completed_run_resumes_as_a_no_op(monkeypatch, tmp_path):
 def test_train_without_a_readable_dataset_fails_with_guidance(monkeypatch, tmp_path):
     from sngram_train.errors import ConfigurationError
 
-    def missing(token):
+    def missing(token, note=None):
         raise ConfigurationError("cannot read dataset local/missing")
 
     monkeypatch.setattr("sngram_train.corpus.resolve_corpus", missing)

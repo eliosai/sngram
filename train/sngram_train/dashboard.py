@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 
 from rich.console import Group
 from rich.live import Live
@@ -22,6 +23,7 @@ class RunView:
         self.lock = threading.Lock()
         self.trainer: Trainer | None = None
         self.notes: list[str] = []
+        self.started_at = time.monotonic()
 
     def note(self, message: str) -> None:
         with self.lock:
@@ -35,7 +37,9 @@ class RunView:
         with self.lock:
             if self.trainer is not None:
                 return render(self.trainer)
-            body = Text("\n".join(self.notes) or "resolving corpus", style="dim")
+            waited = time.monotonic() - self.started_at
+            lines = self.notes or ["resolving corpus"]
+            body = Text("\n".join(lines) + f"\nwaiting {waited:.0f}s", style="dim")
             return Panel(body, title="sngram train", border_style="blue")
 
 

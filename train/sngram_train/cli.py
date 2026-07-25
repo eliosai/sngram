@@ -32,7 +32,9 @@ def train(
 
     _tune_runtime()
     view = _run_view() if dashboard else None
-    build = _trainer_factory(mint_dir, workers, limit, shards, checkpoint_every)
+    build = _trainer_factory(
+        mint_dir, workers, limit, shards, checkpoint_every, view.note if view else None
+    )
     try:
         trainer = _dashboard_run(build, resume, view)
     except ConfigurationError as error:
@@ -47,6 +49,7 @@ def _trainer_factory(
     limit: Optional[str],
     shards: Optional[int],
     checkpoint_every: float,
+    note=None,
 ):
     from .units import parse_size
 
@@ -60,6 +63,7 @@ def _trainer_factory(
             shards=shards,
             checkpoint_interval=checkpoint_every,
             resume=resume_now,
+            note=note,
         )
 
     return build
@@ -113,13 +117,14 @@ def _production_trainer(
     shards: Optional[int],
     checkpoint_interval: float,
     resume: bool,
+    note=None,
 ):
     from .config import hf_token
     from .corpus import HubShards, resolve_corpus
     from .pipeline import Trainer, TrainerConfig
 
     token = hf_token()
-    corpus = resolve_corpus(token)
+    corpus = resolve_corpus(token, note)
     if shards is not None:
         corpus = corpus.take(shards)
     config = TrainerConfig(mint_dir, workers, checkpoint_interval, limit, resume)
