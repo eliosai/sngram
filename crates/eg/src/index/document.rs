@@ -59,16 +59,7 @@ pub fn scan(
     }
     let bytes = read_file(&file.path, use_mmap, len)?;
     let bytes = bytes.as_ref();
-    if super::classify::is_binary(bytes) {
-        return Ok(document(
-            ord,
-            path_hash,
-            false,
-            Vec::new(),
-            SummaryStatus::Skipped,
-        ));
-    }
-    if super::classify::has_decoding_bom(bytes) {
+    if crate::nulquit::has_decoding_bom(bytes) {
         return Ok(document(
             ord,
             path_hash,
@@ -77,13 +68,32 @@ pub fn scan(
             SummaryStatus::UnknownText,
         ));
     }
-    let Some((hashes, summary)) = scan_bytes(table, bytes)? else {
+    let prefix = super::classify::searchable_prefix(bytes);
+    if file.is_explicit() && prefix.len() < bytes.len() {
+        return Ok(document(
+            ord,
+            path_hash,
+            true,
+            Vec::new(),
+            SummaryStatus::UnknownText,
+        ));
+    }
+    if prefix.is_empty() {
         return Ok(document(
             ord,
             path_hash,
             false,
             Vec::new(),
             SummaryStatus::Skipped,
+        ));
+    }
+    let Some((hashes, summary)) = scan_bytes(table, prefix)? else {
+        return Ok(document(
+            ord,
+            path_hash,
+            true,
+            Vec::new(),
+            SummaryStatus::UnknownText,
         ));
     };
     let mut hashes = hashes;
@@ -96,7 +106,7 @@ pub fn scan(
             false
         }
     });
-    let forced_candidate = super::classify::is_high_entropy(bytes.len(), hashes.len());
+    let forced_candidate = super::classify::is_high_entropy(prefix.len(), hashes.len());
     if forced_candidate {
         hashes.clear();
     }
@@ -114,7 +124,7 @@ fn scan_bytes(
     bytes: &[u8],
 ) -> anyhow::Result<Option<(Vec<(u64, u8)>, ScanSummary)>> {
     let blocks = BlockMap::new(bytes);
-    let mut hashes = Vec::new();
+    let mut hashes = Vec::with_capacity(bytes.len().min(MAX_GRAM_PREALLOC));
     let mut summary = None;
     let scan = sngram::scan(table, Cursor::new(bytes), |event| match event {
         ScanEvent::Gram(gram) => {
@@ -133,14 +143,26 @@ fn scan_bytes(
 /// Maps content spans to five hashed line-bucket bits plus three word-edge bits
 struct BlockMap {
     newlines: Vec<usize>,
+    cursor: std::cell::Cell<LineCursor>,
+}
+
+/// Last resolved offset and its line index
+#[derive(Clone, Copy, Default)]
+struct LineCursor {
+    offset: usize,
+    line: usize,
 }
 
 const BUCKET_COUNT: usize = 5;
+
+/// Cap on the emitted-gram preallocation for one file
+const MAX_GRAM_PREALLOC: usize = 8 * 1024 * 1024;
 
 impl BlockMap {
     fn new(bytes: &[u8]) -> Self {
         Self {
             newlines: memchr::memchr_iter(b'\n', bytes).collect(),
+            cursor: std::cell::Cell::new(LineCursor::default()),
         }
     }
 
@@ -158,8 +180,22 @@ impl BlockMap {
         mask | word_edges(bytes, span)
     }
 
+    /// Line index of an offset, scanning forward from the previous query
     fn line_of(&self, offset: usize) -> usize {
-        self.newlines.partition_point(|&newline| newline < offset)
+        let mut cursor = self.cursor.get();
+        if offset < cursor.offset {
+            cursor.line = self.newlines.partition_point(|&newline| newline < offset);
+        } else {
+            while let Some(&newline) = self.newlines.get(cursor.line) {
+                if newline >= offset {
+                    break;
+                }
+                cursor.line += 1;
+            }
+        }
+        cursor.offset = offset;
+        self.cursor.set(cursor);
+        cursor.line
     }
 }
 
@@ -251,6 +287,32 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.count_ones(), 1);
         assert_eq!(first, 1 << bucket_of(0));
+    }
+
+    #[test]
+    fn cursor_line_lookup_matches_binary_search_in_any_order() {
+        let text = b"aa\nbb\ncc\ndd\nee\nff\ngg\nhh\n";
+        let map = BlockMap::new(text);
+        let fresh = BlockMap::new(text);
+        let offsets = [0, 5, 3, 23, 11, 0, 22, 7, 7, 1, 23];
+        for &offset in &offsets {
+            let expected = fresh.newlines.partition_point(|&newline| newline < offset);
+            assert_eq!(map.line_of(offset), expected, "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn masks_are_stable_across_query_order() {
+        let text: Vec<u8> = (0..64)
+            .flat_map(|i| format!("line number {i} with words\n").into_bytes())
+            .collect();
+        let spans = [(3, 9), (30, 41), (700, 712), (100, 130), (5, 6)];
+        let ordered = BlockMap::new(&text);
+        for &(start, end) in &spans {
+            let fresh = BlockMap::new(&text);
+            let span = ByteRange::new(start, end);
+            assert_eq!(ordered.mask(&text, &span), fresh.mask(&text, &span));
+        }
     }
 
     #[test]

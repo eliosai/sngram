@@ -12,6 +12,7 @@ mod generation;
 mod huffman;
 mod location;
 mod manifest;
+mod merge;
 mod planner;
 mod postings;
 mod progress;
@@ -235,9 +236,16 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
         report.set_candidates(candidates.len());
         report.set_parent_restricted_candidates(unrestricted_candidates - candidates.len());
     }
-    let matched =
-        verify::CandidateVerifier::new(args, mode, started_at, &snapshot, &candidates, bench)
-            .verify()?;
+    let matched = verify::CandidateVerifier::new(
+        args,
+        mode,
+        started_at,
+        &roots,
+        &snapshot,
+        &candidates,
+        bench,
+    )
+    .verify()?;
     Ok(matched)
 }
 

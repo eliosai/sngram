@@ -1938,7 +1938,7 @@ fn tantivy_forced_candidates_count_toward_selectivity_rejection() {
 }
 
 #[test]
-fn indexed_search_skips_binary_files_instead_of_forcing_them() {
+fn indexed_search_reports_prefix_matches_in_binary_files_without_forcing_them() {
     let fixture = Fixture::new();
     fs::write(fixture.path("blob.bin"), b"rare binary needle\0tail\n").unwrap();
     for i in 0..10 {
@@ -1956,23 +1956,140 @@ fn indexed_search_skips_binary_files_instead_of_forcing_them() {
         "rare binary needle",
         fixture.root.to_str().unwrap(),
     ]);
+    let scanned = eg(&[
+        "--no-index",
+        "--files-with-matches",
+        "rare binary needle",
+        fixture.root.to_str().unwrap(),
+    ]);
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(1), output.status.code(), "{stderr}");
-    assert_eq!("", stdout);
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
     assert!(
-        stderr.contains("backend prepare+lookup produced 0 candidates"),
-        "binary files should not enter the forced-candidate set: {stderr}"
+        stdout.contains("blob.bin"),
+        "a match before the first NUL is always reported: {stdout}"
     );
+    assert_eq!(String::from_utf8(scanned.stdout).unwrap(), stdout);
     assert!(
-        !stderr.contains("found binary data"),
-        "binary files should not be searched by indexed verification: {stderr}"
+        !stderr.contains("forced candidate"),
+        "binary files should not enter the forced-candidate set: {stderr}"
     );
 }
 
+/// The searcher must not drop the read chunk that holds the first NUL, no
+/// matter where earlier reads left the chunk boundaries.
 #[test]
-fn indexed_search_skips_late_nul_binary_files() {
+fn scan_reports_a_match_in_the_chunk_holding_the_first_nul() {
+    let fixture = Fixture::new();
+    let mut bytes = Vec::new();
+    while bytes.len() < 70_000 {
+        bytes.extend_from_slice(b"filler line\n");
+    }
+    bytes.extend_from_slice(b"MAGICNEEDLE hides here\n");
+    while bytes.len() < 80_000 {
+        bytes.extend_from_slice(b"filler line\n");
+    }
+    bytes.push(0);
+    bytes.extend_from_slice(b"tail after the nul\n");
+    fs::write(fixture.path("late.bin"), bytes).unwrap();
+
+    let scanned = eg(&[
+        "--no-index",
+        "--files-with-matches",
+        "MAGICNEEDLE",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(scanned.stdout).unwrap();
+
+    assert_eq!(Some(0), scanned.status.code());
+    assert!(stdout.contains("late.bin"), "{stdout}");
+}
+
+/// A match after the first NUL is invisible to both paths.
+#[test]
+fn scan_never_reports_a_match_after_the_first_nul() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("blob.bin"), b"clean line\n\0POSTNULNEEDLE\n").unwrap();
+
+    let scanned = eg(&[
+        "--no-index",
+        "--files-with-matches",
+        "POSTNULNEEDLE",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let indexed = eg(&[
+        "--index=auto",
+        "--files-with-matches",
+        "POSTNULNEEDLE",
+        fixture.root.to_str().unwrap(),
+    ]);
+
+    assert_eq!(Some(1), scanned.status.code());
+    assert_eq!("", String::from_utf8(scanned.stdout).unwrap());
+    assert_eq!(Some(1), indexed.status.code());
+    assert_eq!("", String::from_utf8(indexed.stdout).unwrap());
+}
+
+/// A NUL-free file the gram scanner rejects is still searched as text by the
+/// scan path, so the index must force it into the candidate set.
+#[test]
+fn indexed_search_forces_scanner_rejected_text_so_scan_matches_are_kept() {
+    let fixture = Fixture::new();
+    let mut bytes = b"\x01\x01\x01\x01\x01\x01\x01\n".repeat(512);
+    bytes.extend_from_slice(b"CTRLNEEDLE lives in control soup\n");
+    fs::write(fixture.path("soup.dat"), bytes).unwrap();
+    fs::write(fixture.path("text.txt"), "plain text miss\n").unwrap();
+
+    let scanned = eg(&[
+        "--no-index",
+        "--files-with-matches",
+        "CTRLNEEDLE",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let indexed = eg(&[
+        "--index=auto",
+        "--files-with-matches",
+        "CTRLNEEDLE",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let scanned_stdout = String::from_utf8(scanned.stdout).unwrap();
+
+    assert!(
+        scanned_stdout.contains("soup.dat"),
+        "fixture must reproduce a scan-path hit: {scanned_stdout}"
+    );
+    assert_eq!(
+        scanned_stdout,
+        String::from_utf8(indexed.stdout).unwrap(),
+        "the index must not drop a match the scan path reports"
+    );
+}
+
+/// Ground truth for the full-corpus modes: a binary file is never named.
+#[test]
+fn scan_files_without_match_never_names_binary_files() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "without needle\n").unwrap();
+    fs::write(fixture.path("miss.txt"), "plain text miss\n").unwrap();
+    fs::write(fixture.path("blob.bin"), b"binary miss\0tail\n").unwrap();
+
+    let scanned = eg(&[
+        "--no-index",
+        "--files-without-match",
+        "without needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(scanned.stdout).unwrap();
+
+    assert_eq!(Some(0), scanned.status.code());
+    assert!(stdout.contains("miss.txt"), "{stdout}");
+    assert!(!stdout.contains("hit.txt"), "{stdout}");
+    assert!(!stdout.contains("blob.bin"), "{stdout}");
+}
+
+#[test]
+fn indexed_search_matches_the_scan_path_on_late_nul_binary_files() {
     let fixture = Fixture::new();
     let mut bytes = b"late binary needle\n".to_vec();
     bytes.extend(std::iter::repeat_n(b'a', 16 * 1024));
@@ -1980,21 +2097,183 @@ fn indexed_search_skips_late_nul_binary_files() {
     fs::write(fixture.path("late.bin"), bytes).unwrap();
     fs::write(fixture.path("text.txt"), "plain text miss\n").unwrap();
 
-    let output = eg(&[
-        "--debug",
+    let indexed = eg(&[
         "--index=auto",
         "--files-with-matches",
         "late binary needle",
         fixture.root.to_str().unwrap(),
     ]);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let scanned = eg(&[
+        "--no-index",
+        "--files-with-matches",
+        "late binary needle",
+        fixture.root.to_str().unwrap(),
+    ]);
 
-    assert_eq!(Some(1), output.status.code(), "{stderr}");
-    assert_eq!("", stdout);
+    assert_eq!(
+        String::from_utf8(scanned.stdout).unwrap(),
+        String::from_utf8(indexed.stdout).unwrap(),
+        "indexed search must report exactly what the scan path reports"
+    );
+    assert_eq!(scanned.status.code(), indexed.status.code());
+}
+
+fn sorted_lines(output: &Output) -> Vec<String> {
+    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    let mut lines: Vec<String> = stdout.lines().map(str::to_owned).collect();
+    lines.sort();
+    lines
+}
+
+fn assert_indexed_matches_scan(fixture_cwd: &Path, args: &[&str], label: &str) {
+    let indexed = eg_in(args, fixture_cwd);
+    let mut scan_args = vec!["--no-index"];
+    scan_args.extend_from_slice(args);
+    let scanned = eg_in(&scan_args, fixture_cwd);
+
     assert!(
-        stderr.contains("backend prepare+lookup produced 0 candidates"),
-        "late-NUL binary files should not be gram-indexed: {stderr}"
+        indexed.status.success(),
+        "{label}: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    assert_eq!(
+        sorted_lines(&indexed),
+        sorted_lines(&scanned),
+        "{label}: indexed paths must render exactly like the scan path"
+    );
+    assert_eq!(indexed.status.code(), scanned.status.code(), "{label}");
+}
+
+fn nested_needle_fixture(needle: &str) -> Fixture {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("subdir")).unwrap();
+    fs::write(fixture.path("top.txt"), format!("{needle}\n")).unwrap();
+    fs::write(fixture.path("subdir/deep.txt"), format!("{needle}\n")).unwrap();
+    fs::write(fixture.path("miss.txt"), "nothing relevant\n").unwrap();
+    fixture
+}
+
+#[test]
+fn indexed_paths_match_the_scan_path_for_each_argument_form() {
+    let fixture = nested_needle_fixture("argument form needle");
+    let root = fixture.root.to_str().unwrap().to_owned();
+
+    let forms: &[(&str, &[&str])] = &[
+        ("dot slash", &["./"]),
+        ("bare dot", &["."]),
+        ("absolute", &[&root]),
+        ("subdir", &["subdir/"]),
+        ("implicit cwd", &[]),
+    ];
+    for (label, paths) in forms {
+        let mut args = vec!["--files-with-matches", "argument form needle"];
+        args.extend_from_slice(paths);
+        assert_indexed_matches_scan(&fixture.root, &args, label);
+    }
+}
+
+#[test]
+fn indexed_output_modes_match_the_scan_path_rendering() {
+    let fixture = nested_needle_fixture("output mode needle");
+
+    assert_indexed_matches_scan(
+        &fixture.root,
+        &["--files-without-match", "output mode needle", "./"],
+        "files without match",
+    );
+    assert_indexed_matches_scan(
+        &fixture.root,
+        &["output mode needle", "./"],
+        "plain match print",
+    );
+    assert_indexed_matches_scan(
+        &fixture.root,
+        &["output mode needle"],
+        "plain match print implicit cwd",
+    );
+}
+
+#[test]
+fn index_built_from_one_root_prints_paths_for_the_current_argument() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("corpus/subdir")).unwrap();
+    fs::write(fixture.path("corpus/top.txt"), "replay root needle\n").unwrap();
+    fs::write(
+        fixture.path("corpus/subdir/deep.txt"),
+        "replay root needle\n",
+    )
+    .unwrap();
+    let corpus = fixture.path("corpus");
+    let built = eg_in(
+        &[
+            "--files-with-matches",
+            "replay root needle",
+            corpus.to_str().unwrap(),
+        ],
+        &fixture.root,
+    );
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8(built.stderr).unwrap()
+    );
+
+    let from_corpus = eg_in(
+        &["--files-with-matches", "replay root needle", "./"],
+        &corpus,
+    );
+    let from_parent = eg_in(
+        &["--files-with-matches", "replay root needle", "corpus"],
+        &fixture.root,
+    );
+
+    assert_eq!(
+        sorted_lines(&from_corpus),
+        vec!["./subdir/deep.txt", "./top.txt"],
+        "indexed paths must follow this query's argument, not the build-time root"
+    );
+    assert_eq!(
+        sorted_lines(&from_parent),
+        vec!["corpus/subdir/deep.txt", "corpus/top.txt"],
+        "indexed paths must follow a relative argument from another cwd"
+    );
+}
+
+/// A match in a buffer before the one holding the first NUL is reported by the
+/// scan path, so the index has to cover it.
+#[test]
+fn indexed_search_finds_a_match_before_a_far_off_nul() {
+    let fixture = Fixture::new();
+    let mut bytes = vec![b'\n'; 4096];
+    bytes.extend_from_slice(b"far off needle\n");
+    bytes.extend(std::iter::repeat_n(b'a', 2 * 1024 * 1024));
+    bytes.push(0);
+    bytes.extend_from_slice(b"tail\n");
+    fs::write(fixture.path("blob.pb"), bytes).unwrap();
+    fs::write(fixture.path("text.txt"), "plain text miss\n").unwrap();
+
+    let indexed = eg(&[
+        "--index=auto",
+        "--files-with-matches",
+        "far off needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let scanned = eg(&[
+        "--no-index",
+        "--files-with-matches",
+        "far off needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let scanned_stdout = String::from_utf8(scanned.stdout).unwrap();
+
+    assert!(
+        scanned_stdout.contains("blob.pb"),
+        "fixture must reproduce a scan-path hit before the NUL: {scanned_stdout}"
+    );
+    assert_eq!(
+        scanned_stdout,
+        String::from_utf8(indexed.stdout).unwrap(),
+        "the index must not drop a match the scan path reports"
     );
 }
 
