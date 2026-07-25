@@ -28,7 +28,7 @@ class Sifted:
 
 
 class ShardReader:
-    """Row group batches of one shard, pruned and vendor filtered."""
+    """Row group batches of one shard, pruned to countable columns."""
 
     def __init__(self, handle) -> None:
         self._file = pq.ParquetFile(handle)
@@ -74,9 +74,12 @@ def _drop(pending: int, rows: int) -> int:
 def _sift(batch: pa.RecordBatch) -> Sifted:
     files = pc.list_flatten(batch.column(0))
     vendor = pc.fill_null(files.field("is_vendor"), False)
-    keep = pc.and_(pc.invert(vendor), pc.is_valid(files.field("content")))
-    content = pc.filter(files.field("content"), keep)
-    languages = pc.filter(files.field("language"), keep)
+    content = files.field("content")
+    languages = files.field("language")
+    if content.null_count:
+        keep = pc.is_valid(content)
+        content = pc.filter(content, keep)
+        languages = pc.filter(languages, keep)
     return Sifted(
         pa.record_batch([content], names=["content"]),
         batch.num_rows,

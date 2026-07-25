@@ -12,7 +12,7 @@ def build_reader(tmp_path: Path, shards, rows_per_group=2) -> ShardReader:
     return ShardReader(source.open(corpus.shards[0].name))
 
 
-def test_batches_carry_filtered_content_and_language_bytes(tmp_path: Path):
+def test_batches_carry_all_content_and_language_bytes(tmp_path: Path):
     shard = [
         repo(("héllo\n", "Python", False), ("vendored", "JavaScript", True)),
         repo(("fn main() {}\n", "Rust", False), ("SELECT 1;\n", "SQL", False)),
@@ -24,10 +24,10 @@ def test_batches_carry_filtered_content_and_language_bytes(tmp_path: Path):
     assert len(batches) == 1
     sifted = batches[0]
     assert sifted.repos == 2
-    assert sifted.files == 3
+    assert sifted.files == 4
     assert sifted.vendor_files == 1
-    assert sifted.lang_bytes == {"Python": 7, "Rust": 13, "SQL": 10}
-    assert sifted.content.num_rows == 3
+    assert sifted.lang_bytes == {"Python": 7, "JavaScript": 8, "Rust": 13, "SQL": 10}
+    assert sifted.content.num_rows == 4
 
 
 def test_null_content_is_dropped(tmp_path: Path):

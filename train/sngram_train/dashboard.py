@@ -56,7 +56,7 @@ def _header(trainer: Trainer) -> Text:
     header.append(f"   wire {fmt_rate(trainer.wire_rate())}", style="dim")
     header.append(f"\nrepos {trainer.state.repos:,}")
     header.append(f"   files {trainer.counter.files_processed:,}")
-    header.append(f"   vendor skipped {trainer.state.vendor_files:,}", style="dim")
+    header.append(f"   vendor {trainer.state.vendor_files:,}", style="dim")
     header.append(f"   rss {fmt_bytes(_rss_bytes())}", style="dim")
     if trainer.retries:
         header.append(f"   retries {trainer.retries}", style="yellow")

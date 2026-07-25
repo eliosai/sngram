@@ -68,14 +68,14 @@ def _table(repos: list[list[dict]]) -> pa.Table:
 
 
 def decoded_bytes(shards: list[list[list[dict]]]) -> int:
-    """Expected countable bytes: non-vendor content, UTF-8."""
+    """Expected countable bytes: all present content, UTF-8."""
 
     return sum(
         len(entry["content"].encode())
         for repos in shards
         for files in repos
         for entry in files
-        if not entry["is_vendor"]
+        if entry["content"] is not None
     )
 
 

@@ -63,10 +63,11 @@ def test_full_stream_counts_every_repo_and_mints_final(tmp_path: Path):
     table = sngram.WeightTable.from_path(tmp_path / "bins" / "final_weights.bin")
     assert "stack-v3@rev-test" in (table.provenance or "")
     assert f"{decoded_bytes(shards)} content bytes" in table.provenance
+    assert "vendor included" in table.provenance
     assert "Rust 100.0%" in table.provenance
 
 
-def test_vendor_files_are_never_counted(tmp_path: Path):
+def test_vendor_files_are_counted(tmp_path: Path):
     shards = [
         [
             repo(("clean\n", "Python", False), ("ZZZZ\n" * 8, "Go", True)),
@@ -78,9 +79,10 @@ def test_vendor_files_are_never_counted(tmp_path: Path):
 
     trainer.run()
 
-    assert trainer.counter.count(ord("Z"), ord("Z")) == 0
+    assert trainer.counter.count(ord("Z"), ord("Z")) > 0
     assert trainer.state.vendor_files == 1
-    assert trainer.state.langs == {"Python": decoded_bytes(shards)}
+    assert trainer.state.decoded == decoded_bytes(shards)
+    assert trainer.state.langs == {"Python": 22, "Go": 40}
 
 
 def test_limit_stops_the_stream_early(tmp_path: Path):

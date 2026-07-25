@@ -265,7 +265,7 @@ class Trainer:
             f"sngram-train stack-v3@{self.corpus.revision[:12]} "
             f"{self.counter.bytes_processed} content bytes "
             f"{self.counter.files_processed} files {self.state.repos} repos "
-            f"vendor excluded; mix {mix}"
+            f"vendor included; mix {mix}"
         )
 
     def _log_summary(self, complete: bool) -> None:
