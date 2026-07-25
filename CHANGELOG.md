@@ -34,3 +34,12 @@ schema moved from 16 to 20.
   files are counted.
 - A full pass over 15.9 TB of decoded source takes about 13 hours at roughly
   340 MB/s, holding about 2.2 GB of memory.
+
+## Known issues
+
+- `--heading` output from an indexed search separates file blocks with two
+  blank lines where a scan uses one, and `-A`/`-B` repeat the `--` marker
+  the same way. Each candidate file is printed into its own buffer while
+  the printer keeps its separator state, so both the trailing and the
+  leading separator are written. No match is added or lost, and every
+  other output mode is byte identical between the two paths.
