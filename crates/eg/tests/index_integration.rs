@@ -257,6 +257,7 @@ fn assert_bench_schema(report: &serde_json::Value) {
         "verified_files",
         "matched_files",
         "forced_candidate_files",
+        "held_candidate_files",
         "parent_restricted_candidates",
     ] {
         assert!(
@@ -280,6 +281,7 @@ fn assert_bench_schema(report: &serde_json::Value) {
         "index_table_bytes",
         "index_postings_bytes",
         "summary_bytes",
+        "verbatim_bytes",
         "manifest_bytes",
         "mmap_bytes",
         "bytes_verified",
@@ -2275,6 +2277,72 @@ fn indexed_search_finds_a_match_before_a_far_off_nul() {
         String::from_utf8(indexed.stdout).unwrap(),
         "the index must not drop a match the scan path reports"
     );
+}
+
+/// The scanner refuses a signed pre-NUL prefix, so the index holds it whole
+#[test]
+fn held_prefix_reports_the_match_the_scan_path_finds() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.path("held.png"),
+        b"\x89PNG\r\n\x1a\nheld needle here\0trailing\n".as_slice(),
+    )
+    .unwrap();
+    fs::write(fixture.path("text.txt"), "plain text miss\n").unwrap();
+
+    let indexed = eg(&[
+        "--index=auto",
+        "--files-with-matches",
+        "held needle here",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let scanned = eg(&[
+        "--no-index",
+        "--files-with-matches",
+        "held needle here",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let scanned_stdout = String::from_utf8(scanned.stdout).unwrap();
+
+    assert!(
+        scanned_stdout.contains("held.png"),
+        "fixture must reproduce a scan-path hit inside the held prefix: {scanned_stdout}"
+    );
+    assert_eq!(
+        scanned_stdout,
+        String::from_utf8(indexed.stdout).unwrap(),
+        "a held prefix must not lose a match the scan path reports"
+    );
+}
+
+/// A held prefix that cannot match never reaches the verifier
+#[test]
+fn held_prefix_that_cannot_match_is_not_a_candidate() {
+    let fixture = Fixture::new();
+    for i in 0..40 {
+        fs::write(
+            fixture.path(format!("held_{i:02}.png")),
+            b"\x89PNG\r\n\x1a\n\0payload\n".as_slice(),
+        )
+        .unwrap();
+    }
+    fs::write(fixture.path("hit.txt"), "unheld candidate needle\n").unwrap();
+
+    let output = eg(&[
+        "--bench",
+        "--index=auto",
+        "--files-with-matches",
+        "unheld candidate needle",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_bench_schema(&report);
+    assert_eq!(Some(0), report["counts"]["forced_candidate_files"].as_u64());
+    assert_eq!(Some(0), report["counts"]["held_candidate_files"].as_u64());
+    assert_eq!(Some(1), report["counts"]["candidate_files"].as_u64());
+    assert!(report["bytes"]["verbatim_bytes"].as_u64().unwrap() > 0);
 }
 
 #[test]

@@ -144,6 +144,15 @@ pub enum GramNeedle {
         /// One single occurrence must carry both word edges at once.
         whole: bool,
     },
+    /// Any one key, with occurrences required at line edges.
+    AtLineEdge {
+        /// Alternative keys for the gram.
+        keys: Vec<GramKey>,
+        /// A line terminator or text start must precede some occurrence.
+        starts: bool,
+        /// A line terminator or text end must follow some occurrence.
+        ends: bool,
+    },
 }
 
 impl GramNeedle {
@@ -151,7 +160,9 @@ impl GramNeedle {
     pub fn keys(&self) -> impl Iterator<Item = GramKey> + '_ {
         match self {
             Self::Key(key) => core::slice::from_ref(key).iter(),
-            Self::AnyKey(keys) | Self::AtWordEdge { keys, .. } => keys.iter(),
+            Self::AnyKey(keys) | Self::AtWordEdge { keys, .. } | Self::AtLineEdge { keys, .. } => {
+                keys.iter()
+            },
         }
         .copied()
     }

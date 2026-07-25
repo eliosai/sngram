@@ -475,3 +475,44 @@ fn search_reader<M: Matcher, R: io::Read, W: WriteColor>(
         },
     }
 }
+
+/// A match test over held content, run through the invocation's own searcher
+pub struct ContentProbe {
+    matcher: PatternMatcher,
+    searcher: grep::searcher::Searcher,
+}
+
+impl ContentProbe {
+    pub const fn new(matcher: PatternMatcher, searcher: grep::searcher::Searcher) -> Self {
+        Self { matcher, searcher }
+    }
+
+    /// True when the pattern matches `bytes`, and when the probe cannot tell
+    pub fn matches(&mut self, bytes: &[u8]) -> bool {
+        use self::PatternMatcher::*;
+
+        let searcher = &mut self.searcher;
+        match self.matcher {
+            RustRegex(ref m) => slice_has_match(m, searcher, bytes),
+            #[cfg(feature = "pcre2")]
+            PCRE2(ref m) => slice_has_match(m, searcher, bytes),
+        }
+    }
+}
+
+fn slice_has_match<M: Matcher>(
+    matcher: M,
+    searcher: &mut grep::searcher::Searcher,
+    bytes: &[u8],
+) -> bool {
+    let mut found = false;
+    let outcome = searcher.search_slice(
+        &matcher,
+        bytes,
+        grep::searcher::sinks::Bytes(|_line_number, _line| {
+            found = true;
+            Ok(false)
+        }),
+    );
+    outcome.is_err() || found
+}
