@@ -26,9 +26,9 @@ const MANIFEST_BINARY_MAGIC: &[u8; 8] = b"EGMANI4\0";
 const MANIFEST_BINARY_VERSION: u32 = 5;
 const MANIFEST_BINARY_EXTENSION: &str = "bin";
 const MANIFEST_HEADER_READ_CAP: usize = 4096;
-const PATH_TABLE_FILE_NAME: &str = "paths-v2.bin";
+const PATH_TABLE_FILE_NAME: &str = "paths-v3.bin";
 const PATH_TABLE_MAGIC: &[u8; 8] = b"EGPATH1\0";
-const PATH_TABLE_VERSION: u32 = 2;
+const PATH_TABLE_VERSION: u32 = 3;
 const PATH_TABLE_HEADER_SIZE: usize = 24;
 const PATH_FLAG_EXPLICIT: u8 = 1 << 0;
 const PATH_FLAG_SKIPPED_BINARY: u8 = 1 << 1;
@@ -100,7 +100,6 @@ pub fn current_snapshot(
             path: haystack.path().to_path_buf(),
             manifest: ManifestFile {
                 path: relative,
-                display_path: haystack.path().to_string_lossy().into_owned(),
                 path_hash,
                 len: metadata.len(),
                 modified_ns: modified_ns(&metadata),
@@ -163,7 +162,14 @@ pub fn read_current_snapshot(
     let json_exists = path.exists();
     let binary_exists = binary_path.exists();
     if binary_exists && (!json_exists || binary_is_fresh(&binary_path, path)) {
-        match read_binary_snapshot(path, &binary_path, args, backend, table_fingerprint) {
+        match read_binary_snapshot(
+            path,
+            &binary_path,
+            index_root,
+            args,
+            backend,
+            table_fingerprint,
+        ) {
             Ok(snapshot) => return Ok(snapshot),
             Err(err) => log::debug!(
                 "eg index: binary manifest {} unreadable ({err:#}); falling back to JSON",
@@ -280,6 +286,7 @@ fn read_binary_manifest_header(binary_path: &Path) -> anyhow::Result<Option<Mani
 fn read_binary_snapshot(
     manifest_path: &Path,
     binary_path: &Path,
+    index_root: &Path,
     args: &HiArgs,
     backend: ManifestBackend,
     table_fingerprint: u64,
@@ -290,7 +297,11 @@ fn read_binary_snapshot(
     if !header.is_filter_compatible(args, backend, table_fingerprint) {
         return Ok(None);
     }
-    if let Some(files) = LazyPathFiles::open(&path_table_path(manifest_path), header.file_count)? {
+    if let Some(files) = LazyPathFiles::open(
+        &path_table_path(manifest_path),
+        index_root,
+        header.file_count,
+    )? {
         return Ok(Some(CurrentSnapshot {
             walk_fingerprint: header.walk_fingerprint,
             git_freshness: header.git_freshness,
@@ -328,7 +339,7 @@ fn read_binary_snapshot(
     Ok(Some(CurrentSnapshot {
         walk_fingerprint: header.walk_fingerprint,
         git_freshness: header.git_freshness,
-        files: SnapshotFiles::Lazy(LazyManifestFiles::new(bytes, offsets, skipped)),
+        files: SnapshotFiles::Lazy(LazyManifestFiles::new(bytes, index_root, offsets, skipped)),
         dirs: Vec::new(),
     }))
 }
@@ -476,8 +487,7 @@ pub fn write_path_table(manifest_path: &Path, snapshot: &CurrentSnapshot) -> any
     let mut flags = Vec::with_capacity(files.len());
     for file in files {
         offsets.push(path_bytes.len());
-        let path = file.path.to_string_lossy();
-        path_bytes.extend_from_slice(path.as_bytes());
+        path_bytes.extend_from_slice(file.manifest.path.as_bytes());
         lengths.push(file.len());
         let mut flag = 0u8;
         if file.is_explicit() {
@@ -624,12 +634,8 @@ fn write_binary_manifest(path: &Path, manifest: &Manifest) -> anyhow::Result<()>
     }
     for file in &manifest.files {
         write_string(&mut bytes, &file.path)?;
-        let display = if file.display_path == file.path {
-            ""
-        } else {
-            &file.display_path
-        };
-        write_string(&mut bytes, display)?;
+        // legacy display path slot
+        write_string(&mut bytes, "")?;
         write_u64(&mut bytes, file.path_hash);
         write_u64(&mut bytes, file.len);
         write_option_u64(&mut bytes, file.modified_ns);
@@ -658,7 +664,7 @@ fn binary_manifest_capacity(manifest: &Manifest) -> usize {
         + manifest
             .files
             .iter()
-            .map(|file| file.path.len() + file.display_path.len() + 58)
+            .map(|file| file.path.len() + 58)
             .sum::<usize>()
 }
 
@@ -675,9 +681,10 @@ fn decode_binary_manifest(bytes: &[u8]) -> anyhow::Result<Manifest> {
     }
     let mut files = Vec::with_capacity(header.file_count);
     for _ in 0..header.file_count {
+        let path = reader.read_string()?;
+        reader.skip_string()?;
         files.push(ManifestFile {
-            path: reader.read_string()?,
-            display_path: reader.read_string()?,
+            path,
             path_hash: reader.read_u64()?,
             len: reader.read_u64()?,
             modified_ns: reader.read_option_u64()?,
@@ -782,10 +789,11 @@ impl BinaryManifestReader<'_> {
         Ok(())
     }
 
-    fn read_current_file(&mut self, ord: usize) -> anyhow::Result<CurrentFile> {
-        let mut manifest = ManifestFile {
-            path: self.read_string()?,
-            display_path: self.read_string()?,
+    fn read_current_file(&mut self, ord: usize, root: &Path) -> anyhow::Result<CurrentFile> {
+        let path = self.read_string()?;
+        self.skip_string()?;
+        let manifest = ManifestFile {
+            path,
             path_hash: self.read_u64()?,
             len: self.read_u64()?,
             modified_ns: self.read_option_u64()?,
@@ -795,15 +803,9 @@ impl BinaryManifestReader<'_> {
             git_untracked: self.read_bool()?,
             skipped_binary: self.read_bool()?,
         };
-        let display_path = std::mem::take(&mut manifest.display_path);
-        let path = if display_path.is_empty() {
-            PathBuf::from(&manifest.path)
-        } else {
-            PathBuf::from(display_path)
-        };
         Ok(CurrentFile {
             ord,
-            path,
+            path: root.join(&manifest.path),
             manifest,
         })
     }
@@ -904,17 +906,11 @@ fn insert_dir(
 fn current_file_from_clean_manifest_owned(
     ord: usize,
     root: &Path,
-    mut manifest: ManifestFile,
+    manifest: ManifestFile,
 ) -> CurrentFile {
-    let display_path = std::mem::take(&mut manifest.display_path);
-    let path = if display_path.is_empty() {
-        root.join(&manifest.path)
-    } else {
-        PathBuf::from(display_path)
-    };
     CurrentFile {
         ord,
-        path,
+        path: root.join(&manifest.path),
         manifest,
     }
 }
@@ -1144,6 +1140,7 @@ impl SnapshotFiles {
 
 struct LazyPathFiles {
     bytes: Arc<Mmap>,
+    root: PathBuf,
     count: usize,
     lengths_start: usize,
     flags_start: usize,
@@ -1151,20 +1148,20 @@ struct LazyPathFiles {
 }
 
 impl LazyPathFiles {
-    fn open(path: &Path, expected_count: usize) -> anyhow::Result<Option<Self>> {
+    fn open(path: &Path, root: &Path, expected_count: usize) -> anyhow::Result<Option<Self>> {
         let file = match fs::File::open(path) {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err.into()),
         };
         let mmap = mmap_file(&file, path)?;
-        let Some(table) = Self::from_mmap(mmap, expected_count) else {
+        let Some(table) = Self::from_mmap(mmap, root, expected_count) else {
             return Ok(None);
         };
         Ok(Some(table))
     }
 
-    fn from_mmap(mmap: Mmap, expected_count: usize) -> Option<Self> {
+    fn from_mmap(mmap: Mmap, root: &Path, expected_count: usize) -> Option<Self> {
         let bytes = Arc::new(mmap);
         if bytes.get(..PATH_TABLE_MAGIC.len())? != PATH_TABLE_MAGIC {
             return None;
@@ -1193,6 +1190,7 @@ impl LazyPathFiles {
         }
         Some(Self {
             bytes,
+            root: root.to_path_buf(),
             count,
             lengths_start,
             flags_start,
@@ -1225,10 +1223,9 @@ impl LazyPathFiles {
         let len = self.file_len(ord)?;
         Some(CurrentFile {
             ord,
-            path: PathBuf::from(&path),
+            path: self.root.join(&path),
             manifest: ManifestFile {
                 path,
-                display_path: String::new(),
                 path_hash: 0,
                 len,
                 modified_ns: None,
@@ -1254,14 +1251,16 @@ impl LazyPathFiles {
 
 struct LazyManifestFiles {
     bytes: Arc<[u8]>,
+    root: PathBuf,
     offsets: Vec<usize>,
     skipped: Vec<bool>,
 }
 
 impl LazyManifestFiles {
-    fn new(bytes: Vec<u8>, offsets: Vec<usize>, skipped: Vec<bool>) -> Self {
+    fn new(bytes: Vec<u8>, root: &Path, offsets: Vec<usize>, skipped: Vec<bool>) -> Self {
         Self {
             bytes: bytes.into(),
+            root: root.to_path_buf(),
             offsets,
             skipped,
         }
@@ -1281,7 +1280,7 @@ impl LazyManifestFiles {
             bytes: &self.bytes,
             pos: offset,
         };
-        reader.read_current_file(ord).ok()
+        reader.read_current_file(ord, &self.root).ok()
     }
 }
 
@@ -1314,8 +1313,6 @@ struct ManifestDir {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ManifestFile {
     path: String,
-    #[serde(default)]
-    display_path: String,
     path_hash: u64,
     len: u64,
     modified_ns: Option<u64>,
@@ -1342,7 +1339,6 @@ mod tests {
     fn file(len: u64, modified: u64, changed: u64, content: Option<u64>) -> ManifestFile {
         ManifestFile {
             path: "a".to_owned(),
-            display_path: String::new(),
             path_hash: 1,
             len,
             modified_ns: Some(modified),

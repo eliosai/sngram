@@ -17,12 +17,13 @@ use crate::{
     haystack::Haystack,
 };
 
-use super::{bench, manifest};
+use super::{bench, manifest, roots::SearchRoots};
 
 pub struct CandidateVerifier<'a, 'b> {
     args: &'a HiArgs,
     mode: SearchMode,
     started_at: Instant,
+    roots: &'a SearchRoots,
     snapshot: &'a manifest::CurrentSnapshot,
     candidates: &'a BTreeSet<usize>,
     bench: Option<&'b mut bench::BenchReport>,
@@ -33,6 +34,7 @@ impl<'a, 'b> CandidateVerifier<'a, 'b> {
         args: &'a HiArgs,
         mode: SearchMode,
         started_at: Instant,
+        roots: &'a SearchRoots,
         snapshot: &'a manifest::CurrentSnapshot,
         candidates: &'a BTreeSet<usize>,
         bench: Option<&'b mut bench::BenchReport>,
@@ -41,6 +43,7 @@ impl<'a, 'b> CandidateVerifier<'a, 'b> {
             args,
             mode,
             started_at,
+            roots,
             snapshot,
             candidates,
             bench,
@@ -49,13 +52,21 @@ impl<'a, 'b> CandidateVerifier<'a, 'b> {
 
     pub fn verify(self) -> anyhow::Result<bool> {
         if let Some(report) = self.bench {
-            return verify_for_bench(self.args, self.mode, self.snapshot, self.candidates, report);
+            return verify_for_bench(
+                self.args,
+                self.mode,
+                self.roots,
+                self.snapshot,
+                self.candidates,
+                report,
+            );
         }
         if is_full_corpus_mode(self.args, self.mode) {
             return verify_full_corpus(
                 self.args,
                 self.mode,
                 self.started_at,
+                self.roots,
                 self.snapshot,
                 self.candidates,
             );
@@ -65,10 +76,16 @@ impl<'a, 'b> CandidateVerifier<'a, 'b> {
             self.args,
             self.mode,
             self.started_at,
+            self.roots,
             self.snapshot,
             &ordered,
         )
     }
+}
+
+/// Build the haystack for one candidate under the invocation's display rules
+fn candidate_haystack(roots: &SearchRoots, file: &manifest::CurrentFile) -> Haystack {
+    Haystack::from_index_path(roots.display_path(&file.path), file.is_explicit())
 }
 
 /// Candidate document ordinals in the manifest's requested output order.
@@ -109,6 +126,7 @@ fn verify_worker_count(args: &HiArgs, ordered: usize) -> usize {
 fn verify_for_bench(
     args: &HiArgs,
     mode: SearchMode,
+    roots: &SearchRoots,
     snapshot: &manifest::CurrentSnapshot,
     candidates: &BTreeSet<usize>,
     report: &mut bench::BenchReport,
@@ -121,7 +139,7 @@ fn verify_for_bench(
         ordered_candidates(snapshot, candidates)
     };
     if !full_corpus && verify_worker_count(args, ordered.len()) > 1 {
-        let facts = verify_candidates_for_bench(args, mode, snapshot, &ordered)?;
+        let facts = verify_candidates_for_bench(args, mode, roots, snapshot, &ordered)?;
         report.set_verification(
             facts.verified_files,
             facts.matched_files,
@@ -139,8 +157,15 @@ fn verify_for_bench(
             continue;
         };
         let in_candidates = candidates.contains(&ord);
-        let Some(search_result) =
-            bench_search(args, mode, in_candidates, &mut facts, &mut searcher, &file)?
+        let Some(search_result) = bench_search(
+            args,
+            mode,
+            roots,
+            in_candidates,
+            &mut facts,
+            &mut searcher,
+            &file,
+        )?
         else {
             continue;
         };
@@ -158,6 +183,7 @@ fn verify_for_bench(
 fn verify_candidates_for_bench(
     args: &HiArgs,
     mode: SearchMode,
+    roots: &SearchRoots,
     snapshot: &manifest::CurrentSnapshot,
     ordered: &[usize],
 ) -> anyhow::Result<BenchFacts> {
@@ -169,7 +195,9 @@ fn verify_candidates_for_bench(
             let searcher =
                 args.search_worker(args.matcher()?, args.searcher()?, args.printer(mode, sink))?;
             handles.push(
-                scope.spawn(|| bench_worker(args, mode, snapshot, ordered, &next_pos, searcher)),
+                scope.spawn(|| {
+                    bench_worker(args, mode, roots, snapshot, ordered, &next_pos, searcher)
+                }),
             );
         }
         collect_bench_workers(handles)
@@ -179,6 +207,7 @@ fn verify_candidates_for_bench(
 fn bench_worker(
     args: &HiArgs,
     mode: SearchMode,
+    roots: &SearchRoots,
     snapshot: &manifest::CurrentSnapshot,
     ordered: &[usize],
     next_pos: &AtomicUsize,
@@ -193,7 +222,8 @@ fn bench_worker(
         let Some(file) = snapshot.file(ord) else {
             continue;
         };
-        let Some(search_result) = bench_search(args, mode, true, &mut facts, &mut searcher, &file)?
+        let Some(search_result) =
+            bench_search(args, mode, roots, true, &mut facts, &mut searcher, &file)?
         else {
             continue;
         };
@@ -218,6 +248,7 @@ fn collect_bench_workers(
 fn bench_search(
     args: &HiArgs,
     mode: SearchMode,
+    roots: &SearchRoots,
     in_candidates: bool,
     facts: &mut BenchFacts,
     searcher: &mut crate::search::SearchWorker<termcolor::NoColor<Vec<u8>>>,
@@ -229,18 +260,17 @@ fn bench_search(
     let search_result = if in_candidates {
         facts.verified_files += 1;
         facts.bytes_verified = facts.bytes_verified.saturating_add(file.len());
-        let haystack = Haystack::from_index_path(file.path.clone(), file.is_explicit());
-        searcher.search(&haystack)
+        searcher.search(&candidate_haystack(roots, file))
     } else if file.is_skipped_binary() {
         return Ok(None);
     } else {
-        searcher.search_absent(&file.path)
+        searcher.search_absent(&roots.display_path(&file.path))
     };
     match search_result {
         Ok(search_result) => Ok(Some(search_result)),
         Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(None),
         Err(err) => {
-            err_message!("{}: {}", file.path.display(), err);
+            err_message!("{}: {}", roots.display_path(&file.path).display(), err);
             Ok(None)
         },
     }
@@ -281,6 +311,7 @@ fn verify_full_corpus(
     args: &HiArgs,
     mode: SearchMode,
     started_at: Instant,
+    roots: &SearchRoots,
     snapshot: &manifest::CurrentSnapshot,
     candidates: &BTreeSet<usize>,
 ) -> anyhow::Result<bool> {
@@ -296,13 +327,16 @@ fn verify_full_corpus(
         let Some(file) = snapshot.file(ord) else {
             continue;
         };
-        let haystack = Haystack::from_index_path(file.path.clone(), file.is_explicit());
+        if !roots.contains(args.cwd(), &file.path) {
+            continue;
+        }
+        let haystack = candidate_haystack(roots, &file);
         let search_result = if candidates.contains(&ord) {
             searcher.search(&haystack)
         } else if file.is_skipped_binary() {
             continue;
         } else {
-            searcher.search_absent(&file.path)
+            searcher.search_absent(haystack.path())
         };
         let search_result = match search_result {
             Ok(search_result) => search_result,
@@ -363,6 +397,7 @@ impl Reorder {
 /// Shared state for the parallel verify workers.
 struct Verify<'a> {
     args: &'a HiArgs,
+    roots: &'a SearchRoots,
     snapshot: &'a manifest::CurrentSnapshot,
     ordered: &'a [usize],
     next_pos: &'a AtomicUsize,
@@ -377,6 +412,7 @@ fn verify_buffered(
     args: &HiArgs,
     mode: SearchMode,
     started_at: Instant,
+    roots: &SearchRoots,
     snapshot: &manifest::CurrentSnapshot,
     ordered: &[usize],
 ) -> anyhow::Result<bool> {
@@ -392,6 +428,7 @@ fn verify_buffered(
     )?;
     let ctx = Verify {
         args,
+        roots,
         snapshot,
         ordered,
         next_pos: &next_pos,
@@ -475,7 +512,7 @@ fn verify_one(
     searcher: &mut crate::search::SearchWorker<termcolor::Buffer>,
     file: &manifest::CurrentFile,
 ) -> std::io::Result<()> {
-    let haystack = Haystack::from_index_path(file.path.clone(), file.is_explicit());
+    let haystack = candidate_haystack(ctx.roots, file);
     let search_result = match searcher.search(&haystack) {
         Ok(search_result) => search_result,
         Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => return Err(err),
