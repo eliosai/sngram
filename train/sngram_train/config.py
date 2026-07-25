@@ -1,12 +1,10 @@
-"""Production corpus access."""
+"""Production credentials."""
 
 from __future__ import annotations
 
 import os
 from collections.abc import Iterable
 from pathlib import Path
-
-STACK_V2_CONTENT_PREFIX = "s3://softwareheritage/content/"
 
 
 def hf_token() -> str | None:

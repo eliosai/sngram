@@ -1,85 +1,60 @@
 # Training Data Contract
 
-Decision date: 2026-07-23.
+Decision date: 2026-07-24.
 
-The production run trains on **5.11 TB of effective UTF-8 bytes**, the full
-supply of the curated corpus under a 6 TB balanced target. Effective bytes
-include the inverse weights applied to sampled small files; fetched bytes
-measure content read from object storage.
+The production run trains on The Stack v3: decoded UTF-8 source text
+streamed straight from the Hugging Face Hub. There is no external object
+store and no local corpus; the parquet shards carry the file contents
+inline.
 
-## Sources
+## Source
 
-- Corpus: the `eliosai/sngram-train` dataset on the Hugging Face Hub,
-  132,621,482 sampled objects as sharded jsonl plus a `manifest.json` sidecar
-- Content: `s3://softwareheritage/content/{blob_id}`, public, read anonymously
-- Metadata origin: `bigcode/the-stack-v2-dedup` at the revision recorded in
-  the sidecar
+- Dataset: `HuggingFaceCode/stack-v3-train`, license ODC-By 1.0, not gated
+- 8196 parquet shards under `data/`, 4.71 TB on the wire, 15.9 TB decoded
+- 172.9M rows, one row per repository, GitHub snapshot 2025-08-07
+- Per file: `content`, `language`, `is_vendor` are the only fields read
 
-The published dataset is the exact corpus: the balanced distribution below
-is baked into its rows, so training streams the dataset and consumes every
-row once, with no local index and no runtime allocation logic. The sidecar
-names the corpus revision, and a checkpoint from a different revision fails
-loudly instead of training on the wrong distribution.
+The trainer pins the dataset revision at start and stamps it into the
+checkpoint and the final provenance. A checkpoint from a different
+revision or repo fails loudly instead of training on the wrong corpus.
 
-## Areas
+## Distribution
 
-Measured supply hard-caps the two areas that matter most: clean deduplicated
-source code tops out at 1.94 TB and prose at 0.72 TB. Only JSON, HTML, and
-CSV can grow past their balanced share. The area weights below put code at
-the largest share that still clears 5 TB of total corpus and size the
-elastic formats to balance near 9 percent each.
+The corpus is repository-grouped and the trainer takes each repository's
+natural file mix. No per-format targets, no reweighting, no sampling
+weights: elgrep indexes real source repositories, so the training
+distribution is the repository distribution. A deliberately balanced v2
+mixture measured worse on four of five real corpora, which is why v3
+trains on the natural mix.
 
-| Area | Weight | Share |
-| --- | ---: | ---: |
-| Core programming | 2.28 TB | 38.0% |
-| Config / build / infra | 1.18 TB | 19.7% |
-| Docs / prose / markup | 0.84 TB | 14.0% |
-| Web / UI / templates | 0.82 TB | 13.7% |
-| Data / query / schema | 0.70 TB | 11.6% |
-| Long-tail | 0.18 TB | 3.0% |
+Two filters apply, both deterministic:
 
-These shares were applied when the corpus was published: the target was
-apportioned across areas with exact integer arithmetic, and inside each
-area max-min fairness leveled every format up together, with exhausted
-formats redistributing their missing bytes across the rest of the area.
-The published rows are that allocation, so the trainer needs none of it.
+- `is_vendor` files are dropped; vendored code is duplicated noise
+  (about 1.5 percent of files)
+- files with null content are dropped
 
-## Row Admission
-
-The corpus rejects vendor, generated, empty, and oversized rows. The size
-ceiling is 2 MiB, or 4 MiB for docs. Formats prone to generated blobs carry
-tighter per-file ceilings, from 160 KiB for YAML to 768 KiB for HTML.
-Jupyter notebooks and hOCR dumps are excluded outright: base64 cells and OCR
-layout markup teach a byte-pair table nothing about code.
-
-Files below 16 KiB use deterministic inverse-probability sampling. For a
-file of size `n`:
-
-```text
-w = next_power_of_two(ceil(16 KiB / n))
-inclusion probability = 1 / w
-effective counts = sampled counts * w
-```
-
-Files at least 16 KiB have weight one. Every eligible byte keeps the correct
-expected contribution without hundreds of millions of small S3 reads.
+The realised language mix is recorded in every progress event, in the
+mint event, and in the final table provenance, so a minted table can be
+explained later.
 
 ## Training Flow
 
-1. Stream corpus rows from the Hub dataset
-2. Fetch each object concurrently from the content bucket, bounded reads
-3. Decode to UTF-8 and count byte pairs through the Rust `BigramCounter`
-4. Checkpoint the counter and the stream position every minute
+1. Resolve the dataset revision and shard listing from the Hub
+2. Stream shards through parallel readers, row group by row group,
+   with only the three file columns selected
+3. Count byte pairs through the Rust `BigramCounter`, GIL released
+4. Checkpoint the counter and every reader position each minute at a
+   consistent pause
 5. Mint one final provenance-stamped table when the stream ends
 
-Missing objects, invalid encodings, and empty decoded content are logged and
-skipped; the measured loss rate is around one object in 200,000. A killed
-run resumes from its last checkpoint and reproduces the identical table.
+Transient network failures retry in place with backoff and resume from
+the current position; nothing is skipped. A killed run resumes from its
+last checkpoint and reproduces the identical table.
 
 ## Environment
 
-- `HF_TOKEN`: read access to the corpus dataset, from the environment or
-  `train/.env`; content needs no credentials
+- `HF_TOKEN`: read access to the Hub, from the environment or `train/.env`
+- `SNGRAM_DATASET_REPO`: overrides the dataset repo
 
 ```sh
 cd train

@@ -12,18 +12,19 @@ import sngram
 
 from .errors import ConfigurationError
 
-_VERSION = 7
+_VERSION = 8
 
 
 @dataclass
 class RunState:
     revision: str
-    corpus_id: str
+    repo: str
     stream_state: dict | None = None
-    rows: int = 0
-    skips: int = 0
-    fetched: int = 0
-    groups: dict[str, int] = field(default_factory=dict)
+    repos: int = 0
+    vendor_files: int = 0
+    decoded: int = 0
+    shard_bytes: int = 0
+    langs: dict[str, int] = field(default_factory=dict)
 
 
 def write_table(
@@ -55,18 +56,16 @@ def save(path: Path, counter: sngram.BigramCounter, state: RunState) -> None:
     os.replace(temporary, path)
 
 
-def load(
-    path: Path, revision: str, corpus_id: str
-) -> tuple[sngram.BigramCounter, RunState]:
+def load(path: Path, revision: str, repo: str) -> tuple[sngram.BigramCounter, RunState]:
     """Load a matching checkpoint or return a fresh run."""
 
     if not path.exists():
-        return sngram.BigramCounter(), RunState(revision, corpus_id)
+        return sngram.BigramCounter(), RunState(revision, repo)
     with sqlite3.connect(path) as connection:
         row = connection.execute("SELECT * FROM checkpoint").fetchone()
-    if row is None or (row[0], row[1], row[2]) != (_VERSION, revision, corpus_id):
+    if row is None or (row[0], row[1], row[2]) != (_VERSION, revision, repo):
         raise ConfigurationError(
-            "checkpoint does not match this corpus revision and identity; "
+            "checkpoint does not match this corpus revision and repo; "
             "pass --no-resume or a fresh --mint-dir to restart"
         )
     counter = sngram.BigramCounter()
@@ -76,15 +75,16 @@ def load(
 
 def _record(counter: sngram.BigramCounter, state: RunState) -> tuple[object, ...]:
     progress = {
-        "rows": state.rows,
-        "skips": state.skips,
-        "fetched": state.fetched,
-        "groups": state.groups,
+        "repos": state.repos,
+        "vendor_files": state.vendor_files,
+        "decoded": state.decoded,
+        "shard_bytes": state.shard_bytes,
+        "langs": state.langs,
     }
     return (
         _VERSION,
         state.revision,
-        state.corpus_id,
+        state.repo,
         json.dumps(state.stream_state) if state.stream_state is not None else None,
         json.dumps(progress),
         counter.snapshot(),
@@ -95,17 +95,18 @@ def _record(counter: sngram.BigramCounter, state: RunState) -> tuple[object, ...
 
 
 def _state(
-    revision: str, corpus_id: str, stream_json: str | None, progress_json: str
+    revision: str, repo: str, stream_json: str | None, progress_json: str
 ) -> RunState:
     progress = json.loads(progress_json)
     return RunState(
         revision,
-        corpus_id,
+        repo,
         json.loads(stream_json) if stream_json is not None else None,
-        progress["rows"],
-        progress["skips"],
-        progress["fetched"],
-        dict(progress["groups"]),
+        progress["repos"],
+        progress["vendor_files"],
+        progress["decoded"],
+        progress["shard_bytes"],
+        dict(progress["langs"]),
     )
 
 
@@ -113,7 +114,7 @@ _SCHEMA = """
 CREATE TABLE checkpoint (
     version INTEGER NOT NULL,
     revision TEXT NOT NULL,
-    corpus_id TEXT NOT NULL,
+    repo TEXT NOT NULL,
     stream_json TEXT,
     state_json TEXT NOT NULL,
     counts BLOB NOT NULL,

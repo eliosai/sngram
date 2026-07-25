@@ -3,42 +3,31 @@ from pathlib import Path
 from rich.console import Console
 
 from sngram_train.dashboard import RunView, render
-from tests.test_pipeline import MemoryContent, build, corpus
+from tests.localcorpus import code_repos, write_corpus
+from tests.test_pipeline import build
 
 
-def test_dashboard_shows_effective_rate_and_group_balance(tmp_path: Path):
-    rows, content, meta = corpus([("code", 6, 100, 2), ("docs", 3, 50, 1)])
-    trainer = build(tmp_path, rows, MemoryContent(content), meta)
+def test_dashboard_shows_rates_progress_and_language_mix(tmp_path: Path):
+    corpus, source = write_corpus(tmp_path / "corpus", [code_repos(6)])
+    trainer = build(tmp_path, corpus, source)
     trainer.run()
 
-    console = Console(record=True, width=120)
+    console = Console(record=True, width=140)
     console.print(render(trainer))
     output = console.export_text()
 
-    assert "effective" in output
-    assert "fetched" in output
-    assert "code" in output and "docs" in output
+    assert "decoded" in output
+    assert "now" in output and "avg" in output
+    assert "repos" in output
+    assert "Rust" in output
 
 
 def test_view_shows_notes_before_training():
     view = RunView()
-    view.note("opening corpus stream")
+    view.note("resolving corpus")
 
     console = Console(record=True, width=120)
     console.print(view.render())
     output = console.export_text()
 
-    assert "opening corpus stream" in output
-
-
-def test_group_table_shows_trained_share_against_target(tmp_path: Path):
-    rows, content, meta = corpus([("code", 60, 100, 1), ("docs", 20, 100, 1)])
-    trainer = build(tmp_path, rows, MemoryContent(content), meta, limit=300)
-    trainer.run()
-
-    console = Console(record=True, width=120)
-    console.print(render(trainer))
-    output = console.export_text()
-
-    assert "100.0%" in output, "code holds all trained bytes so far"
-    assert "75.0%" in output, "its corpus target share stays visible"
+    assert "resolving corpus" in output

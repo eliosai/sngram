@@ -19,19 +19,20 @@ app = typer.Typer(
 @app.command()
 def train(
     mint_dir: Path = typer.Option(Path("./bins"), help="Output and durable run state."),
-    workers: Optional[int] = typer.Option(None, help="Concurrent bounded content reads."),
-    limit: Optional[str] = typer.Option(None, help="Effective-byte cap for a smoke run."),
+    workers: int = typer.Option(10, help="Parallel shard readers."),
+    limit: Optional[str] = typer.Option(None, help="Decoded-byte cap for a smoke run."),
+    shards: Optional[int] = typer.Option(None, help="Only the first N shards."),
     checkpoint_every: float = typer.Option(60.0, help="Checkpoint period in seconds."),
     resume: bool = typer.Option(True, help="Resume from the checkpoint."),
     dashboard: bool = typer.Option(True, help="Show the live terminal dashboard."),
 ) -> None:
-    """Stream the published corpus and mint the final weight table."""
+    """Stream the stack-v3 corpus and mint the final weight table."""
 
     from .errors import ConfigurationError
 
     _tune_runtime()
     view = _run_view() if dashboard else None
-    build = _trainer_factory(mint_dir, workers, limit, checkpoint_every, view)
+    build = _trainer_factory(mint_dir, workers, limit, shards, checkpoint_every)
     try:
         trainer = _dashboard_run(build, resume, view)
     except ConfigurationError as error:
@@ -42,21 +43,21 @@ def train(
 
 def _trainer_factory(
     mint_dir: Path,
-    workers: Optional[int],
+    workers: int,
     limit: Optional[str],
+    shards: Optional[int],
     checkpoint_every: float,
-    view,
 ):
     from .units import parse_size
 
     cap = parse_size(limit) if limit else None
-    concurrency = workers or _default_workers()
 
     def build(resume_now: bool):
         return _production_trainer(
             mint_dir=mint_dir,
-            workers=concurrency,
+            workers=workers,
             limit=cap,
+            shards=shards,
             checkpoint_interval=checkpoint_every,
             resume=resume_now,
         )
@@ -65,15 +66,8 @@ def _trainer_factory(
 
 
 def _tune_runtime() -> None:
-    import sys
-
-    sys.setswitchinterval(0.002)
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
     os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
-
-
-def _default_workers() -> int:
-    return min(max((os.cpu_count() or 4) * 16, 64), 256)
 
 
 def _run_view():
@@ -96,19 +90,20 @@ def _production_trainer(
     mint_dir: Path,
     workers: int,
     limit: Optional[int],
+    shards: Optional[int],
     checkpoint_interval: float,
     resume: bool,
 ):
     from .config import hf_token
-    from .content import SwhContent
+    from .corpus import HubShards, resolve_corpus
     from .pipeline import Trainer, TrainerConfig
-    from .stream import CorpusStream, corpus_meta
 
     token = hf_token()
-    corpus = corpus_meta(token)
+    corpus = resolve_corpus(token)
+    if shards is not None:
+        corpus = corpus.take(shards)
     config = TrainerConfig(mint_dir, workers, checkpoint_interval, limit, resume)
-    factory = lambda state: CorpusStream.open(token, state)
-    return Trainer(factory, SwhContent(workers=workers), config, corpus)
+    return Trainer(corpus, HubShards(corpus, token), config)
 
 
 def _run_until_done(build, resume: bool, view):

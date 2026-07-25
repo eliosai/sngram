@@ -35,75 +35,62 @@ class RunView:
         with self.lock:
             if self.trainer is not None:
                 return render(self.trainer)
-            body = Text("\n".join(self.notes) or "opening corpus stream", style="dim")
+            body = Text("\n".join(self.notes) or "resolving corpus", style="dim")
             return Panel(body, title="sngram train", border_style="blue")
 
 
 def render(trainer: Trainer):
-    parts = [_header(trainer), _groups(trainer)]
+    parts = [_header(trainer), _mix(trainer)]
     recent = _recent(trainer)
     if recent is not None:
         parts.append(recent)
-    return Panel(Group(*parts), title="sngram train", border_style="blue")
+    return Panel(Group(*parts), title="sngram train stack-v3", border_style="blue")
 
 
 def _header(trainer: Trainer) -> Text:
-    done = trainer.committed_bytes / max(trainer.effective_target, 1)
     header = Text()
-    header.append(
-        f"{fmt_bytes(trainer.committed_bytes)} effective", style="bold green"
-    )
-    header.append(f" / {fmt_bytes(trainer.effective_target)} ({done:.1%}){_eta(trainer)}")
-    header.append(f"   {fmt_bytes(trainer.state.fetched)} fetched", style="cyan")
+    header.append(f"{fmt_bytes(trainer.state.decoded)} decoded", style="bold green")
+    header.append(f" ({trainer.progress():.1%}){_eta(trainer)}")
     header.append(f"   now {fmt_rate(trainer.rate_now())}", style="cyan")
-    header.append(f"   avg {fmt_rate(trainer.meter.rate_avg(trainer.committed_bytes))}")
-    header.append(f"   rows {trainer.state.rows:,}", style="dim")
+    header.append(f"   avg {fmt_rate(trainer.rate_avg())}")
+    header.append(f"   wire {fmt_rate(trainer.wire_rate())}", style="dim")
+    header.append(f"\nrepos {trainer.state.repos:,}")
+    header.append(f"   files {trainer.counter.files_processed:,}")
+    header.append(f"   vendor skipped {trainer.state.vendor_files:,}", style="dim")
     header.append(f"   rss {fmt_bytes(_rss_bytes())}", style="dim")
-    if trainer.skips:
-        header.append(f"   skips {trainer.skips}", style="yellow")
+    if trainer.retries:
+        header.append(f"   retries {trainer.retries}", style="yellow")
     return header
 
 
 def _eta(trainer: Trainer) -> str:
-    rate = trainer.rate_now()
-    if rate <= 0:
+    eta = trainer.eta_seconds()
+    if eta is None:
         return ""
-    eta = max(trainer.effective_target - trainer.committed_bytes, 0) / rate
     return f" in {int(eta // 3600)}:{int(eta % 3600 // 60):02d}:{int(eta % 60):02d}"
 
 
-def _groups(trainer: Trainer) -> Table:
-    corpus = trainer.corpus.groups
-    total = sum(corpus.values()) or 1
-    committed = trainer.group_bytes()
-    trained = sum(committed.values()) or 1
-    table = Table(box=None, pad_edge=False, header_style="dim")
-    table.add_column("group", min_width=10)
-    table.add_column("effective", justify="right")
-    table.add_column("share", justify="right")
-    table.add_column("target", justify="right")
-    for group, target in sorted(corpus.items(), key=lambda item: -item[1]):
-        amount = committed.get(group, 0)
-        table.add_row(
-            group,
-            fmt_bytes(amount),
-            f"{amount / trained:6.1%}",
-            f"{100 * target / total:4.1f}%",
-        )
-    return table
+def _mix(trainer: Trainer) -> Text:
+    ranked = trainer.language_mix(10)
+    if not ranked:
+        return Text("mix pending", style="dim")
+    line = "  ".join(f"{language} {share:.1%}" for language, share in ranked)
+    return Text(line, style="dim")
 
 
 def _recent(trainer: Trainer) -> Table | None:
     if not trainer.events.tail:
         return None
     table = Table(box=None, pad_edge=False, show_header=False)
-    table.add_column(style="dim", width=16)
+    table.add_column(style="dim", width=8)
     table.add_column()
-    for event in list(trainer.events.tail)[-4:]:
+    for event in list(trainer.events.tail)[-3:]:
         detail = ", ".join(
-            f"{key}={value}" for key, value in event.items() if key not in {"ts", "kind"}
+            f"{key}={value}"
+            for key, value in event.items()
+            if key not in {"ts", "kind", "languages"}
         )
-        table.add_row(str(event["kind"]), detail[:100])
+        table.add_row(str(event["kind"]), detail[:110])
     return table
 
 
