@@ -11,6 +11,8 @@ use std::{io, path::Path};
 
 use {grep::matcher::Matcher, termcolor::WriteColor};
 
+use crate::nulquit::{NulQuitReader, QuitPolicy};
+
 /// The configuration for the search worker.
 ///
 /// Among a few other things, the configuration primarily controls the way we
@@ -22,6 +24,7 @@ struct Config {
     search_zip: bool,
     binary_implicit: grep::searcher::BinaryDetection,
     binary_explicit: grep::searcher::BinaryDetection,
+    quit_policy: QuitPolicy,
 }
 
 impl Default for Config {
@@ -32,6 +35,7 @@ impl Default for Config {
             search_zip: false,
             binary_implicit: grep::searcher::BinaryDetection::none(),
             binary_explicit: grep::searcher::BinaryDetection::none(),
+            quit_policy: QuitPolicy::PrefixUnlessBom,
         }
     }
 }
@@ -158,6 +162,12 @@ impl SearchWorkerBuilder {
         self.config.binary_explicit = detection;
         self
     }
+
+    /// Set how quit-mode binary detection reads NUL-containing files
+    pub fn quit_policy(&mut self, policy: QuitPolicy) -> &mut SearchWorkerBuilder {
+        self.config.quit_policy = policy;
+        self
+    }
 }
 
 /// The result of executing a search.
@@ -253,6 +263,7 @@ impl<W: WriteColor> SearchWorker<W> {
         let path = haystack.path();
         log::trace!("{}: binary detection: {:?}", path.display(), bin);
 
+        let deterministic_quit = self.wants_nul_prefix(&bin);
         self.searcher.set_binary_detection(bin);
         if haystack.is_stdin() {
             self.search_reader(path, &mut io::stdin().lock())
@@ -260,9 +271,23 @@ impl<W: WriteColor> SearchWorker<W> {
             self.search_preprocessor(path)
         } else if self.should_decompress(path) {
             self.search_decompress(path)
+        } else if deterministic_quit {
+            self.search_nul_prefix(path)
         } else {
             self.search_path(path)
         }
+    }
+
+    /// True when this read must end deterministically at the first NUL
+    fn wants_nul_prefix(&self, bin: &grep::searcher::BinaryDetection) -> bool {
+        !matches!(self.config.quit_policy, QuitPolicy::Searcher) && bin.quit_byte() == Some(b'\x00')
+    }
+
+    /// Search exactly the pre-NUL prefix of the file at `path`
+    fn search_nul_prefix(&mut self, path: &Path) -> io::Result<SearchResult> {
+        let file = std::fs::File::open(path)?;
+        let mut rdr = NulQuitReader::new(file, self.config.quit_policy);
+        self.search_reader(path, &mut rdr)
     }
 
     /// Emit the "no match" result for a path without reading it.

@@ -59,7 +59,7 @@ pub fn scan(
     }
     let bytes = read_file(&file.path, use_mmap, len)?;
     let bytes = bytes.as_ref();
-    if super::classify::has_decoding_bom(bytes) {
+    if crate::nulquit::has_decoding_bom(bytes) {
         return Ok(document(
             ord,
             path_hash,
@@ -68,8 +68,17 @@ pub fn scan(
             SummaryStatus::UnknownText,
         ));
     }
-    let bytes = super::classify::searchable_prefix(bytes);
-    if bytes.is_empty() {
+    let prefix = super::classify::searchable_prefix(bytes);
+    if file.is_explicit() && prefix.len() < bytes.len() {
+        return Ok(document(
+            ord,
+            path_hash,
+            true,
+            Vec::new(),
+            SummaryStatus::UnknownText,
+        ));
+    }
+    if prefix.is_empty() {
         return Ok(document(
             ord,
             path_hash,
@@ -78,13 +87,13 @@ pub fn scan(
             SummaryStatus::Skipped,
         ));
     }
-    let Some((hashes, summary)) = scan_bytes(table, bytes)? else {
+    let Some((hashes, summary)) = scan_bytes(table, prefix)? else {
         return Ok(document(
             ord,
             path_hash,
-            false,
+            true,
             Vec::new(),
-            SummaryStatus::Skipped,
+            SummaryStatus::UnknownText,
         ));
     };
     let mut hashes = hashes;
@@ -97,7 +106,7 @@ pub fn scan(
             false
         }
     });
-    let forced_candidate = super::classify::is_high_entropy(bytes.len(), hashes.len());
+    let forced_candidate = super::classify::is_high_entropy(prefix.len(), hashes.len());
     if forced_candidate {
         hashes.clear();
     }

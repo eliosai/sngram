@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::{flags::HiArgs, haystack::Haystack};
 
 const MANIFEST_VERSION: u32 = 6;
-const TANTIVY_SCHEMA_VERSION: u32 = 5;
-const POSTINGS_SCHEMA_VERSION: u32 = 17;
+const TANTIVY_SCHEMA_VERSION: u32 = 6;
+const POSTINGS_SCHEMA_VERSION: u32 = 18;
 const TANTIVY_BACKEND: &str = "tantivy";
 const POSTINGS_BACKEND: &str = "postings";
 const TANTIVY_COMPAT_VERSION: &str = "0.26.1";

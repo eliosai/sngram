@@ -852,8 +852,18 @@ impl HiArgs {
             .preprocessor_globs(self.pre_globs.clone())
             .search_zip(self.search_zip)
             .binary_detection_explicit(self.binary.explicit.clone())
-            .binary_detection_implicit(self.binary.implicit.clone());
+            .binary_detection_implicit(self.binary.implicit.clone())
+            .quit_policy(self.quit_policy());
         Ok(builder.build(matcher, searcher, printer))
+    }
+
+    /// The deterministic NUL quit policy for the configured encoding mode
+    fn quit_policy(&self) -> crate::nulquit::QuitPolicy {
+        match self.encoding {
+            EncodingMode::Auto => crate::nulquit::QuitPolicy::PrefixUnlessBom,
+            EncodingMode::Disabled => crate::nulquit::QuitPolicy::Prefix,
+            EncodingMode::Some(_) => crate::nulquit::QuitPolicy::Searcher,
+        }
     }
 
     /// Build a searcher from the command line parameters.
