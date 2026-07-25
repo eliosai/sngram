@@ -1,53 +1,72 @@
 from pathlib import Path
 
-from sngram_train import cli
 from sngram_train.pipeline import Trainer, TrainerConfig
-from tests.test_pipeline import ListStream, MemoryContent, build, corpus
+from tests.localcorpus import code_repos, decoded_bytes, write_corpus
 
 
-class FlakyStream(ListStream):
-    """Raises the closed-client error once, mid-stream, like a DNS blip."""
+class FlakyFile:
+    """Raises one transient error at the given read call"""
 
-    def __init__(self, rows, position, fail_at, armed):
-        super().__init__(rows, position)
-        self.fail_at = fail_at
+    def __init__(self, inner, armed, fail_at):
+        self.inner = inner
         self.armed = armed
+        self.fail_at = fail_at
+        self.reads = 0
 
-    def __iter__(self):
-        while self.position < len(self.rows):
-            if self.armed[0] and self.position == self.fail_at:
-                self.armed[0] = False
-                raise RuntimeError(
-                    "Cannot send a request, as the client has been closed."
-                )
-            row = self.rows[self.position]
-            self.position += 1
-            yield row
+    def read(self, *args):
+        self.reads += 1
+        if self.armed[0] and self.reads == self.fail_at:
+            self.armed[0] = False
+            raise ConnectionError("connection reset mid stream")
+        return self.inner.read(*args)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return self.inner.__exit__(*exc)
 
 
-def test_a_network_blip_mid_stream_resumes_and_completes(tmp_path: Path, monkeypatch):
-    rows, content, meta = corpus([("code", 30, 100, 2), ("docs", 10, 60, 1)])
-    armed = [True]
+class FlakyShards:
+    """Arms the first opened file to fail one read"""
 
-    def builder(resume_now: bool):
-        factory = lambda state: FlakyStream(
-            rows, (state or {}).get("position", 0), fail_at=13, armed=armed
-        )
-        config = TrainerConfig(
-            mint_dir=tmp_path / "bins",
-            workers=4,
-            checkpoint_interval=0.0,
-            resume=resume_now,
-        )
-        return Trainer(factory, MemoryContent(content), config, meta)
+    def __init__(self, inner, fail_at):
+        self.inner = inner
+        self.armed = [True]
+        self.fail_at = fail_at
 
-    monkeypatch.setattr("time.sleep", lambda _seconds: None)
-    trainer = cli._run_until_done(builder, resume=True, view=None)
+    def open(self, name):
+        handle = self.inner.open(name)
+        if self.armed[0]:
+            return FlakyFile(handle, self.armed, self.fail_at)
+        return handle
 
-    reference = build(tmp_path / "reference", rows, MemoryContent(content), meta)
-    reference.run()
 
-    assert trainer.counter.bytes_processed == meta.effective_bytes
-    recovered = (tmp_path / "bins" / "final_weights.bin").read_bytes()
+def run_trainer(tmp_path: Path, corpus, source, resume=False):
+    config = TrainerConfig(
+        mint_dir=tmp_path / "bins",
+        workers=2,
+        checkpoint_interval=3600.0,
+        resume=resume,
+    )
+    trainer = Trainer(corpus, source, config)
+    trainer.run()
+    return trainer
+
+
+def test_a_transient_read_error_retries_in_place(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("sngram_train.pipeline._RETRY_BASE", 0.0)
+    shards = [code_repos(10), code_repos(10)]
+    corpus, source = write_corpus(tmp_path / "corpus", shards)
+
+    trainer = run_trainer(tmp_path / "run", corpus, FlakyShards(source, fail_at=2))
+    reference = run_trainer(tmp_path / "reference", corpus, source)
+
+    assert trainer.counter.bytes_processed == decoded_bytes(shards)
+    assert trainer.retries >= 1
+    recovered = (tmp_path / "run" / "bins" / "final_weights.bin").read_bytes()
     expected = (tmp_path / "reference" / "bins" / "final_weights.bin").read_bytes()
     assert recovered == expected

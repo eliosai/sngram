@@ -45,7 +45,7 @@ def test_kl_length_mismatch_raises():
 
 
 def test_kl_handles_unseen_pairs_without_infinity():
-    # Q has a zero where P does not — eps smoothing keeps it finite
+    # Q has a zero where P does not, eps smoothing keeps it finite
     val = metrics.kl_divergence([1, 1, 1], [1, 1, 0], eps=1.0)
     assert math.isfinite(val) and val >= 0.0
 

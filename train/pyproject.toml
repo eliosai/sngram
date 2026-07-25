@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sngram-train"
-version = "0.5.0"
+version = "0.6.0"
 description = "Training pipeline for sngram weight tables"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,12 +12,10 @@ license = "MIT"
 authors = [{ name = "Joshua Smotritsky" }]
 dependencies = [
     "sngram",
-    "datasets>=3.2",
-    "huggingface-hub>=0.27",
+    "huggingface-hub>=1.0",
     "pyarrow>=17",
     "rich>=13",
     "typer>=0.15",
-    "urllib3>=2",
 ]
 
 [project.scripts]

@@ -30,6 +30,7 @@ def test_train_defaults_to_the_full_corpus(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert captured["limit"] is None
+    assert captured["shards"] is None
     assert captured["ran"] is True
     assert "complete" in result.output
 
@@ -53,6 +54,7 @@ def test_train_bounds_hugging_face_request_time(monkeypatch, tmp_path):
 
     monkeypatch.delenv("HF_HUB_DOWNLOAD_TIMEOUT", raising=False)
     monkeypatch.delenv("HF_HUB_ETAG_TIMEOUT", raising=False)
+    monkeypatch.delenv("ARROW_DEFAULT_MEMORY_POOL", raising=False)
     monkeypatch.setattr(cli, "_production_trainer", lambda **_kwargs: FakeTrainer())
 
     result = CliRunner().invoke(
@@ -63,6 +65,7 @@ def test_train_bounds_hugging_face_request_time(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "30"
     assert os.environ["HF_HUB_ETAG_TIMEOUT"] == "30"
+    assert os.environ["ARROW_DEFAULT_MEMORY_POOL"] == "system"
 
 
 def test_startup_transport_failure_retries_but_configuration_error_does_not(monkeypatch):
@@ -102,25 +105,3 @@ def test_unexpected_errors_fail_loudly_instead_of_retrying(monkeypatch):
     with pytest.raises(RuntimeError, match="deterministic bug"):
         cli._run_until_done(build, resume=False, view=None)
     assert calls == 1
-
-
-def test_throttling_client_errors_are_retried(monkeypatch):
-    calls = 0
-
-    class ClientError(Exception):
-        response = {"Error": {"Code": "SlowDown"}}
-
-    class FakeTrainer:
-        def run(self):
-            pass
-
-    def build(_resume):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise ClientError("throttled")
-        return FakeTrainer()
-
-    monkeypatch.setattr("time.sleep", lambda _seconds: None)
-    assert cli._run_until_done(build, resume=False, view=None).__class__ is FakeTrainer
-    assert calls == 2

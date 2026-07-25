@@ -1,3 +1,5 @@
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -5,180 +7,178 @@ import sngram
 
 from sngram_train.errors import ConfigurationError
 from sngram_train.pipeline import Trainer, TrainerConfig
-from sngram_train.stream import CorpusMeta, CorpusRow
-
-LINE = b"fn main() { return 42; }\n"
+from tests.localcorpus import code_repos, decoded_bytes, repo, write_corpus
 
 
-class ListStream:
-    def __init__(self, rows, position=0):
-        self.rows = rows
-        self.position = position
-
-    def __iter__(self):
-        while self.position < len(self.rows):
-            row = self.rows[self.position]
-            self.position += 1
-            yield row
-
-    def state_dict(self):
-        return {"position": self.position}
-
-
-class MemoryContent:
-    def __init__(self, values):
-        self.values = values
-
-    def read(self, blob_id, _max_bytes):
-        return self.values[blob_id]
-
-
-class InterruptingContent(MemoryContent):
-    def __init__(self, values, interrupt_at):
-        super().__init__(values)
-        self.interrupt_at = interrupt_at
-        self.calls = 0
-
-    def read(self, blob_id, max_bytes):
-        self.calls += 1
-        if self.calls == self.interrupt_at:
-            raise KeyboardInterrupt
-        return super().read(blob_id, max_bytes)
-
-
-def corpus(spec):
-    """Rows and content from (group, copies, doc_bytes, weight) specs."""
-
-    rows, content = [], {}
-    for group, copies, size, weight in spec:
-        for index in range(copies):
-            blob = f"{group}-{index}"
-            content[blob] = (LINE * (size // len(LINE) + 1))[:size]
-            rows.append(CorpusRow(group, blob, "utf-8", size, weight))
-    groups = {}
-    for row in rows:
-        groups[row.group] = groups.get(row.group, 0) + row.length * row.weight
-    meta = CorpusMeta(
-        "revision", "corpus-1", len(rows),
-        sum(r.length for r in rows), sum(groups.values()), groups,
-    )
-    return rows, content, meta
-
-
-def build(tmp_path, rows, content, meta, limit=None, resume=False, interval=3600.0):
-    factory = lambda state: ListStream(rows, (state or {}).get("position", 0))
+def build(tmp_path: Path, corpus, source, limit=None, resume=False, interval=3600.0):
     config = TrainerConfig(
         mint_dir=tmp_path / "bins",
-        workers=4,
+        workers=3,
         checkpoint_interval=interval,
         limit=limit,
         resume=resume,
     )
-    return Trainer(factory, content, config, meta)
+    return Trainer(corpus, source, config)
 
 
-def test_full_stream_counts_every_row_and_mints_final(tmp_path: Path):
-    rows, content, meta = corpus([("code", 6, 100, 4), ("docs", 3, 50, 1)])
-    trainer = build(tmp_path, rows, MemoryContent(content), meta)
+class SlowShards:
+    """Delays every open so a run spans supervise ticks"""
+
+    def __init__(self, inner, delay):
+        self.inner = inner
+        self.delay = delay
+
+    def open(self, name):
+        time.sleep(self.delay)
+        return self.inner.open(name)
+
+
+class InterruptingShards:
+    """Raises KeyboardInterrupt at the given open call"""
+
+    def __init__(self, inner, interrupt_at):
+        self.inner = inner
+        self.interrupt_at = interrupt_at
+        self.calls = 0
+
+    def open(self, name):
+        self.calls += 1
+        if self.calls == self.interrupt_at:
+            raise KeyboardInterrupt
+        return self.inner.open(name)
+
+
+def test_full_stream_counts_every_repo_and_mints_final(tmp_path: Path):
+    shards = [code_repos(6), code_repos(4)]
+    corpus, source = write_corpus(tmp_path / "corpus", shards)
+    trainer = build(tmp_path, corpus, source)
 
     trainer.run()
 
-    assert trainer.counter.bytes_processed == meta.effective_bytes
-    assert trainer.state.rows == len(rows)
-    assert trainer.group_bytes() == {"code": 2400, "docs": 150}
+    assert trainer.counter.bytes_processed == decoded_bytes(shards)
+    assert trainer.state.decoded == decoded_bytes(shards)
+    assert trainer.state.repos == 10
+    assert trainer.counter.files_processed == 30
+    assert trainer.state.langs == {"Rust": decoded_bytes(shards)}
     table = sngram.WeightTable.from_path(tmp_path / "bins" / "final_weights.bin")
-    assert "stack-v2@revision" in (table.provenance or "")
-    assert f"{meta.effective_bytes} effective bytes" in table.provenance
+    assert "stack-v3@rev-test" in (table.provenance or "")
+    assert f"{decoded_bytes(shards)} content bytes" in table.provenance
+    assert "vendor included" in table.provenance
+    assert "Rust 100.0%" in table.provenance
 
 
-def test_missing_content_is_skipped_and_the_run_completes(tmp_path: Path):
-    rows, content, meta = corpus([("code", 10, 100, 1)])
-    for lost in ("code-3", "code-7"):
-        del content[lost]
+def test_vendor_files_are_counted(tmp_path: Path):
+    shards = [
+        [
+            repo(("clean\n", "Python", False), ("ZZZZ\n" * 8, "Go", True)),
+            repo(("more clean text\n", "Python", False)),
+        ]
+    ]
+    corpus, source = write_corpus(tmp_path / "corpus", shards)
+    trainer = build(tmp_path, corpus, source)
 
-    class LossyContent(MemoryContent):
-        def read(self, blob_id, _max_bytes):
-            if blob_id not in self.values:
-                raise FileNotFoundError(blob_id)
-            return self.values[blob_id]
-
-    trainer = build(tmp_path, rows, LossyContent(content), meta)
     trainer.run()
 
-    assert trainer.skips == 2
-    assert trainer.counter.bytes_processed == 800
-    assert (tmp_path / "bins" / "final_weights.bin").exists()
+    assert trainer.counter.count(ord("Z"), ord("Z")) > 0
+    assert trainer.state.vendor_files == 1
+    assert trainer.state.decoded == decoded_bytes(shards)
+    assert trainer.state.langs == {"Python": 22, "Go": 40}
 
 
 def test_limit_stops_the_stream_early(tmp_path: Path):
-    rows, content, meta = corpus([("code", 40, 100, 1)])
-    trainer = build(tmp_path, rows, MemoryContent(content), meta, limit=500)
+    shards = [code_repos(3) for _ in range(40)]
+    corpus, source = write_corpus(tmp_path / "corpus", shards)
+    trainer = build(tmp_path, corpus, SlowShards(source, 0.1), limit=500)
 
     trainer.run()
 
-    assert 500 <= trainer.counter.bytes_processed < meta.effective_bytes
+    assert 500 <= trainer.state.decoded < decoded_bytes(shards)
     assert (tmp_path / "bins" / "final_weights.bin").exists()
 
 
 def test_interrupted_run_resumes_to_the_identical_table(tmp_path: Path):
-    rows, content, meta = corpus([("code", 30, 100, 2), ("docs", 10, 60, 1)])
-    interrupted = build(
-        tmp_path / "run", rows, InterruptingContent(content, 17), meta, interval=0.0
-    )
-    with pytest.raises(KeyboardInterrupt):
-        interrupted.run()
+    shards = [code_repos(12) for _ in range(4)]
+    corpus, source = write_corpus(tmp_path / "corpus", shards)
 
-    resumed = build(
-        tmp_path / "run", rows, MemoryContent(content), meta, resume=True
-    )
+    stopped = build(tmp_path / "run", corpus, InterruptingShards(source, 4))
+    with pytest.raises(KeyboardInterrupt):
+        stopped.run()
+    assert stopped.state.decoded < decoded_bytes(shards)
+
+    resumed = build(tmp_path / "run", corpus, source, resume=True)
     resumed.run()
-    reference = build(tmp_path / "reference", rows, MemoryContent(content), meta)
+    reference = build(tmp_path / "reference", corpus, source)
     reference.run()
 
     resumed_table = (tmp_path / "run" / "bins" / "final_weights.bin").read_bytes()
     reference_table = (tmp_path / "reference" / "bins" / "final_weights.bin").read_bytes()
     assert resumed_table == reference_table
-    assert resumed.counter.bytes_processed == meta.effective_bytes
+    assert resumed.counter.bytes_processed == decoded_bytes(shards)
+
+
+def test_completed_run_leaves_no_spool_files(tmp_path: Path):
+    corpus, source = write_corpus(tmp_path / "corpus", [code_repos(3)])
+    trainer = build(tmp_path, corpus, source)
+
+    trainer.run()
+
+    assert not (tmp_path / "bins" / ".spool").exists()
 
 
 def test_checkpoint_rejects_a_different_corpus_revision(tmp_path: Path):
-    rows, content, meta = corpus([("code", 4, 100, 1)])
-    trainer = build(tmp_path, rows, MemoryContent(content), meta)
-    trainer.run()
+    corpus, source = write_corpus(tmp_path / "corpus", [code_repos(4)])
+    build(tmp_path, corpus, source).run()
 
-    from dataclasses import replace
-
-    drifted = replace(meta, revision="other")
+    drifted = replace(corpus, revision="other")
     with pytest.raises(ConfigurationError, match="revision"):
-        build(tmp_path, rows, MemoryContent(content), drifted, resume=True)
+        build(tmp_path, drifted, source, resume=True)
 
 
 def test_no_resume_starts_a_fresh_run(tmp_path: Path):
-    rows, content, meta = corpus([("code", 4, 100, 1)])
-    build(tmp_path, rows, MemoryContent(content), meta).run()
+    shards = [code_repos(4)]
+    corpus, source = write_corpus(tmp_path / "corpus", shards)
+    build(tmp_path, corpus, source).run()
 
-    fresh = build(tmp_path, rows, MemoryContent(content), meta, resume=False)
+    fresh = build(tmp_path, corpus, source, resume=False)
     fresh.run()
 
-    assert fresh.counter.bytes_processed == meta.effective_bytes
+    assert fresh.counter.bytes_processed == decoded_bytes(shards)
+
+
+def test_eta_with_a_limit_uses_the_average_decoded_rate(tmp_path: Path):
+    corpus, source = write_corpus(tmp_path / "corpus", [code_repos(2)])
+    trainer = build(tmp_path, corpus, source, limit=10_000)
+    trainer.meter.started_at = time.monotonic() - 10.0
+    trainer.state.decoded = 5_000
+    trainer.meter.sample(0)
+    trainer.meter.sample(5_000)
+
+    eta = trainer.eta_seconds()
+
+    assert eta is not None
+    assert 8.0 < eta < 12.0
+
+
+def test_eta_without_a_limit_uses_the_average_wire_rate(tmp_path: Path):
+    corpus, source = write_corpus(tmp_path / "corpus", [code_repos(2)])
+    trainer = build(tmp_path, corpus, source)
+    trainer.wire_meter.started_at = time.monotonic() - 10.0
+    trainer.state.shard_bytes = trainer.wire_target // 2
+    trainer.wire_meter.sample(0)
+    trainer.wire_meter.sample(trainer.state.shard_bytes)
+
+    eta = trainer.eta_seconds()
+
+    assert eta is not None
+    assert 8.0 < eta < 12.0
 
 
 def test_resumed_run_average_rate_starts_from_zero(tmp_path: Path):
-    rows, content, meta = corpus([("code", 8, 100_000, 1)])
-    build(tmp_path, rows, MemoryContent(content), meta).run()
+    shards = [code_repos(8)]
+    corpus, source = write_corpus(tmp_path / "corpus", shards)
+    build(tmp_path, corpus, source).run()
 
-    resumed = build(tmp_path, rows, MemoryContent(content), meta, resume=True)
+    resumed = build(tmp_path, corpus, source, resume=True)
 
-    assert resumed.committed_bytes == meta.effective_bytes
-    assert resumed.meter.rate_avg(resumed.committed_bytes) < 1.0
-
-
-def test_checkpoint_rejects_a_reshuffled_corpus(tmp_path: Path):
-    from dataclasses import replace
-
-    rows, content, meta = corpus([("code", 4, 100, 1)])
-    build(tmp_path, rows, MemoryContent(content), meta).run()
-
-    reshuffled = replace(meta, corpus_id="other-order")
-    with pytest.raises(ConfigurationError, match="corpus"):
-        build(tmp_path, rows, MemoryContent(content), reshuffled, resume=True)
+    assert resumed.state.decoded == decoded_bytes(shards)
+    assert resumed.rate_avg() < 1.0

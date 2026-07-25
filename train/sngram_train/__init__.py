@@ -1,1 +1,1 @@
-"""Build balanced sngram weight tables from pinned Stack metadata."""
+"""Train sngram weight tables from The Stack v3 on the Hub."""
