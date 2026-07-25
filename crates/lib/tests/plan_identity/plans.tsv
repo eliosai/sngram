@@ -103,9 +103,9 @@ feef1d71c8146d52	63	[0-9]{0,3}ms
 46396f06c62b9908	1028	#include.*linux/sched
 35b8db21d3109196	560	for_each.*entry.*list
 b608b8d7a3a8fa7f	3821	kern[a-z]*builds
-3862ce029fb6658f	1265	^static DEFINE_MUTEX
-2d3004e3b3f9376e	1483	MODULE_LICENSE\("GPL"\);$
-02d44203ecd15c8a	966	^#define CONFIG
+b3273998c4889677	1310	^static DEFINE_MUTEX
+9ef5ea768bbd81ea	1573	MODULE_LICENSE\("GPL"\);$
+28fa2e0c6d4d1dce	1056	^#define CONFIG
 b985ed468e765203	558	\bkfree_skb\b
 db3067db32fd17ad	440	kfree(?-u:\B)_skb
 a6967c17e2f878e3	24454	init\w+register
@@ -175,7 +175,7 @@ fb1bede7bb5b95cc	145	(?-u)\x7fELF
 a2e964dd1af6ddd9	589	request_irq
 a2e964dd1af6ddd9	589	request_irq
 5e700f75a0ccb16a	587	pgtable\);\n\}
-2d52bfec8d90b401	727	request_irq$
+a445b12d481df123	817	request_irq$
 297925494b716c7d	11512	(?i)very_long_function_name_with_many_parts_and_then_some_more_tail
 188875009bf3bd20	14795	[!-~]the_quick_brown_fox_jumped_over_the_lazy_dog_while_the_cat_watched_from_the_windowsill_yes
 1d0ca9b16a54f55f	16485	(?i:very_long_function_name_with_many_parts).*[a-h]another_extremely_long_trailing_literal_block_that_should_be_covered_maximally_here_nowz
@@ -190,8 +190,8 @@ b7d4baf9156f6b9c	440	foo\b[x+]bar
 e1e30ca104aa0fb3	90	x{5}
 4c1a433bd49d7ca9	213	ab{5}cd
 39a89b8904ba8c37	14505	\w{4,8}_ops
-bb793dbfcab9a9af	916	EXPORT_SYMBOL$
-02d44203ecd15c8a	966	^#define CONFIG
+0deb15e98aee43e9	961	EXPORT_SYMBOL$
+28fa2e0c6d4d1dce	1056	^#define CONFIG
 edebaab42e7b2eef	4716	GFP_(KERNEL|ATOMIC|NOWAIT|NOFS|NOIO|USER)
 502930285ded183f	5779	IRQF_(SHARED|ONESHOT|TRIGGER_HIGH|TRIGGER_LOW|NO_SUSPEND)
 56d37eca78add5e6	2582	((un)?register|(de)?activate)_netdev
@@ -244,8 +244,8 @@ d57210421b2b43c4	4743	(?i:(read|write|cmpxchg)_once)
 af71784c860190ca	1	.*
 30e185599d2d0ed0	516	static int
 39a89b8904ba8c37	14505	\w{4,8}_ops
-bb793dbfcab9a9af	916	EXPORT_SYMBOL$
-02d44203ecd15c8a	966	^#define CONFIG
+0deb15e98aee43e9	961	EXPORT_SYMBOL$
+28fa2e0c6d4d1dce	1056	^#define CONFIG
 e94c5b6241c364a9	28253	EXPORT_SYMBOL\(\w+\);$
 4839d12e89ac44ed	2591	^#define CONFIG_[A-Z_]+
 edebaab42e7b2eef	4716	GFP_(KERNEL|ATOMIC|NOWAIT|NOFS|NOIO|USER)
@@ -319,8 +319,8 @@ ba2c65c5c6c441bd	928	xyzzy_alpha.*xyzzy_omega
 486d25c887b22321	381	case.*break;
 ab515225523b413d	459	static.*int.*return
 ccf66fb9318574f3	219	^}$
-c97c2e46d96a6b86	712	^\treturn;$
-bff69feeac4444b9	328	^#endif
+f6e767bc411773d0	802	^\treturn;$
+e43ca1c760d74855	373	^#endif
 456b2a2e8a1d0d38	165	^ \*
 3ed8e6c6d8db170f	793	compatible = "
 47148c785d266e84	845	status = "okay"
@@ -368,7 +368,7 @@ f7d40345ecbf3f9e	97	\bfoo\B
 d158d76db1af57cb	279	(?m)^# .*$
 2b849f3bc529d97b	42	\r\n
 7073d5e1799499b6	189	a\z
-99b2f4d496a915fc	300	\Aabc
+306084fad22f5282	345	\Aabc
 af71184c86018698	1	é\A
 f4b7b107a59f2f0a	13	(?m:$)(_42|\S)
 af71184c86018698	1	(\)µ \w|[^a-z]éMAX)$日本(?m:^)
@@ -390,7 +390,7 @@ af71784c860190ca	1	(?i:(?:\d)??)
 f4b7b107a59f2f0a	13	((abc\B|\b[0-9a-f])|(\A\(|(?i:\x00)|(\n0|[0-9a-f]|42)))
 f4f13107a5a26729	13	(?i:([A-Za-z\p{Greek}]|\.MAX|\W))((foo|/|foo)|(?:impl)*?|(?m:^)abc42)((([\x00-\x1f]|impl\t|/µ)|z42\S|µ\z)|(?m:^)( |\S)|(?i:(bar_bazimpl|[A-Za-z\p{Greek}]|bar_baz_)))
 24f2fe758e0a466d	5028	\Wa0\t
-3285d360765331f9	350	^a\t-ab
+44ed1e90f5c94ae9	395	^a\t-ab
 af71784c860190ca	1	(?m:^)(?:(?:MAX)?){1,4}
 e581b596fc152f11	14894	\p{Cyrillic}bfoo a42日本(?i:(?:[A-Z])?)(?i:(?:foo\) 0)?)
 f4b7b107a59f2f0a	13	(\.0|[A-Z]|[[:alpha:]])
