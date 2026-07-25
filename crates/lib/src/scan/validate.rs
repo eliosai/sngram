@@ -37,7 +37,7 @@ pub fn read<R>(mut input: R) -> Result<ValidatedInput<R>, ScanError>
 where
     R: BufRead,
 {
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(SNIFF_BYTES);
 
     while bytes.len() < SNIFF_BYTES {
         let chunk = input.fill_buf()?;
