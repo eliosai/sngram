@@ -76,9 +76,9 @@ def test_checkpoint_excluded_from_dashboard_tail(tmp_path: Path):
     path = tmp_path / "train-events.jsonl"
     log = EventLog(path)
     log.log("progress", bytes=1)
-    log.log("content_skips", count=2)
+    log.log("retry", shard=2)
     log.log("mint", label="final")
     kinds = [e["kind"] for e in log.tail]
     log.close()
     assert "progress" not in kinds, "progress status lives in the header now"
-    assert "content_skips" in kinds and "mint" in kinds, "real events still surface"
+    assert "retry" in kinds and "mint" in kinds, "real events still surface"

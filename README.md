@@ -127,16 +127,16 @@ surface, including plan tuning and a worked inverted-index example.
 
 ## The trainer
 
-`train/` mints weight tables. It streams the published corpus row by
-row from the Hugging Face Hub, fetches each object from the public
-Software Heritage bucket, counts byte pairs through the Rust core,
-checkpoints every minute, and mints one provenance-stamped table when
-the stream ends. Nothing is prefetched.
+`train/` mints weight tables. It streams The Stack v3 parquet shards
+straight from the Hugging Face Hub, reads only the file content
+columns, counts byte pairs through the Rust core, checkpoints every
+minute, and mints one provenance-stamped table when the stream ends.
+Nothing else is fetched and nothing is prefetched.
 
 ```sh
 cd train
 uv sync
-uv run sngram train --limit 1GB     # smoke run
+uv run sngram train --shards 10     # smoke run
 uv run sngram train --mint-dir ./runs/r1
 uv run sngram inspect runs/r1/final_weights.bin
 ```

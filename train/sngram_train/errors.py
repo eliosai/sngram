@@ -10,10 +10,8 @@ class ConfigurationError(RuntimeError):
 _TRANSIENT_TYPES = (OSError, TimeoutError, ConnectionError)
 
 _TRANSIENT_NAMES = {
-    "EndpointConnectionError",
     "ConnectTimeoutError",
     "ReadTimeoutError",
-    "ResponseStreamingError",
     "IncompleteReadError",
     "ProtocolError",
     "ChunkedEncodingError",
@@ -37,20 +35,6 @@ _TRANSIENT_NAMES = {
 # a dropped connection can leave the shared hub http client closed
 _TRANSIENT_RUNTIME_MARKS = ("client has been closed",)
 
-_TRANSIENT_S3_CODES = {
-    "SlowDown",
-    "Throttling",
-    "ThrottlingException",
-    "RequestTimeout",
-    "InternalError",
-    "ServiceUnavailable",
-    "RequestLimitExceeded",
-    "500",
-    "502",
-    "503",
-    "504",
-}
-
 
 def is_transient(error: BaseException) -> bool:
     """Whether an error is a retryable transport failure."""
@@ -66,15 +50,8 @@ def is_transient(error: BaseException) -> bool:
 
 
 def _transient_link(error: BaseException) -> bool:
-    if type(error).__name__ == "ClientError":
-        return _client_error_code(error) in _TRANSIENT_S3_CODES
     if isinstance(error, _TRANSIENT_TYPES):
         return True
     if type(error) is RuntimeError:
         return any(mark in str(error) for mark in _TRANSIENT_RUNTIME_MARKS)
     return type(error).__name__ in _TRANSIENT_NAMES
-
-
-def _client_error_code(error: BaseException) -> str:
-    response = getattr(error, "response", None) or {}
-    return str(response.get("Error", {}).get("Code", ""))

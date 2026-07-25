@@ -30,6 +30,7 @@ def test_train_defaults_to_the_full_corpus(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert captured["limit"] is None
+    assert captured["shards"] is None
     assert captured["ran"] is True
     assert "complete" in result.output
 
@@ -102,25 +103,3 @@ def test_unexpected_errors_fail_loudly_instead_of_retrying(monkeypatch):
     with pytest.raises(RuntimeError, match="deterministic bug"):
         cli._run_until_done(build, resume=False, view=None)
     assert calls == 1
-
-
-def test_throttling_client_errors_are_retried(monkeypatch):
-    calls = 0
-
-    class ClientError(Exception):
-        response = {"Error": {"Code": "SlowDown"}}
-
-    class FakeTrainer:
-        def run(self):
-            pass
-
-    def build(_resume):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise ClientError("throttled")
-        return FakeTrainer()
-
-    monkeypatch.setattr("time.sleep", lambda _seconds: None)
-    assert cli._run_until_done(build, resume=False, view=None).__class__ is FakeTrainer
-    assert calls == 2
