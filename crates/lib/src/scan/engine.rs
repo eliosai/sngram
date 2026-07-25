@@ -10,6 +10,7 @@ use super::space::{EmitPolicy, SpaceScanner, SpanMap, Transform};
 pub struct DocumentScanner<'t> {
     primary: SpaceScanner<'t>,
     folded: SpaceScanner<'t>,
+    folded_live: bool,
     summary: SummaryBuilder,
     content_bytes: usize,
     gram_count: u32,
@@ -32,6 +33,7 @@ impl<'t> DocumentScanner<'t> {
                 SpanMap::Document,
                 EmitPolicy::ChangedOnly,
             ),
+            folded_live: false,
             summary: SummaryBuilder::default(),
             content_bytes: 0,
             gram_count: 0,
@@ -66,11 +68,28 @@ impl<'t> DocumentScanner<'t> {
         self.push_to_spaces(&[ScanSettings::DOCUMENT_SENTINEL], emit);
     }
 
+    // the folded space stays a bit-exact mirror of the primary space until
+    // the first uppercase byte, so it only starts running at that byte
     fn push_to_spaces(
         &mut self,
         chunk: &[u8],
         emit: &mut impl for<'event> FnMut(ScanEvent<'event>),
     ) {
+        if self.folded_live {
+            self.push_both(chunk, emit);
+            return;
+        }
+        let Some(at) = first_upper_index(chunk) else {
+            self.push_primary(chunk, emit);
+            return;
+        };
+        self.push_primary(&chunk[..at], emit);
+        self.folded.mirror_from(&self.primary);
+        self.folded_live = true;
+        self.push_both(&chunk[at..], emit);
+    }
+
+    fn push_both(&mut self, chunk: &[u8], emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
         let content_bytes = self.content_bytes;
         let gram_count = &mut self.gram_count;
         self.primary.push_bytes(chunk, content_bytes, &mut |gram| {
@@ -83,6 +102,19 @@ impl<'t> DocumentScanner<'t> {
             emit(ScanEvent::Gram(gram));
         });
     }
+
+    fn push_primary(&mut self, chunk: &[u8], emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+        let gram_count = &mut self.gram_count;
+        self.primary
+            .push_bytes(chunk, self.content_bytes, &mut |gram| {
+                *gram_count = gram_count.saturating_add(1);
+                emit(ScanEvent::Gram(gram));
+            });
+    }
+}
+
+fn first_upper_index(chunk: &[u8]) -> Option<usize> {
+    chunk.iter().position(u8::is_ascii_uppercase)
 }
 
 /// Scan one literal alone, emitting its raw grams with literal-relative spans.

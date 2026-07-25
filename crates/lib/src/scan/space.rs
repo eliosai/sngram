@@ -102,6 +102,16 @@ impl<'t> SpaceScanner<'t> {
         }
     }
 
+    /// Copy the rolling scan state from a space that saw identical bytes
+    pub const fn mirror_from(&mut self, source: &Self) {
+        self.stack = source.stack;
+        self.stack_len = source.stack_len;
+        self.ring = source.ring;
+        self.prefix_hash = source.prefix_hash;
+        self.pos = source.pos;
+        self.prev = source.prev;
+    }
+
     pub fn push_bytes<F>(&mut self, chunk: &[u8], content_bytes: usize, emit: &mut F)
     where
         F: FnMut(ScannedGram),
