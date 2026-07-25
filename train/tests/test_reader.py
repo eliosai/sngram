@@ -33,8 +33,8 @@ def test_batches_carry_all_content_and_language_bytes(tmp_path: Path):
 def test_null_content_is_dropped(tmp_path: Path):
     shard = [
         [
-            {"content": None, "language": "Python", "is_vendor": False},
-            {"content": "ok\n", "language": "Python", "is_vendor": False},
+            {"content": None, "language": "Python", "is_vendor": False, "size_bytes": None},
+            {"content": "ok\n", "language": "Python", "is_vendor": False, "size_bytes": 3},
         ]
     ]
     reader = build_reader(tmp_path, [shard], rows_per_group=1)
@@ -54,6 +54,22 @@ def test_skip_resumes_at_a_batch_boundary(tmp_path: Path):
 
     assert full == [64, 64, 2]
     assert resumed == [64, 2]
+
+
+def test_offset_batches_carry_their_own_rows(tmp_path: Path):
+    import sngram
+
+    shard = [repo((f"row {index:03d}\n", "Rust", False)) for index in range(130)]
+    reader = build_reader(tmp_path, [shard], rows_per_group=200)
+
+    counter = sngram.BigramCounter()
+    for sifted in reader.batches(0, 0):
+        staged = sngram.BigramCounter()
+        staged.count_arrow(sifted.content)
+        counter.merge(staged)
+
+    expected = sum(len(f"row {index:03d}\n") for index in range(130))
+    assert counter.bytes_processed == expected
 
 
 def test_misaligned_skip_fails_loudly(tmp_path: Path):

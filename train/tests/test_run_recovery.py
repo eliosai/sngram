@@ -62,7 +62,7 @@ def test_a_transient_read_error_retries_in_place(tmp_path: Path, monkeypatch):
     shards = [code_repos(10), code_repos(10)]
     corpus, source = write_corpus(tmp_path / "corpus", shards)
 
-    trainer = run_trainer(tmp_path / "run", corpus, FlakyShards(source, fail_at=9))
+    trainer = run_trainer(tmp_path / "run", corpus, FlakyShards(source, fail_at=2))
     reference = run_trainer(tmp_path / "reference", corpus, source)
 
     assert trainer.counter.bytes_processed == decoded_bytes(shards)

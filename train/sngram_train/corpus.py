@@ -9,7 +9,7 @@ from .errors import ConfigurationError
 
 DEFAULT_REPO = "HuggingFaceCode/stack-v3-train"
 
-_BLOCK_SIZE = 16 * 2**20
+_BLOCK_SIZE = 8 * 2**20
 
 
 def corpus_repo() -> str:

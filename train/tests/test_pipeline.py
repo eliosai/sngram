@@ -116,6 +116,15 @@ def test_interrupted_run_resumes_to_the_identical_table(tmp_path: Path):
     assert resumed.counter.bytes_processed == decoded_bytes(shards)
 
 
+def test_completed_run_leaves_no_spool_files(tmp_path: Path):
+    corpus, source = write_corpus(tmp_path / "corpus", [code_repos(3)])
+    trainer = build(tmp_path, corpus, source)
+
+    trainer.run()
+
+    assert not (tmp_path / "bins" / ".spool").exists()
+
+
 def test_checkpoint_rejects_a_different_corpus_revision(tmp_path: Path):
     corpus, source = write_corpus(tmp_path / "corpus", [code_repos(4)])
     build(tmp_path, corpus, source).run()

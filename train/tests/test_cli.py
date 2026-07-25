@@ -54,6 +54,7 @@ def test_train_bounds_hugging_face_request_time(monkeypatch, tmp_path):
 
     monkeypatch.delenv("HF_HUB_DOWNLOAD_TIMEOUT", raising=False)
     monkeypatch.delenv("HF_HUB_ETAG_TIMEOUT", raising=False)
+    monkeypatch.delenv("ARROW_DEFAULT_MEMORY_POOL", raising=False)
     monkeypatch.setattr(cli, "_production_trainer", lambda **_kwargs: FakeTrainer())
 
     result = CliRunner().invoke(
@@ -64,6 +65,7 @@ def test_train_bounds_hugging_face_request_time(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] == "30"
     assert os.environ["HF_HUB_ETAG_TIMEOUT"] == "30"
+    assert os.environ["ARROW_DEFAULT_MEMORY_POOL"] == "system"
 
 
 def test_startup_transport_failure_retries_but_configuration_error_does_not(monkeypatch):

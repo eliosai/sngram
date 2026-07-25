@@ -17,6 +17,7 @@ _FILES_TYPE = pa.list_(
             ("content", pa.string()),
             ("language", pa.string()),
             ("is_vendor", pa.bool_()),
+            ("size_bytes", pa.int64()),
         ]
     )
 )
@@ -26,7 +27,12 @@ def repo(*files: tuple[str, str, bool]) -> list[dict]:
     """One repository row from (content, language, is_vendor) file specs."""
 
     return [
-        {"content": content, "language": language, "is_vendor": vendor}
+        {
+            "content": content,
+            "language": language,
+            "is_vendor": vendor,
+            "size_bytes": len(content.encode()) if content is not None else None,
+        }
         for content, language, vendor in files
     ]
 

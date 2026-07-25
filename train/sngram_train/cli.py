@@ -68,6 +68,26 @@ def _trainer_factory(
 def _tune_runtime() -> None:
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
     os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+    os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")
+    _pin_malloc()
+
+
+# glibc mallopt selectors for mmap and trim thresholds
+_M_TRIM_THRESHOLD = -1
+_M_MMAP_THRESHOLD = -3
+
+
+def _pin_malloc() -> None:
+    """Keep big buffers on mmap so freed decode memory returns to the OS"""
+
+    import ctypes
+
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.mallopt(_M_MMAP_THRESHOLD, 128 * 1024)
+        libc.mallopt(_M_TRIM_THRESHOLD, 64 * 1024)
+    except (OSError, AttributeError):
+        pass
 
 
 def _run_view():

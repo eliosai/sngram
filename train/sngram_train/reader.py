@@ -13,7 +13,9 @@ from .errors import ConfigurationError
 
 BATCH_ROWS = 64
 
-_FIELDS = ("content", "language", "is_vendor")
+_READ_BUFFER = 4 * 2**20
+
+_FIELDS = ("content", "language", "is_vendor", "size_bytes")
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,7 @@ class Sifted:
     content: pa.RecordBatch
     repos: int
     files: int
+    # vendor flagged files, included in the counts
     vendor_files: int
     lang_bytes: dict[str, int]
 
@@ -31,7 +34,12 @@ class ShardReader:
     """Row group batches of one shard, pruned to countable columns."""
 
     def __init__(self, handle) -> None:
-        self._file = pq.ParquetFile(handle)
+        self._file = pq.ParquetFile(
+            handle,
+            buffer_size=_READ_BUFFER,
+            binary_type=pa.binary_view(),
+            pre_buffer=False,
+        )
         self._columns = _pruned_columns(self._file.schema)
 
     @property
@@ -47,7 +55,12 @@ class ShardReader:
             if pending:
                 pending = _drop(pending, batch.num_rows)
                 continue
-            yield _sift(batch)
+            sifted = _sift(batch)
+            # free each batch before the next decode
+            del batch
+            yield sifted
+            del sifted
+        pa.default_memory_pool().release_unused()
 
 
 def _pruned_columns(schema) -> list[str]:
@@ -71,28 +84,38 @@ def _drop(pending: int, rows: int) -> int:
     return pending - rows
 
 
+def _file_window(column: pa.Array) -> pa.Array:
+    """Zero-copy view of the file structs behind one batch"""
+
+    offsets = column.offsets
+    start = offsets[0].as_py()
+    return column.values.slice(start, offsets[-1].as_py() - start)
+
+
 def _sift(batch: pa.RecordBatch) -> Sifted:
-    files = pc.list_flatten(batch.column(0))
+    files = _file_window(batch.column(0))
     vendor = pc.fill_null(files.field("is_vendor"), False)
     content = files.field("content")
     languages = files.field("language")
+    sizes = files.field("size_bytes")
     if content.null_count:
         keep = pc.is_valid(content)
         content = pc.filter(content, keep)
         languages = pc.filter(languages, keep)
+        sizes = pc.filter(sizes, keep)
     return Sifted(
         pa.record_batch([content], names=["content"]),
         batch.num_rows,
         len(content),
         pc.sum(vendor).as_py() or 0,
-        _language_bytes(languages, content),
+        _language_bytes(languages, sizes),
     )
 
 
-def _language_bytes(languages: pa.Array, content: pa.Array) -> dict[str, int]:
-    pairs = pa.table({"language": languages, "nbytes": pc.binary_length(content)})
+def _language_bytes(languages: pa.Array, sizes: pa.Array) -> dict[str, int]:
+    pairs = pa.table({"language": pc.cast(languages, pa.string()), "nbytes": sizes})
     grouped = pairs.group_by("language").aggregate([("nbytes", "sum")])
     named = zip(
         grouped.column("language").to_pylist(), grouped.column("nbytes_sum").to_pylist()
     )
-    return {language or "unknown": total for language, total in named}
+    return {language or "unknown": total or 0 for language, total in named}

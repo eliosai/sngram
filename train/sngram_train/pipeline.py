@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+import shutil
 import threading
 import time
 from collections import deque
@@ -22,6 +24,9 @@ _RETRY_LIMIT = 6
 _RETRY_BASE = 2.0
 _JOIN_TIMEOUT = 120.0
 _TOP_LANGS = 8
+_SPOOL_CHUNK = 8 * 2**20
+_DECODE_SLOTS = 1
+_GC_PERIOD = 2.0
 
 
 @dataclass(frozen=True)
@@ -34,7 +39,7 @@ class TrainerConfig:
 
 
 class Trainer:
-    """Streams shards through parallel readers into one shared counter."""
+    """Spools shards to disk in parallel and decodes them into one counter."""
 
     def __init__(self, corpus: Corpus, source, config: TrainerConfig) -> None:
         self.corpus = corpus
@@ -46,6 +51,8 @@ class Trainer:
         self.lock = threading.Lock()
         self.gate = Gate()
         self.stop = threading.Event()
+        self._slots = threading.Semaphore(_DECODE_SLOTS)
+        self._spool_dir = config.mint_dir / ".spool"
         self.failure: BaseException | None = None
         self.retries = 0
         self.wire_target = corpus.wire_bytes()
@@ -70,6 +77,8 @@ class Trainer:
     def run(self) -> None:
         """Stream the corpus through the counter and mint the final table."""
 
+        shutil.rmtree(self._spool_dir, ignore_errors=True)
+        self._spool_dir.mkdir(parents=True, exist_ok=True)
         self.events.log(
             "start",
             shards=len(self.corpus.shards),
@@ -103,14 +112,19 @@ class Trainer:
                 self.events.log("error", error="worker hung, checkpoint skipped")
             else:
                 self._checkpoint()
+                shutil.rmtree(self._spool_dir, ignore_errors=True)
         if self.failure is not None:
             raise self.failure
 
     def _supervise(self, threads: list[threading.Thread]) -> None:
+        last_sweep = time.monotonic()
         while any(thread.is_alive() for thread in threads):
             time.sleep(0.2)
             self.meter.sample(self.state.decoded)
             self.wire_meter.sample(self.state.shard_bytes)
+            if time.monotonic() - last_sweep >= _GC_PERIOD:
+                gc.collect()
+                last_sweep = time.monotonic()
             if self.config.limit and self.state.decoded >= self.config.limit:
                 self.stop.set()
             elif self._checkpoint_due():
@@ -201,23 +215,56 @@ class Trainer:
             time.sleep(0.2)
 
     def _read_shard(self, shard: int, start_group: int, start_rows: int) -> None:
-        with self.source.open(self.corpus.shards[shard].name) as handle:
-            reader = ShardReader(handle)
-            for group in range(start_group, reader.row_groups):
-                skip = start_rows if group == start_group else 0
-                if not self._read_group(reader, shard, group, skip):
-                    return
+        path = self._spool(shard)
+        if path is None:
+            return
+        try:
+            with open(path, "rb") as handle:
+                reader = ShardReader(handle)
+                for group in range(start_group, reader.row_groups):
+                    skip = start_rows if group == start_group else 0
+                    if not self._read_group(reader, shard, group, skip):
+                        return
+        finally:
+            path.unlink(missing_ok=True)
         with self.lock:
             del self._partial[shard]
 
-    def _read_group(self, reader: ShardReader, shard: int, group: int, skip: int) -> bool:
-        rows = skip
-        for sifted in reader.batches(group, skip):
-            rows += sifted.repos
-            self._commit(sifted, shard, group, rows)
+    def _spool(self, shard: int) -> Path | None:
+        path = self._spool_dir / f"shard-{shard:05d}.parquet"
+        with self.source.open(self.corpus.shards[shard].name) as remote:
+            with open(path, "wb") as local:
+                while chunk := remote.read(_SPOOL_CHUNK):
+                    local.write(chunk)
+                    self.gate.pause_point()
+                    if self.stop.is_set():
+                        path.unlink(missing_ok=True)
+                        return None
+        return path
+
+    def _acquire_slot(self) -> bool:
+        while not self.stop.is_set():
+            if self._slots.acquire(timeout=0.1):
+                return True
             self.gate.pause_point()
-            if self.stop.is_set():
-                return False
+        return False
+
+    def _read_group(self, reader: ShardReader, shard: int, group: int, skip: int) -> bool:
+        if not self._acquire_slot():
+            return False
+        batches = reader.batches(group, skip)
+        try:
+            rows = skip
+            for sifted in batches:
+                rows += sifted.repos
+                self._commit(sifted, shard, group, rows)
+                del sifted
+                self.gate.pause_point()
+                if self.stop.is_set():
+                    return False
+        finally:
+            batches.close()
+            self._slots.release()
         self._advance_shard(shard, group, reader.row_groups)
         return True
 

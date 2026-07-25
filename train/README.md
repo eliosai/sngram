@@ -4,13 +4,15 @@ The trainer that mints sngram weight tables.
 
 It trains on The Stack v3 (`HuggingFaceCode/stack-v3-train`), reading
 everything from the Hugging Face Hub and nothing else. Parallel
-readers stream the parquet shards with only the file content columns
-selected, drop vendored files, and count byte pairs through the Rust
-core with the GIL released. The run checkpoints every minute at a
-consistent pause, resumes byte-exactly after a kill, retries transient
-network failures, and mints one provenance-stamped `final_weights.bin`
-when the stream ends. Nothing lands on disk except the checkpoint, the
-event log, and the final table.
+fetchers spool the parquet shards to disk while a bounded decoder
+reads only the file content columns, vendored files included, and
+counts byte pairs through the Rust core with the GIL released. The
+run checkpoints every minute at a consistent pause, resumes
+byte-exactly after a kill, retries transient network failures, and
+mints one provenance-stamped `final_weights.bin` when the stream ends.
+Nothing outlives the run on disk except the checkpoint, the event log,
+and the final table; in-flight shards spool under `.spool` in the mint
+directory and are deleted as they finish.
 
 This project depends on the `sngram` library by path and is not
 published. The library it drives lives in
