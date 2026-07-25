@@ -15,12 +15,14 @@ use super::executor::{BLOCK_BITS, WORD_BOTH_BIT, WORD_END_BIT, WORD_START_BIT};
 use super::{
     manifest::CurrentFile,
     summary::{SummaryRecord, SummaryStatus},
+    verbatim::HeldDocument,
 };
 
 pub struct IndexedDocument {
     pub ord: u32,
     pub path_hash: u64,
     pub forced_candidate: bool,
+    pub held: Option<HeldDocument>,
     pub hashes: Vec<(u64, u8)>,
     pub summary: SummaryRecord,
 }
@@ -28,6 +30,15 @@ pub struct IndexedDocument {
 impl IndexedDocument {
     pub const fn is_skipped(&self) -> bool {
         matches!(self.summary.status(), SummaryStatus::Skipped)
+    }
+
+    /// Decide this document from stored bytes instead of forcing it everywhere
+    fn hold(&mut self, prefix: &[u8]) {
+        let Some(held) = HeldDocument::new(self.ord, prefix) else {
+            return;
+        };
+        self.held = Some(held);
+        self.forced_candidate = false;
     }
 
     pub const fn emitted_grams(&self) -> usize {
@@ -88,13 +99,9 @@ pub fn scan(
         ));
     }
     let Some((hashes, summary)) = scan_bytes(table, prefix)? else {
-        return Ok(document(
-            ord,
-            path_hash,
-            true,
-            Vec::new(),
-            SummaryStatus::UnknownText,
-        ));
+        let mut refused = document(ord, path_hash, true, Vec::new(), SummaryStatus::UnknownText);
+        refused.hold(prefix);
+        return Ok(refused);
     };
     let mut hashes = hashes;
     hashes.sort_unstable();
@@ -234,6 +241,7 @@ fn document(
         ord,
         path_hash,
         forced_candidate,
+        held: None,
         hashes,
         summary: SummaryRecord::new(ord, status),
     }

@@ -503,7 +503,7 @@ fn file_document(fields: IndexFields, file: &IndexedDocument) -> TantivyDocument
     let mut document = TantivyDocument::default();
     document.add_u64(fields.doc_ord, u64::from(file.ord));
     document.add_u64(fields.path_hash, file.path_hash);
-    if file.forced_candidate {
+    if file.forced_candidate || file.held.is_some() {
         document.add_u64(fields.forced_candidate, 1);
     }
     for &(hash, _mask) in &file.hashes {

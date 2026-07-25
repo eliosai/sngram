@@ -23,6 +23,7 @@ mod snapshot;
 mod store;
 mod suite;
 mod summary;
+mod verbatim;
 mod verify;
 mod walk;
 
