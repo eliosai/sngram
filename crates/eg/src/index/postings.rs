@@ -905,11 +905,12 @@ impl Segment {
 
     /// Greatest directory block whose first hash is at most the target
     fn block_for(&self, hash: u32) -> anyhow::Result<Option<usize>> {
+        let directory = self.directory();
         let mut lo = 0usize;
         let mut hi = self.block_count;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.directory_entry(mid)?.0 <= hash {
+            if first_hash_at(directory, mid)? <= hash {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -918,13 +919,20 @@ impl Segment {
         Ok(lo.checked_sub(1))
     }
 
+    /// The directory region, one fixed-size entry per skip block
+    fn directory(&self) -> &[u8] {
+        self.table_body()
+            .get(self.records_len..)
+            .unwrap_or_default()
+    }
+
     fn directory_entry(&self, idx: usize) -> anyhow::Result<(u32, u32, u64)> {
-        let body = self.table_body();
-        let at = self.records_len + idx * DIRECTORY_ENTRY_SIZE;
+        let directory = self.directory();
+        let at = idx * DIRECTORY_ENTRY_SIZE;
         Ok((
-            read_u32_at(body, at)?,
-            read_u32_at(body, at + 4)?,
-            read_u64_at(body, at + 8)?,
+            read_u32_at(directory, at)?,
+            read_u32_at(directory, at + 4)?,
+            read_u64_at(directory, at + 8)?,
         ))
     }
 
@@ -1012,32 +1020,51 @@ struct PostingList<'a> {
 }
 
 impl<'a> PostingList<'a> {
+    /// Decode ordinals then masks straight into one allocation
     fn postings(self, decoder: &Decoder) -> Vec<executor::Posting> {
         let count = self.count as usize;
         let mut out = Vec::with_capacity(count);
         let mut pos = 0usize;
         let mut ord = 0u32;
-        for idx in 0..count {
+        for _ in 0..count {
             let Some(gap) = read_uvarint(self.bytes, &mut pos) else {
                 return Vec::new();
             };
-            ord = if idx == 0 { gap } else { ord.wrapping_add(gap) };
-            out.push(ord as usize);
+            ord = ord.wrapping_add(gap);
+            out.push(executor::Posting {
+                ord: ord as usize,
+                mask: 0,
+            });
         }
         let payload = self.bytes.get(pos..).unwrap_or_default();
-        let masks = if count < HUFF_MIN_COUNT {
-            raw_masks(payload, count)
-        } else {
-            decoder.decode(payload, count)
-        };
-        let Some(masks) = masks else {
+        if !fill_masks(payload, decoder, &mut out) {
             return Vec::new();
-        };
-        out.into_iter()
-            .zip(masks)
-            .map(|(ord, mask)| executor::Posting { ord, mask })
-            .collect()
+        }
+        out
     }
+}
+
+/// Fill the mask column over already-decoded ordinals
+fn fill_masks(payload: &[u8], decoder: &Decoder, out: &mut [executor::Posting]) -> bool {
+    if out.len() < HUFF_MIN_COUNT {
+        let mut pos = 0usize;
+        for slot in out.iter_mut() {
+            let Some(mask) =
+                read_uvarint(payload, &mut pos).and_then(|raw| u16::try_from(raw).ok())
+            else {
+                return false;
+            };
+            slot.mask = mask;
+        }
+        return true;
+    }
+    let count = out.len();
+    let mut slots = out.iter_mut();
+    decoder.decode_each(payload, count, |mask| {
+        if let Some(slot) = slots.next() {
+            slot.mask = mask;
+        }
+    })
 }
 
 struct FastAllOf<'a> {
@@ -1402,14 +1429,13 @@ fn read_u64_at(bytes: &[u8], offset: usize) -> anyhow::Result<u64> {
     Ok(u64::from_le_bytes(slice.try_into().expect("eight bytes")))
 }
 
-/// The raw mask column of a short posting list, one uvarint per posting
-fn raw_masks(payload: &[u8], count: usize) -> Option<Vec<u16>> {
-    let mut pos = 0usize;
-    let mut out = Vec::with_capacity(count);
-    for _ in 0..count {
-        out.push(u16::try_from(read_uvarint(payload, &mut pos)?).ok()?);
-    }
-    Some(out)
+/// The first hash of one directory entry, the only field a probe compares
+fn first_hash_at(directory: &[u8], idx: usize) -> anyhow::Result<u32> {
+    let at = idx * DIRECTORY_ENTRY_SIZE;
+    let Some(slice) = directory.get(at..at + 4) else {
+        anyhow::bail!("directory probe past end of table");
+    };
+    Ok(u32::from_le_bytes(slice.try_into().expect("four bytes")))
 }
 
 fn read_u32_at(bytes: &[u8], offset: usize) -> anyhow::Result<u32> {

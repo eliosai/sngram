@@ -137,62 +137,108 @@ impl Encoder {
     }
 }
 
-/// One-lookup decoder: sixteen peeked bits map to a symbol and its length
+/// Slots in the decode table, one per peeked sixteen-bit window
+const TABLE_SLOTS: usize = 1 << MAX_CODE_LEN;
+
+/// Low bits of a packed table entry holding the code length
+const LEN_BITS: u16 = 5;
+
+/// Mask selecting the code length out of a packed table entry
+const LEN_MASK: u16 = (1 << LEN_BITS) - 1;
+
+/// Bytes a peek needs beyond the current byte to hold sixteen shifted bits
+const PEEK_BYTES: usize = 4;
+
+/// One-lookup decoder: sixteen peeked bits map to a packed symbol and length
 pub struct Decoder {
-    table: Vec<(u16, u8)>,
+    table: Box<[u16; TABLE_SLOTS]>,
 }
 
 impl Decoder {
     pub fn new(lengths: &CodeLengths) -> Self {
-        let mut table = vec![(0u16, 0u8); 1 << MAX_CODE_LEN];
+        let mut table = vec![0u16; TABLE_SLOTS].into_boxed_slice();
         for (symbol, &(code, len)) in lengths.codes().iter().enumerate() {
             if len == 0 {
                 continue;
             }
-            let shift = MAX_CODE_LEN - len;
-            let base = u32::from(code) << shift;
-            for fill in 0..(1u32 << shift) {
-                table[(base | fill) as usize] = (symbol as u16, len);
-            }
+            let base = usize::from(code) << (MAX_CODE_LEN - len);
+            let span = 1usize << (MAX_CODE_LEN - len);
+            let entry = (symbol as u16) << LEN_BITS | u16::from(len);
+            table[base..base + span].fill(entry);
         }
-        Self { table }
+        Self {
+            table: table.try_into().expect("table sized by construction"),
+        }
     }
 
-    /// Decode `count` symbols from a byte-padded bitstream
-    pub fn decode(&self, bytes: &[u8], count: usize) -> Option<Vec<u16>> {
-        let mut out = Vec::with_capacity(count);
-        let mut acc = 0u32;
-        let mut bits = 0u8;
-        let mut at = 0usize;
-        for _ in 0..count {
-            while bits < MAX_CODE_LEN && at < bytes.len() {
-                acc = (acc << 8) | u32::from(bytes[at]);
-                at += 1;
-                bits += 8;
-            }
-            if bits == 0 {
-                return None;
-            }
-            let index = if bits >= MAX_CODE_LEN {
-                ((acc >> (bits - MAX_CODE_LEN)) & 0xFFFF) as usize
-            } else {
-                ((acc << (MAX_CODE_LEN - bits)) & 0xFFFF) as usize
+    /// The packed entry a sixteen-bit window selects
+    fn entry(&self, window: u16) -> u16 {
+        self.table[usize::from(window)]
+    }
+
+    /// Decode `count` symbols from a byte-padded bitstream into `emit`;
+    /// false means the stream ran out or carried an unknown code
+    pub fn decode_each(&self, bytes: &[u8], count: usize, mut emit: impl FnMut(u16)) -> bool {
+        let mut bit = 0usize;
+        let mut done = 0usize;
+        while done < count {
+            let Some(window) = bytes
+                .get(bit >> 3..)
+                .and_then(<[u8]>::first_chunk::<PEEK_BYTES>)
+            else {
+                break;
             };
-            let (symbol, len) = self.table[index];
-            if len == 0 || len > bits {
-                return None;
+            let word = u32::from_be_bytes(*window);
+            let entry = self.entry((word >> (MAX_CODE_LEN - (bit & 7) as u8)) as u16);
+            let len = usize::from(entry & LEN_MASK);
+            if len == 0 {
+                return false;
             }
-            bits -= len;
-            acc &= (1 << bits) - 1;
-            out.push(symbol);
+            bit += len;
+            emit(entry >> LEN_BITS);
+            done += 1;
         }
-        Some(out)
+        self.decode_tail(bytes, count - done, bit, &mut emit)
+    }
+
+    /// Finish symbols whose peek window would run past the end of the stream
+    fn decode_tail(
+        &self,
+        bytes: &[u8],
+        count: usize,
+        mut bit: usize,
+        emit: &mut impl FnMut(u16),
+    ) -> bool {
+        let total = bytes.len().saturating_mul(8);
+        for _ in 0..count {
+            let mut word = 0u32;
+            for offset in 0..PEEK_BYTES {
+                let byte = bytes.get((bit >> 3) + offset).copied().unwrap_or(0);
+                word = (word << 8) | u32::from(byte);
+            }
+            let entry = self.entry((word >> (MAX_CODE_LEN - (bit & 7) as u8)) as u16);
+            let len = usize::from(entry & LEN_MASK);
+            if len == 0 || bit + len > total {
+                return false;
+            }
+            bit += len;
+            emit(entry >> LEN_BITS);
+        }
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Collect `count` decoded symbols, or `None` when the stream fails
+    fn decode(decoder: &Decoder, bytes: &[u8], count: usize) -> Option<Vec<u16>> {
+        let mut out = Vec::with_capacity(count);
+        decoder
+            .decode_each(bytes, count, |symbol| out.push(symbol))
+            .then_some(out)
+    }
 
     fn round_trip(masks: &[u16]) {
         let mut freq = [0u64; MASK_SYMBOLS];
@@ -205,7 +251,7 @@ mod tests {
         let mut bytes = Vec::new();
         encoder.encode_into(masks.iter().copied(), &mut bytes);
 
-        assert_eq!(decoder.decode(&bytes, masks.len()), Some(masks.to_vec()));
+        assert_eq!(decode(&decoder, &bytes, masks.len()), Some(masks.to_vec()));
     }
 
     #[test]
@@ -228,6 +274,33 @@ mod tests {
     #[test]
     fn single_symbol_stream_round_trips() {
         round_trip(&[0x1F; 64]);
+    }
+
+    /// Every stream length crosses the windowed loop into the tail differently
+    #[test]
+    fn every_stream_length_round_trips_across_the_tail() {
+        let pattern = [0x21u16, 0x21, 0x3FF, 0x21, 0x1F, 0x21, 0x200, 0x21];
+        for len in 0..=64usize {
+            let masks: Vec<u16> = pattern.iter().copied().cycle().take(len).collect();
+            round_trip(&masks);
+        }
+    }
+
+    /// A stream cut short of its promised symbols must not invent any
+    #[test]
+    fn truncated_streams_fail_instead_of_padding() {
+        let masks = vec![0x21u16, 0x3FF, 0x1F, 0x200, 0x21, 0x21, 0x3FF, 0x21];
+        let mut freq = [0u64; MASK_SYMBOLS];
+        for &mask in &masks {
+            freq[usize::from(mask)] += 1;
+        }
+        let lengths = CodeLengths::from_frequencies(&freq);
+        let decoder = Decoder::new(&lengths);
+        let mut bytes = Vec::new();
+        Encoder::new(&lengths).encode_into(masks.iter().copied(), &mut bytes);
+        for cut in 0..bytes.len() {
+            assert_eq!(decode(&decoder, &bytes[..cut], masks.len()), None);
+        }
     }
 
     #[test]
@@ -261,6 +334,6 @@ mod tests {
         freq[9] = 3;
         let lengths = CodeLengths::from_frequencies(&freq);
         let decoder = Decoder::new(&lengths);
-        assert_eq!(decoder.decode(&[], 4), None);
+        assert_eq!(decode(&decoder, &[], 4), None);
     }
 }
