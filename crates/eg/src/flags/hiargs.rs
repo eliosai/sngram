@@ -37,6 +37,7 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct HiArgs {
     binary: BinaryDetection,
+    compiled_matcher: std::sync::OnceLock<PatternMatcher>,
     index_walk_fingerprint: std::sync::OnceLock<u64>,
     binary_mode: BinaryMode,
     boundary: Option<BoundaryMode>,
@@ -317,6 +318,7 @@ impl HiArgs {
             quit_after_match,
             regex_size_limit: low.regex_size_limit,
             replace: low.replace,
+            compiled_matcher: std::sync::OnceLock::new(),
             index_walk_fingerprint: std::sync::OnceLock::new(),
             search_zip: low.search_zip,
             sort: low.sort,
@@ -538,9 +540,21 @@ impl HiArgs {
     /// Return the matcher that should be used for searching using the engine
     /// choice made by the user.
     ///
+    /// The pattern compiles once per invocation and is handed out as clones,
+    /// which share the compiled automata and take their own cache pool.
+    ///
     /// If there was a problem building the matcher (e.g., a syntax error),
     /// then this returns an error.
     pub(crate) fn matcher(&self) -> anyhow::Result<PatternMatcher> {
+        if let Some(matcher) = self.compiled_matcher.get() {
+            return Ok(matcher.clone());
+        }
+        let matcher = self.build_matcher()?;
+        Ok(self.compiled_matcher.get_or_init(|| matcher).clone())
+    }
+
+    /// Compile the invocation's patterns with the configured engine
+    fn build_matcher(&self) -> anyhow::Result<PatternMatcher> {
         match self.engine {
             EngineChoice::Default => match self.matcher_rust() {
                 Ok(m) => Ok(m),

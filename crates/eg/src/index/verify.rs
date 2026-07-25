@@ -105,8 +105,8 @@ fn all_ordered(snapshot: &manifest::CurrentSnapshot) -> Vec<usize> {
     snapshot.ordinals().collect()
 }
 
-/// Smallest candidate set that a multi-threaded verify is worth spawning for.
-const PARALLEL_VERIFY_MIN: usize = 128;
+/// Candidate files one verify worker owns before a second worker earns its cost
+const FILES_PER_VERIFY_WORKER: usize = 24;
 
 /// Return true when the mode reports on the whole corpus, not just matches.
 fn is_full_corpus_mode(args: &HiArgs, mode: SearchMode) -> bool {
@@ -114,12 +114,16 @@ fn is_full_corpus_mode(args: &HiArgs, mode: SearchMode) -> bool {
         || (args.include_zero() && matches!(mode, SearchMode::Count | SearchMode::CountMatches))
 }
 
-/// Worker count for verify: single-threaded unless the candidate set is large.
-fn verify_worker_count(args: &HiArgs, ordered: usize) -> usize {
-    if args.threads() > 1 && ordered >= PARALLEL_VERIFY_MIN {
-        args.threads().min(ordered).max(1)
-    } else {
+/// One verify worker per chunk of candidates, never over the thread budget
+const fn verify_worker_count(threads: usize, candidates: usize) -> usize {
+    let budget = if threads == 0 { 1 } else { threads };
+    let wanted = candidates / FILES_PER_VERIFY_WORKER;
+    if wanted <= 1 {
         1
+    } else if wanted > budget {
+        budget
+    } else {
+        wanted
     }
 }
 
@@ -138,7 +142,7 @@ fn verify_for_bench(
     } else {
         ordered_candidates(snapshot, candidates)
     };
-    if !full_corpus && verify_worker_count(args, ordered.len()) > 1 {
+    if !full_corpus && verify_worker_count(args.threads(), ordered.len()) > 1 {
         let facts = verify_candidates_for_bench(args, mode, roots, snapshot, &ordered)?;
         report.set_verification(
             facts.verified_files,
@@ -188,12 +192,14 @@ fn verify_candidates_for_bench(
     ordered: &[usize],
 ) -> anyhow::Result<BenchFacts> {
     let next_pos = AtomicUsize::new(0);
+    let sink = termcolor::NoColor::new(Vec::new());
+    let prototype =
+        args.search_worker(args.matcher()?, args.searcher()?, args.printer(mode, sink))?;
+    let worker_count = verify_worker_count(args.threads(), ordered.len());
     std::thread::scope(|scope| -> anyhow::Result<BenchFacts> {
-        let mut handles = Vec::with_capacity(verify_worker_count(args, ordered.len()));
-        for _ in 0..verify_worker_count(args, ordered.len()) {
-            let sink = termcolor::NoColor::new(Vec::new());
-            let searcher =
-                args.search_worker(args.matcher()?, args.searcher()?, args.printer(mode, sink))?;
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let searcher = prototype.clone();
             handles.push(
                 scope.spawn(|| {
                     bench_worker(args, mode, roots, snapshot, ordered, &next_pos, searcher)
@@ -421,7 +427,7 @@ fn verify_buffered(
     let matched = AtomicBool::new(false);
     let next_pos = AtomicUsize::new(0);
     let reorder = Mutex::new(Reorder::new(ordered.len()));
-    let mut stats_searcher = args.search_worker(
+    let prototype = args.search_worker(
         args.matcher()?,
         args.searcher()?,
         args.printer(mode, bufwtr.buffer()),
@@ -437,46 +443,56 @@ fn verify_buffered(
         reorder: &reorder,
         bufwtr: &bufwtr,
     };
-    spawn_verify_workers(args, mode, &bufwtr, &ctx, ordered.len())?;
+    spawn_verify_workers(&prototype, &ctx)?;
     if let Some(ref locked_stats) = stats {
-        let stats = locked_stats
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let wtr = stats_searcher.printer().get_mut();
-        let _ = crate::print_stats(mode, &stats, started_at, &mut *wtr);
-        let _ = bufwtr.print(wtr);
+        print_buffered_stats(mode, started_at, locked_stats, &bufwtr);
     }
     Ok(matched.load(AtomicOrdering::SeqCst))
 }
 
-fn spawn_verify_workers(
-    args: &HiArgs,
+/// Emit the stats footer after the last candidate's output
+fn print_buffered_stats(
     mode: SearchMode,
+    started_at: Instant,
+    stats: &Mutex<grep::printer::Stats>,
     bufwtr: &termcolor::BufferWriter,
+) {
+    let stats = stats
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut wtr = bufwtr.buffer();
+    let _ = crate::print_stats(mode, &stats, started_at, &mut wtr);
+    let _ = bufwtr.print(&wtr);
+}
+
+/// Fan the prototype worker out over the candidate-scaled thread count
+fn spawn_verify_workers(
+    prototype: &crate::search::SearchWorker<termcolor::Buffer>,
     ctx: &Verify,
-    ordered_len: usize,
 ) -> anyhow::Result<()> {
-    let worker_count = verify_worker_count(args, ordered_len);
+    let worker_count = verify_worker_count(ctx.args.threads(), ctx.ordered.len());
     std::thread::scope(|scope| -> anyhow::Result<()> {
         let mut handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
-            let searcher = args.search_worker(
-                args.matcher()?,
-                args.searcher()?,
-                args.printer(mode, bufwtr.buffer()),
-            )?;
+            let searcher = prototype.clone();
             handles.push(scope.spawn(move || verify_worker(ctx, searcher)));
         }
-        for handle in handles {
-            match handle.join() {
-                Ok(Ok(())) => {},
-                Ok(Err(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {},
-                Ok(Err(err)) => return Err(err.into()),
-                Err(_) => bail!("indexed search worker thread panicked"),
-            }
-        }
-        Ok(())
+        join_verify_workers(handles)
     })
+}
+
+fn join_verify_workers(
+    handles: Vec<std::thread::ScopedJoinHandle<'_, std::io::Result<()>>>,
+) -> anyhow::Result<()> {
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(())) => {},
+            Ok(Err(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {},
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => bail!("indexed search worker thread panicked"),
+        }
+    }
+    Ok(())
 }
 
 /// One verify worker: pull path-ordered candidates and emit through the reorder buffer.
@@ -532,4 +548,25 @@ fn verify_one(
             .unwrap_or_else(std::sync::PoisonError::into_inner) += search_stats;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FILES_PER_VERIFY_WORKER, verify_worker_count};
+
+    #[test]
+    fn worker_count_follows_the_candidate_set() {
+        assert_eq!(verify_worker_count(12, 0), 1);
+        assert_eq!(verify_worker_count(12, FILES_PER_VERIFY_WORKER), 1);
+        assert_eq!(verify_worker_count(12, FILES_PER_VERIFY_WORKER * 2), 2);
+        assert_eq!(verify_worker_count(12, FILES_PER_VERIFY_WORKER * 7), 7);
+        assert_eq!(verify_worker_count(12, FILES_PER_VERIFY_WORKER * 40), 12);
+    }
+
+    #[test]
+    fn worker_count_never_exceeds_the_thread_budget() {
+        assert_eq!(verify_worker_count(1, 100_000), 1);
+        assert_eq!(verify_worker_count(0, 100_000), 1);
+        assert_eq!(verify_worker_count(4, 100_000), 4);
+    }
 }
