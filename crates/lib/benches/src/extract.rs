@@ -105,7 +105,8 @@ fn bench_scan_ascending(c: &mut Criterion) {
     let mut group = c.benchmark_group("scan/ascending");
 
     for &size in SMALL {
-        let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        // printable rotation so the binary sniff accepts the input
+        let data: Vec<u8> = (0..size).map(|i| 32 + (i % 95) as u8).collect();
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, c| {
             b.iter(|| count_grams(&table, c));
