@@ -4,6 +4,52 @@ use sngram_types::{ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanFlags, Sc
 
 const EDGE: usize = EdgeBytes::CAPACITY;
 
+// per-byte class flag bits indexed by byte value
+static CLASS_FLAGS: [u64; 256] = class_flags_table();
+
+const fn class_flags_table() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    let mut byte = 0u8;
+    loop {
+        table[byte as usize] = byte_class_flags(byte);
+        if byte == u8::MAX {
+            break;
+        }
+        byte += 1;
+    }
+    table
+}
+
+const fn byte_class_flags(byte: u8) -> u64 {
+    let mut flags = ScanFlags(0);
+    if byte.is_ascii_uppercase() {
+        flags = flags.with_ascii_upper();
+    }
+    if byte.is_ascii_lowercase() {
+        flags = flags.with_ascii_lower();
+    }
+    if byte.is_ascii_digit() {
+        flags = flags.with_ascii_digit();
+    }
+    if byte.is_ascii_whitespace() {
+        flags = flags.with_ascii_space();
+    }
+    if byte.is_ascii_alphanumeric() || byte == b'_' {
+        flags = flags.with_ascii_word();
+    }
+    if !byte.is_ascii() {
+        flags = flags.with_non_ascii();
+    }
+    flags.bits()
+}
+
+fn next_newline(chunk: &[u8], from: usize) -> Option<usize> {
+    chunk[from..]
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .map(|offset| from + offset)
+}
+
 #[derive(Debug)]
 pub struct SummaryBuilder {
     byte_len: u64,
@@ -55,8 +101,13 @@ impl Default for SummaryBuilder {
 
 impl SummaryBuilder {
     pub fn observe(&mut self, chunk: &[u8]) {
-        for &byte in chunk {
-            self.observe_byte(byte);
+        self.record_prefix(chunk);
+        self.record_counts_and_classes(chunk);
+        self.record_lines(chunk);
+        self.record_suffix(chunk);
+        self.byte_len = self.byte_len.saturating_add(chunk.len() as u64);
+        if let Some(&last) = chunk.last() {
+            self.last = Some(last);
         }
     }
 
@@ -121,90 +172,83 @@ impl SummaryBuilder {
         bytes
     }
 
-    fn observe_byte(&mut self, byte: u8) {
-        self.record_prefix(byte);
-        self.record_suffix(byte);
-        self.record_flags(byte);
-        self.byte_counts.observe(byte);
-
-        if self.at_line_start && byte != b'\n' {
-            self.line_start_bytes.insert(byte);
+    fn record_prefix(&mut self, chunk: &[u8]) {
+        let room = EDGE - self.prefix.len();
+        for &byte in chunk.iter().take(room) {
+            self.prefix.push(byte);
         }
-        if byte == b'\n' {
-            self.finish_line();
-        } else {
-            self.current_line_len = self.current_line_len.saturating_add(1);
-            self.current_line_has_bytes = true;
+    }
+
+    fn record_counts_and_classes(&mut self, chunk: &[u8]) {
+        let mut class = 0u64;
+        for &byte in chunk {
+            let slot = &mut self.byte_counts.counts[usize::from(byte)];
+            *slot = slot.saturating_add(1);
+            class |= CLASS_FLAGS[usize::from(byte)];
+        }
+        self.flags = self.flags.with_bits(class);
+    }
+
+    fn record_lines(&mut self, chunk: &[u8]) {
+        let mut from = 0usize;
+        while let Some(newline) = next_newline(chunk, from) {
+            self.open_line(&chunk[from..newline]);
+            let before = if newline == 0 {
+                self.last
+            } else {
+                Some(chunk[newline - 1])
+            };
+            self.flags = self.flags.with_lf();
+            if before == Some(b'\r') {
+                self.flags = self.flags.with_crlf();
+            }
+            self.close_line(before);
+            from = newline + 1;
+        }
+        self.open_line(&chunk[from..]);
+    }
+
+    fn open_line(&mut self, segment: &[u8]) {
+        let Some(&first) = segment.first() else {
+            return;
+        };
+        if self.at_line_start {
+            self.line_start_bytes.insert(first);
             self.at_line_start = false;
         }
-
-        self.byte_len = self.byte_len.saturating_add(1);
-        self.last = Some(byte);
+        let added = u32::try_from(segment.len()).unwrap_or(u32::MAX);
+        self.current_line_len = self.current_line_len.saturating_add(added);
+        self.current_line_has_bytes = true;
     }
 
-    const fn record_prefix(&mut self, byte: u8) {
-        self.prefix.push(byte);
-    }
-
-    fn record_suffix(&mut self, byte: u8) {
-        self.suffix[self.suffix_pos] = byte;
-        self.suffix_pos = (self.suffix_pos + 1) % EDGE;
-        self.suffix_len = self.suffix_len.saturating_add(1).min(EDGE);
-    }
-
-    fn record_flags(&mut self, byte: u8) {
-        self.record_line_flags(byte);
-        self.record_ascii_class_flags(byte);
-        self.record_non_ascii_flag(byte);
-    }
-
-    fn record_line_flags(&mut self, byte: u8) {
-        if self.last == Some(b'\r') && byte == b'\n' {
-            self.flags = self.flags.with_crlf();
-        }
-        if byte == b'\n' {
-            self.flags = self.flags.with_lf();
-        }
-    }
-
-    const fn record_ascii_class_flags(&mut self, byte: u8) {
-        if byte.is_ascii_uppercase() {
-            self.flags = self.flags.with_ascii_upper();
-        }
-        if byte.is_ascii_lowercase() {
-            self.flags = self.flags.with_ascii_lower();
-        }
-        if byte.is_ascii_digit() {
-            self.flags = self.flags.with_ascii_digit();
-        }
-        if byte.is_ascii_whitespace() {
-            self.flags = self.flags.with_ascii_space();
-        }
-        if byte.is_ascii_alphanumeric() || byte == b'_' {
-            self.flags = self.flags.with_ascii_word();
-        }
-    }
-
-    const fn record_non_ascii_flag(&mut self, byte: u8) {
-        if !byte.is_ascii() {
-            self.flags = self.flags.with_non_ascii();
-        }
-    }
-
-    fn finish_line(&mut self) {
+    fn close_line(&mut self, before: Option<u8>) {
         self.line_breaks = self.line_breaks.saturating_add(1);
         self.longest_line_len = self.longest_line_len.max(self.current_line_len);
         if self.current_line_len == 0 {
             self.empty_line_count = self.empty_line_count.saturating_add(1);
         }
         if self.current_line_has_bytes
-            && let Some(end) = self.last
+            && let Some(end) = before
         {
             self.line_end_bytes.insert(end);
         }
         self.current_line_len = 0;
         self.current_line_has_bytes = false;
         self.at_line_start = true;
+    }
+
+    fn record_suffix(&mut self, chunk: &[u8]) {
+        if chunk.len() >= EDGE {
+            self.suffix.copy_from_slice(&chunk[chunk.len() - EDGE..]);
+            self.suffix_pos = 0;
+            self.suffix_len = EDGE;
+            return;
+        }
+        for &byte in chunk {
+            self.suffix[self.suffix_pos] = byte;
+            self.suffix_pos = (self.suffix_pos + 1) % EDGE;
+        }
+        self.suffix_len = (self.suffix_len + chunk.len()).min(EDGE);
     }
 
     fn suffix(&self) -> EdgeBytes {
@@ -259,6 +303,28 @@ mod tests {
     }
 
     #[test]
+    fn suffix_wraps_across_small_chunks() {
+        let mut facts = SummaryBuilder::default();
+        for chunk in b"0123456789abcdefghijklmnop".chunks(3) {
+            facts.observe(chunk);
+        }
+        let summary = facts.finish(0);
+
+        assert_eq!(summary.suffix.as_slice(), b"abcdefghijklmnop");
+    }
+
+    #[test]
+    fn crlf_split_across_chunks_is_detected() {
+        let mut facts = SummaryBuilder::default();
+        facts.observe(b"line\r");
+        facts.observe(b"\nnext");
+        let summary = facts.finish(0);
+
+        assert!(summary.flags.has_crlf());
+        assert!(summary.line_end_bytes.contains_any(byte_set(b'\r')));
+    }
+
+    #[test]
     fn eof_line_records_its_last_byte() {
         let mut facts = SummaryBuilder::default();
         facts.observe(b"a\nbc");
@@ -278,6 +344,19 @@ mod tests {
         assert_eq!(summary.line_count, 2);
         assert_eq!(summary.empty_line_count, 2);
         assert!(summary.line_end_bytes.is_empty());
+    }
+
+    #[test]
+    fn line_spanning_chunks_counts_full_length() {
+        let mut facts = SummaryBuilder::default();
+        facts.observe(b"abc");
+        facts.observe(b"defg\nx");
+        let summary = facts.finish(0);
+
+        assert_eq!(summary.longest_line_len, 7);
+        assert!(summary.line_start_bytes.contains_any(byte_set(b'a')));
+        assert!(summary.line_start_bytes.contains_any(byte_set(b'x')));
+        assert!(summary.line_end_bytes.contains_any(byte_set(b'g')));
     }
 
     fn byte_set(byte: u8) -> ByteSet256 {

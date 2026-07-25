@@ -9,8 +9,6 @@ impl ScanSettings {
     pub const STACK_CAP: usize = 128;
     pub const PREFIX_RING: usize = 128;
     pub const PREFIX_RING_MASK: usize = Self::PREFIX_RING - 1;
-    pub const WINDOW_CAP: usize = 1024;
-    pub const WINDOW_KEEP: usize = 128;
     pub const DOCUMENT_SENTINEL: u8 = b'\n';
     pub const DOCUMENT_SENTINELS: bool = true;
     pub const CASE_FOLDED_SUPPLEMENTS: bool = true;

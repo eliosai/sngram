@@ -1,46 +1,21 @@
 //! Monotonic-stack scanner over one gram key space.
 
-use std::ops::Range;
-
 use sngram_types::{ByteRange, GramKey, HashKey, ScannedGram, WeightTable};
 
 use super::settings::ScanSettings;
 
 /// Byte mapping applied to content before weighing and hashing.
 #[derive(Debug, Clone, Copy)]
-pub enum Transform {
+enum Transform {
     Raw,
     Folded,
 }
 
-/// Mapping from window offsets to public content spans.
+/// Mapping from stream offsets to public content spans.
 #[derive(Debug, Clone, Copy)]
 pub enum SpanMap {
     Document,
     Literal,
-}
-
-/// Which hull grams the space emits.
-#[derive(Debug, Clone, Copy)]
-pub enum EmitPolicy {
-    All,
-    ChangedOnly,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct FilledRange {
-    start: usize,
-    end: usize,
-}
-
-impl FilledRange {
-    const fn is_empty(self) -> bool {
-        self.start == self.end
-    }
-
-    fn scan_indices(self) -> core::ops::Range<usize> {
-        self.start.max(1)..self.end
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,69 +36,70 @@ impl StackEntry {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct WeightedEdge {
-    start: usize,
-    end: usize,
-    weight: u32,
-    prefix_after_end: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
 struct ScanCursor {
-    prefix_hash: u64,
+    pos: usize,
+    prev: u8,
+    prefix: u64,
     content_bytes: usize,
     top: StackEntry,
 }
 
-impl ScanCursor {
-    const fn new(prefix_hash: u64, content_bytes: usize, top: StackEntry) -> Self {
-        Self {
-            prefix_hash,
-            content_bytes,
-            top,
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+struct Edge {
+    end: usize,
+    prefix: u64,
+    content_bytes: usize,
 }
 
 /// Streaming hull scanner for one key space and transform.
 pub struct SpaceScanner<'t> {
     matrix: &'t [u32; 65_536],
-    window: [u8; ScanSettings::WINDOW_CAP],
-    changed: [bool; ScanSettings::WINDOW_CAP],
-    window_len: usize,
-    base: usize,
     stack: [StackEntry; ScanSettings::STACK_CAP],
     stack_len: usize,
-    prefix_hash: u64,
     ring: [u64; ScanSettings::PREFIX_RING],
+    prefix_hash: u64,
+    pos: usize,
+    prev: u8,
+    last_changed_end: usize,
     key: HashKey,
     transform: Transform,
-    span_map: SpanMap,
-    emit_policy: EmitPolicy,
+    span_sub: usize,
 }
 
 impl<'t> SpaceScanner<'t> {
-    pub fn new(
-        table: &'t WeightTable,
-        key: HashKey,
-        transform: Transform,
-        span_map: SpanMap,
-        emit_policy: EmitPolicy,
-    ) -> Self {
+    pub fn new(table: &'t WeightTable, key: HashKey, span_map: SpanMap) -> Self {
         Self {
             matrix: table.matrix(),
-            window: [0; ScanSettings::WINDOW_CAP],
-            changed: [false; ScanSettings::WINDOW_CAP],
-            window_len: 0,
-            base: 0,
             stack: [StackEntry::ZERO; ScanSettings::STACK_CAP],
             stack_len: 0,
-            prefix_hash: 0,
             ring: [0; ScanSettings::PREFIX_RING],
+            prefix_hash: 0,
+            pos: 0,
+            prev: 0,
+            last_changed_end: usize::MAX,
             key,
-            transform,
-            span_map,
-            emit_policy,
+            transform: Transform::Raw,
+            span_sub: match span_map {
+                SpanMap::Document => 1,
+                SpanMap::Literal => 0,
+            },
+        }
+    }
+
+    /// The changed-only folded twin of this space, inheriting the rolling state
+    pub const fn folded_twin(&self) -> Self {
+        Self {
+            matrix: self.matrix,
+            stack: self.stack,
+            stack_len: self.stack_len,
+            ring: self.ring,
+            prefix_hash: self.prefix_hash,
+            pos: self.pos,
+            prev: self.prev,
+            last_changed_end: 0,
+            key: self.key.folded(),
+            transform: Transform::Folded,
+            span_sub: self.span_sub,
         }
     }
 
@@ -131,233 +107,126 @@ impl<'t> SpaceScanner<'t> {
     where
         F: FnMut(ScannedGram),
     {
-        let mut cursor = ScanCursor::new(self.prefix_hash, content_bytes, self.stack_top());
+        match self.transform {
+            Transform::Raw => self.run_chunk(chunk, content_bytes, emit, |byte| byte),
+            Transform::Folded => {
+                self.run_chunk(chunk, content_bytes, emit, |byte| byte.to_ascii_lowercase());
+            },
+        }
+    }
+
+    fn run_chunk<F, M>(&mut self, chunk: &[u8], content_bytes: usize, emit: &mut F, map: M)
+    where
+        F: FnMut(ScannedGram),
+        M: Fn(u8) -> u8,
+    {
         let mut rest = chunk;
-        while !rest.is_empty() {
-            self.compact_if_full();
-            let range = self.append_window_chunk(&mut rest);
-            self.seed_first_prefix(range, &mut cursor);
-            self.scan_filled_range(range, &mut cursor, emit);
+        if self.pos == 0
+            && let Some((&first, tail)) = rest.split_first()
+        {
+            self.seed_first_byte(first, map(first));
+            rest = tail;
         }
-        self.prefix_hash = cursor.prefix_hash;
+        let mut cursor = ScanCursor {
+            pos: self.pos,
+            prev: self.prev,
+            prefix: self.prefix_hash,
+            content_bytes,
+            top: self.stack[self.stack_len.saturating_sub(1)],
+        };
+        for &raw in rest {
+            let byte = map(raw);
+            self.step_byte(&mut cursor, byte, byte != raw, emit);
+        }
+        self.pos = cursor.pos;
+        self.prev = cursor.prev;
+        self.prefix_hash = cursor.prefix;
     }
 
-    fn compact_if_full(&mut self) {
-        if self.window_len == ScanSettings::WINDOW_CAP {
-            self.compact();
+    fn seed_first_byte(&mut self, raw: u8, byte: u8) {
+        self.prefix_hash = u64::from(byte);
+        self.ring[0] = self.prefix_hash;
+        if byte != raw {
+            self.last_changed_end = 1;
         }
+        self.prev = byte;
+        self.pos = 1;
     }
 
-    fn append_window_chunk(&mut self, rest: &mut &[u8]) -> FilledRange {
-        let take = rest.len().min(ScanSettings::WINDOW_CAP - self.window_len);
-        let start = self.window_len;
-        self.copy_chunk(start, &rest[..take]);
-        self.window_len += take;
-        *rest = &rest[take..];
-        FilledRange {
-            start,
-            end: start + take,
-        }
-    }
-
-    fn seed_first_prefix(&mut self, range: FilledRange, cursor: &mut ScanCursor) {
-        if range.start != 0 || range.is_empty() {
-            return;
-        }
-        cursor.prefix_hash = u64::from(self.window[0]);
-        self.ring[0] = cursor.prefix_hash;
-    }
-
-    fn scan_filled_range<F>(&mut self, range: FilledRange, cursor: &mut ScanCursor, emit: &mut F)
+    #[inline]
+    fn step_byte<F>(&mut self, cursor: &mut ScanCursor, byte: u8, changed: bool, emit: &mut F)
     where
         F: FnMut(ScannedGram),
     {
-        for window_idx in range.scan_indices() {
-            let edge = self.weighted_edge(window_idx, cursor.prefix_hash);
-            cursor.prefix_hash = edge.prefix_after_end;
-            self.close_stack_for(edge, cursor.content_bytes, emit, &mut cursor.top);
-            self.push_stack(edge);
-            cursor.top = StackEntry::new(edge.start, edge.weight);
+        let pos = cursor.pos;
+        let weight = self.matrix[(usize::from(cursor.prev) << 8) | usize::from(byte)];
+        let prefix = self.key.advance_prefix_hash(cursor.prefix, byte);
+        cursor.prefix = prefix;
+        self.ring[pos & ScanSettings::PREFIX_RING_MASK] = prefix;
+        if changed {
+            self.last_changed_end = pos + 1;
         }
+        let edge = Edge {
+            end: pos + 1,
+            prefix,
+            content_bytes: cursor.content_bytes,
+        };
+        self.close_stack(cursor, weight, edge, emit);
+        self.push_entry(StackEntry::new(pos - 1, weight));
+        cursor.top = StackEntry::new(pos - 1, weight);
+        cursor.prev = byte;
+        cursor.pos = pos + 1;
     }
 
-    fn weighted_edge(&mut self, window_idx: usize, prefix_before_end: u64) -> WeightedEdge {
-        let prefix_after_end = self
-            .key
-            .advance_prefix_hash(prefix_before_end, self.window[window_idx]);
-        self.ring[(self.base + window_idx) & ScanSettings::PREFIX_RING_MASK] = prefix_after_end;
-        WeightedEdge {
-            start: self.base + window_idx - 1,
-            end: self.base + window_idx + 1,
-            weight: self.weight_at(window_idx),
-            prefix_after_end,
-        }
-    }
-
-    fn weight_at(&self, window_idx: usize) -> u32 {
-        self.matrix
-            [(usize::from(self.window[window_idx - 1]) << 8) | usize::from(self.window[window_idx])]
-    }
-
-    fn close_stack_for<F>(
-        &mut self,
-        edge: WeightedEdge,
-        content_bytes: usize,
-        emit: &mut F,
-        top: &mut StackEntry,
-    ) where
+    #[inline]
+    fn close_stack<F>(&mut self, cursor: &mut ScanCursor, weight: u32, edge: Edge, emit: &mut F)
+    where
         F: FnMut(ScannedGram),
     {
         while self.stack_len > 0 {
-            self.emit_stack_entry(*top, edge, content_bytes, emit);
-            if top.weight >= edge.weight {
-                self.pop_equal_weight(top.weight, edge.weight);
+            let top = cursor.top;
+            self.emit_hull(top.start, edge, emit);
+            if top.weight >= weight {
+                self.stack_len -= usize::from(top.weight == weight);
                 return;
             }
             self.stack_len -= 1;
-            let Some(next) = self.stack_top_entry() else {
+            let Some(next) = self.stack_len.checked_sub(1) else {
                 return;
             };
-            *top = next;
+            cursor.top = self.stack[next];
         }
     }
 
-    fn emit_stack_entry<F>(
-        &self,
-        entry: StackEntry,
-        edge: WeightedEdge,
-        content_bytes: usize,
-        emit: &mut F,
-    ) where
+    // hull entries start at least two bytes back, so len >= 3 always holds
+    #[inline]
+    fn emit_hull<F>(&self, start: usize, edge: Edge, emit: &mut F)
+    where
         F: FnMut(ScannedGram),
     {
-        self.emit_window(
-            edge.prefix_after_end,
-            entry.start..edge.end,
-            content_bytes,
-            emit,
-        );
-    }
-
-    const fn pop_equal_weight(&mut self, top_weight: u32, edge_weight: u32) {
-        if top_weight == edge_weight {
-            self.stack_len -= 1;
+        let len = edge.end - start;
+        if len > ScanSettings::MAX_GRAM_LEN || self.last_changed_end <= start {
+            return;
         }
+        // ring slot 127 stays zero while a start-0 gram can still pass the length filter
+        let before = self.ring[start.wrapping_sub(1) & ScanSettings::PREFIX_RING_MASK];
+        emit(ScannedGram {
+            key: GramKey(self.key.hash_from_prefixes(edge.prefix, before, len)),
+            span: ByteRange::new(
+                start.saturating_sub(self.span_sub).min(edge.content_bytes),
+                edge.end
+                    .saturating_sub(self.span_sub)
+                    .min(edge.content_bytes),
+            ),
+        });
     }
 
-    fn push_stack(&mut self, edge: WeightedEdge) {
-        self.make_stack_room();
-        self.stack[self.stack_len] = StackEntry::new(edge.start, edge.weight);
-        self.stack_len += 1;
-    }
-
-    fn make_stack_room(&mut self) {
+    fn push_entry(&mut self, entry: StackEntry) {
         if self.stack_len == ScanSettings::STACK_CAP {
             self.stack.copy_within(1.., 0);
             self.stack_len -= 1;
         }
-    }
-
-    fn stack_top(&self) -> StackEntry {
-        self.stack_top_entry()
-            .unwrap_or_else(|| StackEntry::new(0, 0))
-    }
-
-    fn stack_top_entry(&self) -> Option<StackEntry> {
-        self.stack.get(self.stack_len.checked_sub(1)?).copied()
-    }
-
-    fn copy_chunk(&mut self, filled: usize, chunk: &[u8]) {
-        match self.transform {
-            Transform::Raw => {
-                self.window[filled..filled + chunk.len()].copy_from_slice(chunk);
-                self.changed[filled..filled + chunk.len()].fill(false);
-            },
-            Transform::Folded => {
-                for ((dst, changed), src) in self.window[filled..filled + chunk.len()]
-                    .iter_mut()
-                    .zip(&mut self.changed[filled..filled + chunk.len()])
-                    .zip(chunk)
-                {
-                    let folded = src.to_ascii_lowercase();
-                    *dst = folded;
-                    *changed = folded != *src;
-                }
-            },
-        }
-    }
-
-    #[inline]
-    fn emit_window<F>(
-        &self,
-        prefix_after_end: u64,
-        span: Range<usize>,
-        content_bytes: usize,
-        emit: &mut F,
-    ) where
-        F: FnMut(ScannedGram),
-    {
-        let start = span.start;
-        let end = span.end;
-        let len = end - start;
-        if !self.should_emit(start, end, len) {
-            return;
-        }
-
-        let prefix_before_start = self.prefix_before(start);
-        let span = self.map_span(start, end, content_bytes);
-        emit(ScannedGram {
-            key: self.gram_key(prefix_after_end, prefix_before_start, len),
-            span,
-        });
-    }
-
-    const fn gram_key(
-        &self,
-        prefix_after_end: u64,
-        prefix_before_start: u64,
-        len: usize,
-    ) -> GramKey {
-        GramKey(
-            self.key
-                .hash_from_prefixes(prefix_after_end, prefix_before_start, len),
-        )
-    }
-
-    fn should_emit(&self, start: usize, end: usize, len: usize) -> bool {
-        ScanSettings::emits_len(len) && self.emit_policy_allows(start, end)
-    }
-
-    fn emit_policy_allows(&self, start: usize, end: usize) -> bool {
-        !matches!(self.emit_policy, EmitPolicy::ChangedOnly)
-            || self.changed[start - self.base..end - self.base]
-                .iter()
-                .any(|&changed| changed)
-    }
-
-    const fn prefix_before(&self, start: usize) -> u64 {
-        if start == 0 {
-            0
-        } else {
-            self.ring[(start - 1) & ScanSettings::PREFIX_RING_MASK]
-        }
-    }
-
-    fn map_span(&self, start: usize, end: usize, content_bytes: usize) -> ByteRange {
-        match self.span_map {
-            SpanMap::Document => ByteRange::new(
-                start.saturating_sub(1).min(content_bytes),
-                end.saturating_sub(1).min(content_bytes),
-            ),
-            SpanMap::Literal => ByteRange::new(start.min(content_bytes), end.min(content_bytes)),
-        }
-    }
-
-    fn compact(&mut self) {
-        const DROP: usize = ScanSettings::WINDOW_CAP - ScanSettings::WINDOW_KEEP;
-        self.window.copy_within(DROP.., 0);
-        self.changed.copy_within(DROP.., 0);
-        self.window_len = ScanSettings::WINDOW_KEEP;
-        self.base += DROP;
+        self.stack[self.stack_len] = entry;
+        self.stack_len += 1;
     }
 }
