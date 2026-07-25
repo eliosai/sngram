@@ -4,13 +4,12 @@ use sngram_types::{HashKey, ScanEvent, ScannedGram, WeightTable};
 
 use super::facts::SummaryBuilder;
 use super::settings::ScanSettings;
-use super::space::{EmitPolicy, SpaceScanner, SpanMap, Transform};
+use super::space::{SpaceScanner, SpanMap};
 
 /// Whole-document scanner emitting raw and folded-supplement gram keys.
 pub struct DocumentScanner<'t> {
     primary: SpaceScanner<'t>,
-    folded: SpaceScanner<'t>,
-    folded_live: bool,
+    folded: Option<SpaceScanner<'t>>,
     summary: SummaryBuilder,
     content_bytes: usize,
     gram_count: u32,
@@ -19,21 +18,8 @@ pub struct DocumentScanner<'t> {
 impl<'t> DocumentScanner<'t> {
     pub fn new(table: &'t WeightTable) -> Self {
         Self {
-            primary: SpaceScanner::new(
-                table,
-                HashKey::UNKEYED,
-                Transform::Raw,
-                SpanMap::Document,
-                EmitPolicy::All,
-            ),
-            folded: SpaceScanner::new(
-                table,
-                HashKey::UNKEYED.folded(),
-                Transform::Folded,
-                SpanMap::Document,
-                EmitPolicy::ChangedOnly,
-            ),
-            folded_live: false,
+            primary: SpaceScanner::new(table, HashKey::UNKEYED, SpanMap::Document),
+            folded: None,
             summary: SummaryBuilder::default(),
             content_bytes: 0,
             gram_count: 0,
@@ -75,7 +61,7 @@ impl<'t> DocumentScanner<'t> {
         chunk: &[u8],
         emit: &mut impl for<'event> FnMut(ScanEvent<'event>),
     ) {
-        if self.folded_live {
+        if self.folded.is_some() {
             self.push_both(chunk, emit);
             return;
         }
@@ -84,8 +70,7 @@ impl<'t> DocumentScanner<'t> {
             return;
         };
         self.push_primary(&chunk[..at], emit);
-        self.folded.mirror_from(&self.primary);
-        self.folded_live = true;
+        self.folded = Some(self.primary.folded_twin());
         self.push_both(&chunk[at..], emit);
     }
 
@@ -97,7 +82,10 @@ impl<'t> DocumentScanner<'t> {
             emit(ScanEvent::Gram(gram));
         });
 
-        self.folded.push_bytes(chunk, content_bytes, &mut |gram| {
+        let Some(folded) = self.folded.as_mut() else {
+            return;
+        };
+        folded.push_bytes(chunk, content_bytes, &mut |gram| {
             *gram_count = gram_count.saturating_add(1);
             emit(ScanEvent::Gram(gram));
         });
@@ -119,13 +107,7 @@ fn first_upper_index(chunk: &[u8]) -> Option<usize> {
 
 /// Scan one literal alone, emitting its raw grams with literal-relative spans.
 pub fn scan_literal(table: &WeightTable, literal: &[u8], mut emit: impl FnMut(ScannedGram)) {
-    let mut scanner = SpaceScanner::new(
-        table,
-        HashKey::UNKEYED,
-        Transform::Raw,
-        SpanMap::Literal,
-        EmitPolicy::All,
-    );
+    let mut scanner = SpaceScanner::new(table, HashKey::UNKEYED, SpanMap::Literal);
     scanner.push_bytes(literal, literal.len(), &mut emit);
 }
 

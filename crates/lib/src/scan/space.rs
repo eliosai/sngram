@@ -6,7 +6,7 @@ use super::settings::ScanSettings;
 
 /// Byte mapping applied to content before weighing and hashing.
 #[derive(Debug, Clone, Copy)]
-pub enum Transform {
+enum Transform {
     Raw,
     Folded,
 }
@@ -16,13 +16,6 @@ pub enum Transform {
 pub enum SpanMap {
     Document,
     Literal,
-}
-
-/// Which hull grams the space emits.
-#[derive(Debug, Clone, Copy)]
-pub enum EmitPolicy {
-    All,
-    ChangedOnly,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,13 +67,7 @@ pub struct SpaceScanner<'t> {
 }
 
 impl<'t> SpaceScanner<'t> {
-    pub fn new(
-        table: &'t WeightTable,
-        key: HashKey,
-        transform: Transform,
-        span_map: SpanMap,
-        emit_policy: EmitPolicy,
-    ) -> Self {
+    pub fn new(table: &'t WeightTable, key: HashKey, span_map: SpanMap) -> Self {
         Self {
             matrix: table.matrix(),
             stack: [StackEntry::ZERO; ScanSettings::STACK_CAP],
@@ -89,12 +76,9 @@ impl<'t> SpaceScanner<'t> {
             prefix_hash: 0,
             pos: 0,
             prev: 0,
-            last_changed_end: match emit_policy {
-                EmitPolicy::All => usize::MAX,
-                EmitPolicy::ChangedOnly => 0,
-            },
+            last_changed_end: usize::MAX,
             key,
-            transform,
+            transform: Transform::Raw,
             span_sub: match span_map {
                 SpanMap::Document => 1,
                 SpanMap::Literal => 0,
@@ -102,14 +86,21 @@ impl<'t> SpaceScanner<'t> {
         }
     }
 
-    /// Copy the rolling scan state from a space that saw identical bytes
-    pub const fn mirror_from(&mut self, source: &Self) {
-        self.stack = source.stack;
-        self.stack_len = source.stack_len;
-        self.ring = source.ring;
-        self.prefix_hash = source.prefix_hash;
-        self.pos = source.pos;
-        self.prev = source.prev;
+    /// The changed-only folded twin of this space, inheriting the rolling state
+    pub const fn folded_twin(&self) -> Self {
+        Self {
+            matrix: self.matrix,
+            stack: self.stack,
+            stack_len: self.stack_len,
+            ring: self.ring,
+            prefix_hash: self.prefix_hash,
+            pos: self.pos,
+            prev: self.prev,
+            last_changed_end: 0,
+            key: self.key.folded(),
+            transform: Transform::Folded,
+            span_sub: self.span_sub,
+        }
     }
 
     pub fn push_bytes<F>(&mut self, chunk: &[u8], content_bytes: usize, emit: &mut F)
