@@ -10,7 +10,9 @@ use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use sngram_types::{ScanError, ScanEvent, ScanSummary, WeightTable};
 
-use super::executor::{BLOCK_BITS, WORD_BOTH_BIT, WORD_END_BIT, WORD_START_BIT};
+use super::executor::{
+    BLOCK_BITS, LINE_END_BIT, LINE_START_BIT, WORD_BOTH_BIT, WORD_END_BIT, WORD_START_BIT,
+};
 
 use super::{
     manifest::CurrentFile,
@@ -23,7 +25,7 @@ pub struct IndexedDocument {
     pub path_hash: u64,
     pub forced_candidate: bool,
     pub held: Option<HeldDocument>,
-    pub hashes: Vec<(u64, u8)>,
+    pub hashes: Vec<(u64, u16)>,
     pub summary: SummaryRecord,
 }
 
@@ -129,7 +131,7 @@ pub fn scan(
 fn scan_bytes(
     table: &WeightTable,
     bytes: &[u8],
-) -> anyhow::Result<Option<(Vec<(u64, u8)>, ScanSummary)>> {
+) -> anyhow::Result<Option<(Vec<(u64, u16)>, ScanSummary)>> {
     let blocks = BlockMap::new(bytes);
     let mut hashes = Vec::with_capacity(bytes.len().min(MAX_GRAM_PREALLOC));
     let mut summary = None;
@@ -147,7 +149,8 @@ fn scan_bytes(
     Ok(Some((hashes, summary)))
 }
 
-/// Maps content spans to five hashed line-bucket bits plus three word-edge bits
+/// Maps content spans to five hashed line-bucket bits plus the line and
+/// word edge bits
 struct BlockMap {
     newlines: Vec<usize>,
     cursor: std::cell::Cell<LineCursor>,
@@ -173,10 +176,10 @@ impl BlockMap {
         }
     }
 
-    fn mask(&self, bytes: &[u8], span: &sngram_types::ByteRange) -> u8 {
+    fn mask(&self, bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
         let first = self.line_of(span.start);
         let last = self.line_of(span.end.saturating_sub(1).max(span.start));
-        let mut mask = 0u8;
+        let mut mask = 0u16;
         if last - first >= BUCKET_COUNT {
             mask = BLOCK_BITS;
         } else {
@@ -184,7 +187,7 @@ impl BlockMap {
                 mask |= 1 << bucket_of(line);
             }
         }
-        mask | word_edges(bytes, span)
+        mask | word_edges(bytes, span) | line_edges(bytes, span)
     }
 
     /// Line index of an offset, scanning forward from the previous query
@@ -207,34 +210,50 @@ impl BlockMap {
 }
 
 /// Hash a line index into a bucket so collisions stay file-size independent
-fn bucket_of(line: usize) -> u8 {
+fn bucket_of(line: usize) -> u32 {
     let mixed = (line as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
-    (mixed % BUCKET_COUNT as u64) as u8
+    (mixed % BUCKET_COUNT as u64) as u32
 }
 
 /// Word-edge bits for one occurrence: set when a non-word byte or the text
 /// edge borders the span
-fn word_edges(bytes: &[u8], span: &sngram_types::ByteRange) -> u8 {
+fn word_edges(bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
     let before = span
         .start
         .checked_sub(1)
         .and_then(|at| bytes.get(at))
         .is_none_or(|&byte| !is_word_byte(byte));
     let after = bytes.get(span.end).is_none_or(|&byte| !is_word_byte(byte));
-    u8::from(before) * WORD_START_BIT
-        | u8::from(after) * WORD_END_BIT
-        | u8::from(before && after) * WORD_BOTH_BIT
+    u16::from(before) * WORD_START_BIT
+        | u16::from(after) * WORD_END_BIT
+        | u16::from(before && after) * WORD_BOTH_BIT
 }
 
 const fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+/// Line-edge bits for one occurrence, counting `\r\n` so a CRLF verifier
+/// never loses a line its anchors still match
+fn line_edges(bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
+    let starts = span
+        .start
+        .checked_sub(1)
+        .and_then(|at| bytes.get(at))
+        .is_none_or(|&byte| byte == b'\n');
+    let ends = match bytes.get(span.end) {
+        None | Some(b'\n') => true,
+        Some(b'\r') => bytes.get(span.end + 1).is_none_or(|&byte| byte == b'\n'),
+        Some(_) => false,
+    };
+    u16::from(starts) * LINE_START_BIT | u16::from(ends) * LINE_END_BIT
+}
+
 fn document(
     ord: u32,
     path_hash: u64,
     forced_candidate: bool,
-    hashes: Vec<(u64, u8)>,
+    hashes: Vec<(u64, u16)>,
     status: SummaryStatus,
 ) -> IndexedDocument {
     IndexedDocument {
@@ -282,7 +301,8 @@ impl AsRef<[u8]> for FileBytes {
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCK_BITS, BlockMap, WORD_BOTH_BIT, WORD_END_BIT, WORD_START_BIT, bucket_of, word_edges,
+        BLOCK_BITS, BlockMap, LINE_END_BIT, LINE_START_BIT, WORD_BOTH_BIT, WORD_END_BIT,
+        WORD_START_BIT, bucket_of, line_edges, word_edges,
     };
     use sngram_types::ByteRange;
 
@@ -355,6 +375,25 @@ mod tests {
             word_edges(text, &ByteRange::new(13, 14)),
             WORD_START_BIT | WORD_END_BIT | WORD_BOTH_BIT
         );
+    }
+
+    #[test]
+    fn line_edges_reflect_terminators_and_text_edges() {
+        let both = LINE_START_BIT | LINE_END_BIT;
+        let lines = b"alpha\nbeta gamma\ndelta";
+        let cases: [(&[u8], usize, usize, u16); 7] = [
+            (lines, 0, 5, both),
+            (lines, 6, 10, LINE_START_BIT),
+            (lines, 11, 16, LINE_END_BIT),
+            (lines, 7, 9, 0),
+            (lines, 17, 22, both),
+            (b"value\r\nnext", 0, 5, both),
+            (b"a\rb", 0, 1, LINE_START_BIT),
+        ];
+        for (text, start, end, want) in cases {
+            let span = ByteRange::new(start, end);
+            assert_eq!(line_edges(text, &span), want, "{start}..{end}");
+        }
     }
 
     #[test]

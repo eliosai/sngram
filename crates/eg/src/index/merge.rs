@@ -17,8 +17,8 @@ use super::huffman::{CodeLengths, Encoder, HUFF_MIN_COUNT};
 use super::postings::{POSTINGS_MAGIC, SectionWriter, TABLE_MAGIC};
 use super::progress::BuildProgress;
 
-/// Run record layout: hash u32, ord u32, mask u8
-pub const RUN_PAIR_SIZE: usize = 9;
+/// Run record layout: hash u32, ord u32, mask u16
+pub const RUN_PAIR_SIZE: usize = 10;
 /// Delta-coded table records per skip-directory block
 pub const RECORDS_PER_BLOCK: usize = 256;
 /// Bytes in a per-block bitmap marking inline df=1 records
@@ -35,7 +35,7 @@ const PARTITION_SHIFT: u32 = 32 - PARTITION_COUNT.trailing_zeros();
 pub struct Pair {
     pub hash: u32,
     pub ord: u32,
-    pub mask: u8,
+    pub mask: u16,
 }
 
 impl Ord for Pair {
@@ -58,7 +58,7 @@ pub fn write_pair(writer: &mut BufWriter<File>, pair: Pair) -> anyhow::Result<()
     let mut bytes = [0u8; RUN_PAIR_SIZE];
     bytes[..4].copy_from_slice(&pair.hash.to_le_bytes());
     bytes[4..8].copy_from_slice(&pair.ord.to_le_bytes());
-    bytes[8] = pair.mask;
+    bytes[8..10].copy_from_slice(&pair.mask.to_le_bytes());
     writer.write_all(&bytes)?;
     Ok(())
 }
@@ -70,7 +70,7 @@ fn pair_at(bytes: &[u8], index: usize) -> Option<Pair> {
     Some(Pair {
         hash: u32::from_le_bytes(record[..4].try_into().expect("four bytes")),
         ord: u32::from_le_bytes(record[4..8].try_into().expect("four bytes")),
-        mask: record[8],
+        mask: u16::from_le_bytes(record[8..10].try_into().expect("two bytes")),
     })
 }
 
@@ -276,7 +276,7 @@ fn seed_heap(slices: &mut [RunSlice]) -> BinaryHeap<HeapItem> {
 #[derive(Default)]
 struct DocGroup {
     hash: Option<u32>,
-    docs: Vec<(u32, u8)>,
+    docs: Vec<(u32, u16)>,
 }
 
 impl DocGroup {
@@ -333,7 +333,7 @@ impl PartitionBuilder {
         }
     }
 
-    fn push(&mut self, hash: u32, docs: &[(u32, u8)], encoder: &Encoder) -> anyhow::Result<()> {
+    fn push(&mut self, hash: u32, docs: &[(u32, u16)], encoder: &Encoder) -> anyhow::Result<()> {
         let gap = if self.block_records == 0 {
             self.begin_block(hash)?;
             0
@@ -344,7 +344,7 @@ impl PartitionBuilder {
         if let [(ord, mask)] = docs {
             self.block_bitmap[self.block_records / 8] |= 1 << (self.block_records % 8);
             push_uvarint(&mut self.out.records, *ord);
-            self.out.records.push(*mask);
+            push_uvarint(&mut self.out.records, u32::from(*mask));
         } else {
             let count = u32::try_from(docs.len()).context("posting count does not fit in u32")?;
             let list = encode_posting_list(docs, encoder);
@@ -505,8 +505,8 @@ impl SectionTail {
 }
 
 /// Posting list layout: ascending ordinal gaps as uvarints, then the mask
-/// column - raw bytes for short lists, a Huffman bitstream otherwise
-pub fn encode_posting_list(docs: &[(u32, u8)], encoder: &Encoder) -> Vec<u8> {
+/// column - raw uvarints for short lists, a Huffman bitstream otherwise
+pub fn encode_posting_list(docs: &[(u32, u16)], encoder: &Encoder) -> Vec<u8> {
     let mut out = Vec::with_capacity(docs.len() * 3);
     let mut previous = 0u32;
     for (idx, &(doc, _)) in docs.iter().enumerate() {
@@ -514,7 +514,9 @@ pub fn encode_posting_list(docs: &[(u32, u8)], encoder: &Encoder) -> Vec<u8> {
         previous = doc;
     }
     if docs.len() < HUFF_MIN_COUNT {
-        out.extend(docs.iter().map(|&(_, mask)| mask));
+        for &(_, mask) in docs {
+            push_uvarint(&mut out, u32::from(mask));
+        }
     } else {
         encoder.encode_into(docs.iter().map(|&(_, mask)| mask), &mut out);
     }
@@ -569,7 +571,7 @@ mod tests {
             Pair {
                 hash: u32::MAX - 1,
                 ord: u32::MAX,
-                mask: 0xFF,
+                mask: 0x3FF,
             },
         ];
         let bytes = run_bytes(&pairs);

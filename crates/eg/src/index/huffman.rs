@@ -6,18 +6,21 @@ const MAX_CODE_LEN: u8 = 16;
 /// Lists shorter than this store raw mask bytes instead of a bitstream
 pub const HUFF_MIN_COUNT: usize = 16;
 
-/// Byte length of the code-length prologue at the head of postings.bin
-pub const CODE_TABLE_LEN: usize = 256;
+/// Distinct mask values: five line buckets plus five edge bits
+pub const MASK_SYMBOLS: usize = 1 << 10;
 
-/// Canonical code lengths for all 256 mask symbols
+/// Byte length of the code-length prologue at the head of postings.bin
+pub const CODE_TABLE_LEN: usize = MASK_SYMBOLS;
+
+/// Canonical code lengths for every mask symbol
 #[derive(Clone)]
 pub struct CodeLengths {
-    lengths: [u8; 256],
+    lengths: [u8; MASK_SYMBOLS],
 }
 
 impl CodeLengths {
     /// Build length-limited canonical code lengths from symbol frequencies
-    pub fn from_frequencies(freq: &[u64; 256]) -> Self {
+    pub fn from_frequencies(freq: &[u64; MASK_SYMBOLS]) -> Self {
         let mut scaled = *freq;
         if scaled.iter().filter(|&&count| count > 0).count() <= 1 {
             scaled[0] += 1;
@@ -35,23 +38,23 @@ impl CodeLengths {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        let lengths: [u8; 256] = bytes.get(..CODE_TABLE_LEN)?.try_into().ok()?;
+        let lengths: [u8; MASK_SYMBOLS] = bytes.get(..CODE_TABLE_LEN)?.try_into().ok()?;
         if lengths.iter().any(|&len| len > MAX_CODE_LEN) {
             return None;
         }
         kraft_complete(&lengths).then_some(Self { lengths })
     }
 
-    pub const fn as_bytes(&self) -> &[u8; 256] {
+    pub const fn as_bytes(&self) -> &[u8; MASK_SYMBOLS] {
         &self.lengths
     }
 
     /// MSB-first canonical codes ordered by (length, symbol)
-    fn codes(&self) -> [(u16, u8); 256] {
-        let mut codes = [(0u16, 0u8); 256];
+    fn codes(&self) -> [(u16, u8); MASK_SYMBOLS] {
+        let mut codes = [(0u16, 0u8); MASK_SYMBOLS];
         let mut code = 0u32;
         for len in 1..=MAX_CODE_LEN {
-            for symbol in 0..256 {
+            for symbol in 0..MASK_SYMBOLS {
                 if self.lengths[symbol] == len {
                     codes[symbol] = (code as u16, len);
                     code += 1;
@@ -64,7 +67,7 @@ impl CodeLengths {
 }
 
 /// True when the lengths form a complete prefix code
-fn kraft_complete(lengths: &[u8; 256]) -> bool {
+fn kraft_complete(lengths: &[u8; MASK_SYMBOLS]) -> bool {
     let total: u64 = lengths
         .iter()
         .filter(|&&len| len > 0)
@@ -75,8 +78,8 @@ fn kraft_complete(lengths: &[u8; 256]) -> bool {
 
 /// Plain Huffman code lengths by pairwise merging; zero-frequency symbols
 /// get zero length, single-symbol inputs get length one
-fn huffman_lengths(freq: &[u64; 256]) -> [u8; 256] {
-    let mut lengths = [0u8; 256];
+fn huffman_lengths(freq: &[u64; MASK_SYMBOLS]) -> [u8; MASK_SYMBOLS] {
+    let mut lengths = [0u8; MASK_SYMBOLS];
     let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u64, Vec<usize>)>> = freq
         .iter()
         .enumerate()
@@ -105,7 +108,7 @@ fn huffman_lengths(freq: &[u64; 256]) -> [u8; 256] {
 
 /// Symbol encoder from code lengths
 pub struct Encoder {
-    codes: [(u16, u8); 256],
+    codes: [(u16, u8); MASK_SYMBOLS],
 }
 
 impl Encoder {
@@ -116,7 +119,7 @@ impl Encoder {
     }
 
     /// Append the bitstream for `masks`, padded to a whole byte
-    pub fn encode_into(&self, masks: impl Iterator<Item = u8>, out: &mut Vec<u8>) {
+    pub fn encode_into(&self, masks: impl Iterator<Item = u16>, out: &mut Vec<u8>) {
         let mut acc = 0u32;
         let mut bits = 0u8;
         for mask in masks {
@@ -136,12 +139,12 @@ impl Encoder {
 
 /// One-lookup decoder: sixteen peeked bits map to a symbol and its length
 pub struct Decoder {
-    table: Vec<(u8, u8)>,
+    table: Vec<(u16, u8)>,
 }
 
 impl Decoder {
     pub fn new(lengths: &CodeLengths) -> Self {
-        let mut table = vec![(0u8, 0u8); 1 << MAX_CODE_LEN];
+        let mut table = vec![(0u16, 0u8); 1 << MAX_CODE_LEN];
         for (symbol, &(code, len)) in lengths.codes().iter().enumerate() {
             if len == 0 {
                 continue;
@@ -149,14 +152,14 @@ impl Decoder {
             let shift = MAX_CODE_LEN - len;
             let base = u32::from(code) << shift;
             for fill in 0..(1u32 << shift) {
-                table[(base | fill) as usize] = (symbol as u8, len);
+                table[(base | fill) as usize] = (symbol as u16, len);
             }
         }
         Self { table }
     }
 
     /// Decode `count` symbols from a byte-padded bitstream
-    pub fn decode(&self, bytes: &[u8], count: usize) -> Option<Vec<u8>> {
+    pub fn decode(&self, bytes: &[u8], count: usize) -> Option<Vec<u16>> {
         let mut out = Vec::with_capacity(count);
         let mut acc = 0u32;
         let mut bits = 0u8;
@@ -191,8 +194,8 @@ impl Decoder {
 mod tests {
     use super::*;
 
-    fn round_trip(masks: &[u8]) {
-        let mut freq = [0u64; 256];
+    fn round_trip(masks: &[u16]) {
+        let mut freq = [0u64; MASK_SYMBOLS];
         for &mask in masks {
             freq[usize::from(mask)] += 1;
         }
@@ -207,19 +210,19 @@ mod tests {
 
     #[test]
     fn skewed_masks_round_trip_below_byte_parity() {
-        let mut masks = vec![0b0010_0001u8; 5000];
-        masks.extend(std::iter::repeat_n(0xFF, 300));
-        masks.extend((0..=255u8).cycle().take(700));
+        let mut masks = vec![0b0010_0001u16; 5000];
+        masks.extend(std::iter::repeat_n(0x3FF, 300));
+        masks.extend((0..MASK_SYMBOLS as u16).cycle().take(700));
         round_trip(&masks);
 
-        let mut freq = [0u64; 256];
+        let mut freq = [0u64; MASK_SYMBOLS];
         for &mask in &masks {
             freq[usize::from(mask)] += 1;
         }
         let lengths = CodeLengths::from_frequencies(&freq);
         let mut bytes = Vec::new();
         Encoder::new(&lengths).encode_into(masks.iter().copied(), &mut bytes);
-        assert!(bytes.len() < masks.len());
+        assert!(bytes.len() < masks.len() * 2);
     }
 
     #[test]
@@ -229,13 +232,13 @@ mod tests {
 
     #[test]
     fn uniform_all_symbols_round_trip() {
-        let masks: Vec<u8> = (0..=255u8).collect();
+        let masks: Vec<u16> = (0..MASK_SYMBOLS as u16).collect();
         round_trip(&masks);
     }
 
     #[test]
     fn code_table_round_trips_through_bytes() {
-        let mut freq = [1u64; 256];
+        let mut freq = [1u64; MASK_SYMBOLS];
         freq[0x21] = 1_000_000;
         let lengths = CodeLengths::from_frequencies(&freq);
         let parsed = CodeLengths::from_bytes(lengths.as_bytes()).expect("valid table");
@@ -244,8 +247,8 @@ mod tests {
 
     #[test]
     fn invalid_code_tables_are_rejected() {
-        assert!(CodeLengths::from_bytes(&[0u8; 256]).is_none());
-        let mut over = [0u8; 256];
+        assert!(CodeLengths::from_bytes(&[0u8; MASK_SYMBOLS]).is_none());
+        let mut over = [0u8; MASK_SYMBOLS];
         over[0] = MAX_CODE_LEN + 1;
         assert!(CodeLengths::from_bytes(&over).is_none());
         assert!(CodeLengths::from_bytes(&[0u8; 100]).is_none());
@@ -253,7 +256,7 @@ mod tests {
 
     #[test]
     fn truncated_bitstreams_fail_closed() {
-        let mut freq = [0u64; 256];
+        let mut freq = [0u64; MASK_SYMBOLS];
         freq[7] = 10;
         freq[9] = 3;
         let lengths = CodeLengths::from_frequencies(&freq);
