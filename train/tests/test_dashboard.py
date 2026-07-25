@@ -18,6 +18,7 @@ def test_dashboard_shows_rates_progress_and_language_mix(tmp_path: Path):
 
     assert "decoded" in output
     assert "now" in output and "avg" in output
+    assert "wire now" in output
     assert "vendor" in output and "skipped" not in output
     assert "repos" in output
     assert "Rust" in output

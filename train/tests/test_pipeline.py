@@ -136,6 +136,34 @@ def test_no_resume_starts_a_fresh_run(tmp_path: Path):
     assert fresh.counter.bytes_processed == decoded_bytes(shards)
 
 
+def test_eta_with_a_limit_uses_the_average_decoded_rate(tmp_path: Path):
+    corpus, source = write_corpus(tmp_path / "corpus", [code_repos(2)])
+    trainer = build(tmp_path, corpus, source, limit=10_000)
+    trainer.meter.started_at = time.monotonic() - 10.0
+    trainer.state.decoded = 5_000
+    trainer.meter.sample(0)
+    trainer.meter.sample(5_000)
+
+    eta = trainer.eta_seconds()
+
+    assert eta is not None
+    assert 8.0 < eta < 12.0
+
+
+def test_eta_without_a_limit_uses_the_average_wire_rate(tmp_path: Path):
+    corpus, source = write_corpus(tmp_path / "corpus", [code_repos(2)])
+    trainer = build(tmp_path, corpus, source)
+    trainer.wire_meter.started_at = time.monotonic() - 10.0
+    trainer.state.shard_bytes = trainer.wire_target // 2
+    trainer.wire_meter.sample(0)
+    trainer.wire_meter.sample(trainer.state.shard_bytes)
+
+    eta = trainer.eta_seconds()
+
+    assert eta is not None
+    assert 8.0 < eta < 12.0
+
+
 def test_resumed_run_average_rate_starts_from_zero(tmp_path: Path):
     shards = [code_repos(8)]
     corpus, source = write_corpus(tmp_path / "corpus", shards)

@@ -296,15 +296,18 @@ class Trainer:
     def rate_avg(self) -> float:
         return self.meter.rate_avg(self.state.decoded)
 
-    def wire_rate(self) -> float:
+    def wire_rate_now(self) -> float:
         return self.wire_meter.rate_now(self.state.shard_bytes)
+
+    def wire_rate_avg(self) -> float:
+        return self.wire_meter.rate_avg(self.state.shard_bytes)
 
     def eta_seconds(self) -> float | None:
         if self.config.limit:
-            rate = self.rate_now()
+            rate = self.rate_avg()
             remaining = max(self.config.limit - self.state.decoded, 0)
         else:
-            rate = self.wire_rate()
+            rate = self.wire_rate_avg()
             remaining = max(self.wire_target - self.state.shard_bytes, 0)
         return remaining / rate if rate > 0 else None
 

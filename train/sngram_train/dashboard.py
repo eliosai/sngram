@@ -53,7 +53,11 @@ def _header(trainer: Trainer) -> Text:
     header.append(f" ({trainer.progress():.1%}){_eta(trainer)}")
     header.append(f"   now {fmt_rate(trainer.rate_now())}", style="cyan")
     header.append(f"   avg {fmt_rate(trainer.rate_avg())}")
-    header.append(f"   wire {fmt_rate(trainer.wire_rate())}", style="dim")
+    header.append(
+        f"   wire now {fmt_rate(trainer.wire_rate_now())}"
+        f" avg {fmt_rate(trainer.wire_rate_avg())}",
+        style="dim",
+    )
     header.append(f"\nrepos {trainer.state.repos:,}")
     header.append(f"   files {trainer.counter.files_processed:,}")
     header.append(f"   vendor {trainer.state.vendor_files:,}", style="dim")
