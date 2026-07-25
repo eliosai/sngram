@@ -2,10 +2,9 @@
 
 use std::{
     cell::RefCell,
-    cmp::Ordering,
-    collections::{BTreeSet, BinaryHeap, HashMap},
+    collections::{BTreeSet, HashMap},
     fs::{self, File},
-    io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     mem,
     path::{Path, PathBuf},
     sync::{
@@ -23,16 +22,19 @@ use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed, 
 
 use crate::flags::HiArgs;
 
-use super::huffman::{CODE_TABLE_LEN, CodeLengths, Decoder, Encoder, HUFF_MIN_COUNT};
+use super::huffman::{CODE_TABLE_LEN, CodeLengths, Decoder, HUFF_MIN_COUNT};
 use super::manifest::{
     CurrentFile, CurrentSnapshot, ManifestBackend, manifest_for, read_manifest, write_manifest,
     write_path_table,
+};
+use super::merge::{
+    BLOCK_BITMAP_SIZE, DIRECTORY_ENTRY_SIZE, Pair, RUN_PAIR_SIZE, run_path, write_pair,
 };
 use super::progress::{BuildPhase, BuildProgress};
 use super::{
     bench,
     executor::{self, PlanBackend},
-    manifest,
+    manifest, merge,
     summary::{self, SummaryIndex, SummaryRecord},
 };
 
@@ -45,27 +47,20 @@ const TEMP_SUFFIX: &str = ".rebuilding";
 const OLD_SUFFIX: &str = ".old";
 const SECTION_HEADER_SIZE: usize = 32;
 const SECTION_FORMAT_VERSION: u32 = 11;
-const TABLE_MAGIC: [u8; 8] = *b"EGTABL1\0";
-const POSTINGS_MAGIC: [u8; 8] = *b"EGPOST2\0";
+pub const TABLE_MAGIC: [u8; 8] = *b"EGTABL1\0";
+pub const POSTINGS_MAGIC: [u8; 8] = *b"EGPOST2\0";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-/// Directory entry layout: first hash32, records byte offset, postings byte offset
-const DIRECTORY_ENTRY_SIZE: usize = 16;
-/// Delta-coded table records per skip-directory block
-const RECORDS_PER_BLOCK: usize = 256;
-/// Bytes in a per-block bitmap marking inline df=1 records
-const BLOCK_BITMAP_SIZE: usize = RECORDS_PER_BLOCK / 8;
-const RUN_PAIR_SIZE: usize = 9;
-const FILES_PER_RAYON_TASK: usize = 1024;
+const FILES_PER_RAYON_TASK: usize = 512;
+/// Byte budget per scan chunk so huge files cannot serialize the scan phase
+const BYTES_PER_RAYON_TASK: u64 = 4 * 1024 * 1024;
 const INDEX_RAM_CAP_BYTES: usize = 512 * 1024 * 1024;
 const MIN_PAIRS_PER_RUN: usize = 128 * 1024;
 const MAX_PAIRS_PER_RUN: usize = 4_000_000;
-const RUN_READER_BUFFER_BYTES: usize = 64 * 1024;
 const SECTION_WRITER_BUFFER_BYTES: usize = 1024 * 1024;
 const FORCED_CANDIDATE_HASH: u64 = u64::MAX;
 /// Files scanned between index-build progress lines under `--debug`.
 const BUILD_PROGRESS_EVERY: usize = 20_000;
-const POSTINGS_MERGE_PROGRESS_EVERY: u64 = 1_000_000;
 /// Allow one exact sparse lookup pass for mildly pessimistic estimates.
 /// Sweeping this to 4 admitted previously refused wide and gap queries at
 /// 90-100% FP for no wall win; refusal keeps them on the scan path.
@@ -433,21 +428,19 @@ fn build_files(
     let next_run = AtomicUsize::new(0);
     let stats = BuildStats::default();
     let scan_started_at = Instant::now();
-    files
-        .par_chunks(FILES_PER_RAYON_TASK)
-        .try_for_each(|chunk| {
-            write_chunk_runs(
-                args,
-                table,
-                chunk,
-                &runs_dir,
-                &next_run,
-                &stats,
-                pair_budget,
-                progress,
-                files.len(),
-            )
-        })?;
+    balanced_chunks(files).par_iter().try_for_each(|chunk| {
+        write_chunk_runs(
+            args,
+            table,
+            chunk,
+            &runs_dir,
+            &next_run,
+            &stats,
+            pair_budget,
+            progress,
+            files.len(),
+        )
+    })?;
     let scan_elapsed = scan_started_at.elapsed();
     timings.set_scan_documents(scan_started_at);
     let run_count = next_run.load(AtomicOrdering::Relaxed);
@@ -465,7 +458,7 @@ fn build_files(
         progress.start_postings(run_count, pairs_total);
     }
     let code_lengths = CodeLengths::from_frequencies(&stats.mask_frequencies());
-    merge_runs(
+    merge::merge_runs(
         &runs_dir,
         run_count,
         &index_home.join(table_name),
@@ -496,6 +489,35 @@ fn build_files(
         started_at.elapsed()
     );
     Ok(timings)
+}
+
+/// Contiguous file chunks bounded by bytes and count, biggest chunks first
+fn balanced_chunks<'a>(files: &'a [&'a CurrentFile]) -> Vec<&'a [&'a CurrentFile]> {
+    let lens: Vec<u64> = files.iter().map(|file| file.len()).collect();
+    chunk_ranges(&lens)
+        .into_iter()
+        .map(|range| &files[range])
+        .collect()
+}
+
+/// Contiguous index ranges bounded by bytes and count, biggest bytes first
+fn chunk_ranges(lens: &[u64]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0u64;
+    for (idx, len) in lens.iter().enumerate() {
+        bytes = bytes.saturating_add(*len);
+        if bytes >= BYTES_PER_RAYON_TASK || idx - start + 1 >= FILES_PER_RAYON_TASK {
+            ranges.push(start..idx + 1);
+            start = idx + 1;
+            bytes = 0;
+        }
+    }
+    if start < lens.len() {
+        ranges.push(start..lens.len());
+    }
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.clone().map(|idx| lens[idx]).sum::<u64>()));
+    ranges
 }
 
 fn write_chunk_runs(
@@ -638,244 +660,6 @@ fn write_run(
         pair_count * RUN_PAIR_SIZE
     );
     Ok(())
-}
-
-/// Merge sorted runs into the final table and postings sections.
-///
-/// This is a single-threaded k-way heap merge on purpose: it streams one
-/// monotonic key sequence into two append-only sections, so it is I/O-bound
-/// rather than CPU-bound. A per-shard parallel merge would need the scan phase
-/// to range-partition runs by hash so shards are disjoint and concatenable;
-/// the current runs span the whole hash space, so parallelizing here would add
-/// a repartition pass and coordination that outweighs the streaming win at
-/// present scale. The scan phase, which is CPU-bound, is already parallel.
-fn merge_runs(
-    runs_dir: &Path,
-    run_count: usize,
-    table_path: &Path,
-    postings_path: &Path,
-    progress: Option<&BuildProgress>,
-    pairs_total: u64,
-    code_lengths: &CodeLengths,
-) -> anyhow::Result<()> {
-    let mut table_builder = TableBuilder::create(table_path)?;
-    let mut postings_writer = SectionWriter::create(postings_path, POSTINGS_MAGIC)?;
-    postings_writer.write_all(code_lengths.as_bytes())?;
-    let encoder = Encoder::new(code_lengths);
-    let mut merge_progress = MergeProgress::new(progress, run_count, pairs_total);
-    let mut readers = Vec::with_capacity(run_count);
-    let mut heap = BinaryHeap::new();
-    for run_id in 0..run_count {
-        let path = run_path(runs_dir, run_id);
-        let mut reader = RunReader::open(&path)?;
-        if let Some(pair) = reader.next_pair()? {
-            heap.push(HeapItem { pair, run_id });
-        }
-        readers.push(reader);
-    }
-
-    let mut current_hash = None;
-    let mut docs = Vec::<(u32, u8)>::new();
-    while let Some(item) = heap.pop() {
-        if current_hash != Some(item.pair.hash) {
-            if let Some(hash) = current_hash {
-                table_builder.push(&mut postings_writer, hash, &docs, &encoder)?;
-                docs.clear();
-            }
-            current_hash = Some(item.pair.hash);
-        }
-        if let Some(last) = docs.last_mut().filter(|last| last.0 == item.pair.ord) {
-            last.1 |= item.pair.mask;
-        } else {
-            docs.push((item.pair.ord, item.pair.mask));
-        }
-        merge_progress.pair_done();
-        let reader = readers
-            .get_mut(item.run_id)
-            .context("merge run index out of range")?;
-        if let Some(pair) = reader.next_pair()? {
-            heap.push(HeapItem {
-                pair,
-                run_id: item.run_id,
-            });
-        } else {
-            merge_progress.run_done();
-        }
-    }
-    if let Some(hash) = current_hash {
-        table_builder.push(&mut postings_writer, hash, &docs, &encoder)?;
-    }
-    table_builder.finalize()?;
-    postings_writer.finalize(1)?;
-    merge_progress.finish();
-    Ok(())
-}
-
-struct MergeProgress<'a> {
-    progress: Option<&'a BuildProgress>,
-    runs_total: usize,
-    pairs_total: u64,
-    runs_done: u64,
-    pairs_done: u64,
-    next_pair_update: u64,
-}
-
-impl<'a> MergeProgress<'a> {
-    fn new(progress: Option<&'a BuildProgress>, runs_total: usize, pairs_total: u64) -> Self {
-        Self {
-            progress,
-            runs_total,
-            pairs_total,
-            runs_done: 0,
-            pairs_done: 0,
-            next_pair_update: POSTINGS_MERGE_PROGRESS_EVERY,
-        }
-    }
-
-    fn pair_done(&mut self) {
-        self.pairs_done += 1;
-        if self.pairs_done < self.next_pair_update && self.pairs_done < self.pairs_total {
-            return;
-        }
-        self.emit();
-        self.next_pair_update = self.pairs_done + POSTINGS_MERGE_PROGRESS_EVERY;
-    }
-
-    fn run_done(&mut self) {
-        self.runs_done += 1;
-    }
-
-    fn finish(&mut self) {
-        self.pairs_done = self.pairs_total;
-        self.runs_done = self.runs_total as u64;
-        self.emit();
-    }
-
-    fn emit(&self) {
-        if let Some(progress) = self.progress {
-            progress.update_postings(
-                self.runs_total,
-                self.runs_done,
-                self.pairs_total,
-                self.pairs_done,
-            );
-        }
-    }
-}
-
-/// Streams delta-coded table records in skip-directory blocks; df=1 lists
-/// inline into the record instead of touching the postings section
-struct TableBuilder {
-    writer: SectionWriter,
-    directory: Vec<u8>,
-    bitmaps: Vec<u8>,
-    block_bitmap: [u8; BLOCK_BITMAP_SIZE],
-    block_count: u32,
-    block_records: usize,
-    previous_hash: u32,
-    postings_offset: u64,
-}
-
-impl TableBuilder {
-    fn create(path: &Path) -> anyhow::Result<Self> {
-        Ok(Self {
-            writer: SectionWriter::create(path, TABLE_MAGIC)?,
-            directory: Vec::new(),
-            bitmaps: Vec::new(),
-            block_bitmap: [0u8; BLOCK_BITMAP_SIZE],
-            block_count: 0,
-            block_records: 0,
-            previous_hash: 0,
-            postings_offset: 0,
-        })
-    }
-
-    fn push(
-        &mut self,
-        postings_writer: &mut SectionWriter,
-        hash: u32,
-        docs: &[(u32, u8)],
-        encoder: &Encoder,
-    ) -> anyhow::Result<()> {
-        let gap = if self.block_records == 0 {
-            self.begin_block(hash)?;
-            0
-        } else {
-            hash - self.previous_hash
-        };
-        let mut record = Vec::with_capacity(12);
-        push_uvarint(&mut record, gap);
-        if let [(ord, mask)] = docs {
-            self.block_bitmap[self.block_records / 8] |= 1 << (self.block_records % 8);
-            push_uvarint(&mut record, *ord);
-            record.push(*mask);
-        } else {
-            let count = u32::try_from(docs.len()).context("posting count does not fit in u32")?;
-            let list = encode_posting_list(docs, encoder);
-            let size = u32::try_from(list.len()).context("posting list exceeds u32 bytes")?;
-            push_uvarint(&mut record, count);
-            push_uvarint(&mut record, size);
-            postings_writer.write_all(&list)?;
-            self.postings_offset += u64::from(size);
-        }
-        self.writer.write_all(&record)?;
-        self.previous_hash = hash;
-        self.block_records = (self.block_records + 1) % RECORDS_PER_BLOCK;
-        Ok(())
-    }
-
-    fn begin_block(&mut self, hash: u32) -> anyhow::Result<()> {
-        if self.block_count > 0 {
-            self.flush_bitmap();
-        }
-        let records_offset =
-            u32::try_from(self.writer.body_len).context("table records exceed u32 bytes")?;
-        self.directory.extend_from_slice(&hash.to_le_bytes());
-        self.directory
-            .extend_from_slice(&records_offset.to_le_bytes());
-        self.directory
-            .extend_from_slice(&self.postings_offset.to_le_bytes());
-        self.block_count += 1;
-        Ok(())
-    }
-
-    fn flush_bitmap(&mut self) {
-        self.bitmaps.extend_from_slice(&self.block_bitmap);
-        self.block_bitmap = [0u8; BLOCK_BITMAP_SIZE];
-    }
-
-    fn finalize(mut self) -> anyhow::Result<()> {
-        if self.block_count > 0 {
-            self.flush_bitmap();
-        }
-        let directory = mem::take(&mut self.directory);
-        let bitmaps = mem::take(&mut self.bitmaps);
-        self.writer.write_all(&directory)?;
-        self.writer.write_all(&bitmaps)?;
-        self.writer.write_all(&self.block_count.to_le_bytes())?;
-        self.writer.finalize(1)
-    }
-}
-
-/// Posting list layout: ascending ordinal gaps as uvarints, then the mask
-/// column - raw bytes for short lists, a Huffman bitstream otherwise
-fn encode_posting_list(docs: &[(u32, u8)], encoder: &Encoder) -> Vec<u8> {
-    let mut out = Vec::with_capacity(docs.len() * 3);
-    let mut previous = 0u32;
-    for (idx, &(doc, _)) in docs.iter().enumerate() {
-        push_uvarint(&mut out, if idx == 0 { doc } else { doc - previous });
-        previous = doc;
-    }
-    if docs.len() < HUFF_MIN_COUNT {
-        out.extend(docs.iter().map(|&(_, mask)| mask));
-    } else {
-        encoder.encode_into(docs.iter().map(|&(_, mask)| mask), &mut out);
-    }
-    out
-}
-
-fn run_path(runs_dir: &Path, id: usize) -> PathBuf {
-    runs_dir.join(format!("{id:08}.run"))
 }
 
 fn pairs_per_run(threads: usize) -> usize {
@@ -1191,7 +975,7 @@ struct PostingList<'a> {
 impl<'a> PostingList<'a> {
     fn postings(self, decoder: &Decoder) -> Vec<executor::Posting> {
         let count = self.count as usize;
-        let mut ords = Vec::with_capacity(count);
+        let mut out = Vec::with_capacity(count);
         let mut pos = 0usize;
         let mut ord = 0u32;
         for idx in 0..count {
@@ -1199,7 +983,7 @@ impl<'a> PostingList<'a> {
                 return Vec::new();
             };
             ord = if idx == 0 { gap } else { ord.wrapping_add(gap) };
-            ords.push(ord as usize);
+            out.push(ord as usize);
         }
         let payload = self.bytes.get(pos..).unwrap_or_default();
         let masks = if count < HUFF_MIN_COUNT {
@@ -1210,7 +994,7 @@ impl<'a> PostingList<'a> {
         let Some(masks) = masks else {
             return Vec::new();
         };
-        ords.into_iter()
+        out.into_iter()
             .zip(masks)
             .map(|(ord, mask)| executor::Posting { ord, mask })
             .collect()
@@ -1482,14 +1266,6 @@ const fn truncate_hash(hash: u64) -> u32 {
     hash as u32
 }
 
-fn push_uvarint(out: &mut Vec<u8>, mut value: u32) {
-    while value >= 0x80 {
-        out.push(value as u8 | 0x80);
-        value >>= 7;
-    }
-    out.push(value as u8);
-}
-
 fn read_uvarint(bytes: &[u8], pos: &mut usize) -> Option<u32> {
     let mut value = 0u32;
     let mut shift = 0u32;
@@ -1509,7 +1285,7 @@ fn read_uvarint(bytes: &[u8], pos: &mut usize) -> Option<u32> {
 
 /// Streams a section body under a placeholder header, then finalizes with a
 /// magic, record count, and body checksum before flushing to disk.
-struct SectionWriter {
+pub struct SectionWriter {
     writer: BufWriter<File>,
     body_len: u64,
     magic: [u8; 8],
@@ -1517,7 +1293,7 @@ struct SectionWriter {
 }
 
 impl SectionWriter {
-    fn create(path: &Path, magic: [u8; 8]) -> anyhow::Result<Self> {
+    pub fn create(path: &Path, magic: [u8; 8]) -> anyhow::Result<Self> {
         let mut file =
             File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
         file.write_all(&[0u8; SECTION_HEADER_SIZE])
@@ -1530,7 +1306,7 @@ impl SectionWriter {
         })
     }
 
-    fn write_all(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+    pub fn write_all(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         self.writer
             .write_all(bytes)
             .with_context(|| format!("failed to write {}", self.path.display()))?;
@@ -1539,7 +1315,7 @@ impl SectionWriter {
     }
 
     /// Backfill the header and fsync the file so the body is durable.
-    fn finalize(self, record_size: u64) -> anyhow::Result<()> {
+    pub fn finalize(self, record_size: u64) -> anyhow::Result<()> {
         let SectionWriter {
             writer,
             body_len,
@@ -1579,28 +1355,6 @@ fn section_header(magic: [u8; 8], count: u64, checksum: u64) -> [u8; SECTION_HEA
     header
 }
 
-fn write_pair(writer: &mut BufWriter<File>, pair: Pair) -> anyhow::Result<()> {
-    let mut bytes = [0u8; RUN_PAIR_SIZE];
-    bytes[..4].copy_from_slice(&pair.hash.to_le_bytes());
-    bytes[4..8].copy_from_slice(&pair.ord.to_le_bytes());
-    bytes[8] = pair.mask;
-    writer.write_all(&bytes)?;
-    Ok(())
-}
-
-fn read_pair(reader: &mut BufReader<File>) -> anyhow::Result<Option<Pair>> {
-    if reader.fill_buf()?.is_empty() {
-        return Ok(None);
-    }
-    let mut bytes = [0u8; RUN_PAIR_SIZE];
-    reader.read_exact(&mut bytes)?;
-    Ok(Some(Pair {
-        hash: u32::from_le_bytes(bytes[..4].try_into().expect("four bytes")),
-        ord: u32::from_le_bytes(bytes[4..8].try_into().expect("four bytes")),
-        mask: bytes[8],
-    }))
-}
-
 fn read_u64_at(bytes: &[u8], offset: usize) -> anyhow::Result<u64> {
     let end = offset.checked_add(8).context("u64 read offset overflow")?;
     let Some(slice) = bytes.get(offset..end) else {
@@ -1615,26 +1369,6 @@ fn read_u32_at(bytes: &[u8], offset: usize) -> anyhow::Result<u32> {
         anyhow::bail!("u32 read past end of table");
     };
     Ok(u32::from_le_bytes(slice.try_into().expect("four bytes")))
-}
-
-struct RunReader {
-    reader: BufReader<File>,
-}
-
-impl RunReader {
-    fn open(path: &Path) -> anyhow::Result<Self> {
-        Ok(Self {
-            reader: BufReader::with_capacity(
-                RUN_READER_BUFFER_BYTES,
-                File::open(path)
-                    .with_context(|| format!("failed to open run {}", path.display()))?,
-            ),
-        })
-    }
-
-    fn next_pair(&mut self) -> anyhow::Result<Option<Pair>> {
-        read_pair(&mut self.reader)
-    }
 }
 
 #[derive(Default)]
@@ -1693,62 +1427,24 @@ impl BuildStats {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Pair {
-    hash: u32,
-    ord: u32,
-    mask: u8,
-}
-
-impl Ord for Pair {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.hash.cmp(&other.hash).then(self.ord.cmp(&other.ord))
-    }
-}
-
-impl PartialOrd for Pair {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct HeapItem {
-    pair: Pair,
-    run_id: usize,
-}
-
-impl Ord for HeapItem {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .pair
-            .cmp(&self.pair)
-            .then(other.run_id.cmp(&self.run_id))
-    }
-}
-
-impl PartialOrd for HeapItem {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::merge::{Pair, encode_posting_list, merge_runs, push_uvarint, run_path, write_pair};
     use super::{
-        CodeLengths, Decoder, Encoder, FNV_OFFSET, HUFF_MIN_COUNT, IndexOpen, MAX_PAIRS_PER_RUN,
-        MIN_PAIRS_PER_RUN, POSTINGS_MAGIC, Pair, PostingList, RECORDS_PER_BLOCK, RUN_PAIR_SIZE,
-        SECTION_HEADER_SIZE, SectionWriter, Segment, TABLE_MAGIC, TableBuilder,
-        encode_posting_list, executor::Posting, fnv1a_state, pairs_per_run, push_uvarint,
-        read_pair, read_uvarint, sampled_checksum, section_header, suffixed_path,
-        verify_section_with_checksum, write_pair,
+        CodeLengths, Decoder, FNV_OFFSET, HUFF_MIN_COUNT, IndexOpen, MAX_PAIRS_PER_RUN,
+        MIN_PAIRS_PER_RUN, POSTINGS_MAGIC, PostingList, SECTION_HEADER_SIZE, Segment, TABLE_MAGIC,
+        chunk_ranges, executor::Posting, fnv1a_state, merge, pairs_per_run, read_uvarint,
+        sampled_checksum, section_header, suffixed_path, verify_section_with_checksum,
     };
+    use crate::index::huffman::Encoder;
     use std::{
         fs,
         fs::File,
-        io::{BufReader, BufWriter, Write},
+        io::{BufWriter, Write},
         path::{Path, PathBuf},
     };
+
+    const RECORDS_PER_BLOCK: usize = merge::RECORDS_PER_BLOCK;
 
     fn mask_lengths(lists: &[(u32, Vec<(u32, u8)>)]) -> CodeLengths {
         let mut freq = [0u64; 256];
@@ -1760,19 +1456,48 @@ mod tests {
         CodeLengths::from_frequencies(&freq)
     }
 
+    /// Spill sorted pairs round-robin over two sorted run files
+    fn spill_runs(runs_dir: &Path, pairs: &[Pair]) {
+        fs::create_dir_all(runs_dir).unwrap();
+        let mut writers: Vec<BufWriter<File>> = (0..2)
+            .map(|id| BufWriter::new(File::create(run_path(runs_dir, id)).unwrap()))
+            .collect();
+        let count = writers.len();
+        for (idx, &pair) in pairs.iter().enumerate() {
+            write_pair(&mut writers[idx % count], pair).unwrap();
+        }
+        for mut writer in writers {
+            writer.flush().unwrap();
+        }
+    }
+
     fn build_segment(dir: &Path, lists: &[(u32, Vec<(u32, u8)>)]) -> Segment {
         let table = dir.join("table.bin");
         let postings = dir.join("postings.bin");
         let lengths = mask_lengths(lists);
-        let encoder = Encoder::new(&lengths);
-        let mut builder = TableBuilder::create(&table).unwrap();
-        let mut writer = SectionWriter::create(&postings, POSTINGS_MAGIC).unwrap();
-        writer.write_all(lengths.as_bytes()).unwrap();
+        let mut pairs = Vec::new();
         for (hash, docs) in lists {
-            builder.push(&mut writer, *hash, docs, &encoder).unwrap();
+            for &(ord, mask) in docs {
+                pairs.push(Pair {
+                    hash: *hash,
+                    ord,
+                    mask,
+                });
+            }
         }
-        builder.finalize().unwrap();
-        writer.finalize(1).unwrap();
+        pairs.sort();
+        let runs_dir = dir.join("runs");
+        spill_runs(&runs_dir, &pairs);
+        merge_runs(
+            &runs_dir,
+            2,
+            &table,
+            &postings,
+            None,
+            pairs.len() as u64,
+            &lengths,
+        )
+        .unwrap();
         Segment::open(&table, &postings, IndexOpen::Strict)
             .unwrap()
             .expect("segment opens")
@@ -1845,6 +1570,32 @@ mod tests {
     }
 
     #[test]
+    fn lookups_span_hash_partitions() {
+        let (_dir, dir) = scratch("partitions");
+        let lists: Vec<(u32, Vec<(u32, u8)>)> = (0..64u32)
+            .map(|partition| {
+                let hash = (partition << 26) | (partition * 31);
+                (hash, vec![(partition, 0x11u8), (partition + 100, 0x22)])
+            })
+            .collect();
+        let segment = build_segment(&dir, &lists);
+
+        for (hash, docs) in &lists {
+            assert_eq!(segment.lookup(u64::from(*hash)).unwrap(), masked(docs));
+        }
+        assert_eq!(segment.lookup(12345).unwrap(), Vec::<Posting>::new());
+    }
+
+    #[test]
+    fn empty_lists_build_an_openable_empty_segment() {
+        let (_dir, dir) = scratch("empty");
+        let segment = build_segment(&dir, &[]);
+
+        assert_eq!(segment.lookup(1).unwrap(), Vec::<Posting>::new());
+        assert_eq!(segment.posting_len(1).unwrap(), 0);
+    }
+
+    #[test]
     fn short_posting_lists_keep_raw_mask_columns() {
         let docs = [(3u32, 0x01u8), (8, 0x20), (70_000, 0xFF)];
         let lists = vec![(1u32, docs.to_vec())];
@@ -1898,37 +1649,26 @@ mod tests {
     }
 
     #[test]
-    fn run_pair_io_round_trips_and_stops_at_eof() {
-        let (_dir, dir) = scratch("pair-io");
-        let path = dir.join("run.bin");
-        let pairs = [
-            Pair {
-                hash: 3,
-                ord: 1,
-                mask: 0b0000_0100,
-            },
-            Pair {
-                hash: u32::MAX - 1,
-                ord: u32::MAX,
-                mask: 0xFF,
-            },
-        ];
-        {
-            let mut writer = BufWriter::new(File::create(&path).unwrap());
-            for pair in pairs {
-                write_pair(&mut writer, pair).unwrap();
-            }
-            writer.flush().unwrap();
-        }
+    fn chunk_ranges_split_by_bytes_and_order_biggest_first() {
+        let big = super::BYTES_PER_RAYON_TASK;
+        let lens = [10, 20, big, 5, 5];
+        let ranges = chunk_ranges(&lens);
 
-        assert_eq!(
-            fs::metadata(&path).unwrap().len(),
-            (2 * RUN_PAIR_SIZE) as u64
-        );
-        let mut reader = BufReader::new(File::open(path).unwrap());
-        assert_eq!(read_pair(&mut reader).unwrap(), Some(pairs[0]));
-        assert_eq!(read_pair(&mut reader).unwrap(), Some(pairs[1]));
-        assert_eq!(read_pair(&mut reader).unwrap(), None);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0], 0..3);
+        assert_eq!(ranges[1], 3..5);
+        let covered: usize = ranges.iter().map(|range| range.len()).sum();
+        assert_eq!(covered, lens.len());
+    }
+
+    #[test]
+    fn chunk_ranges_split_by_file_count() {
+        let lens = vec![1u64; super::FILES_PER_RAYON_TASK + 3];
+        let ranges = chunk_ranges(&lens);
+
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].len(), super::FILES_PER_RAYON_TASK);
+        assert_eq!(ranges[1].len(), 3);
     }
 
     #[test]

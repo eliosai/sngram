@@ -12,6 +12,7 @@ mod generation;
 mod huffman;
 mod location;
 mod manifest;
+mod merge;
 mod planner;
 mod postings;
 mod progress;
