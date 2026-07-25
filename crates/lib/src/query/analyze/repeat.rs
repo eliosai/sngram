@@ -5,7 +5,8 @@ use regex_syntax::hir::Repetition;
 use sngram_types::Gram;
 
 use super::super::info::RegexpInfo;
-use super::super::strings::{Order, StringSet};
+use super::super::order::Order;
+use super::super::strings::StringSet;
 use super::{Analyzer, MAX_EXACT, MAX_EXACT_BYTES};
 
 /// Copies of a bounded repetition expanded into an explicit concatenation:
@@ -243,6 +244,9 @@ fn bounded_power_union(base: &StringSet, min: u32, max: u32) -> Option<StringSet
         }
         if k == max {
             break;
+        }
+        if power.cross_len(base).is_some_and(|len| len > MAX_EXACT) {
+            return None;
         }
         power = power.cross(base, Order::Prefix);
         if power.len() > MAX_EXACT || power.byte_len() > MAX_EXACT_BYTES {

@@ -5,7 +5,8 @@ use regex_syntax::hir::Class;
 use sngram_types::Gram;
 
 use super::super::info::RegexpInfo;
-use super::super::strings::{Order, StringSet};
+use super::super::order::Order;
+use super::super::strings::StringSet;
 use super::boundary::{BoundaryFn, byte_boundary_bytes, utf8_boundary_bytes};
 
 /// Character-class size past which enumeration stops and over-approximates.
