@@ -2000,6 +2000,127 @@ fn indexed_search_matches_the_scan_path_on_late_nul_binary_files() {
     assert_eq!(scanned.status.code(), indexed.status.code());
 }
 
+fn sorted_lines(output: &Output) -> Vec<String> {
+    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    let mut lines: Vec<String> = stdout.lines().map(str::to_owned).collect();
+    lines.sort();
+    lines
+}
+
+fn assert_indexed_matches_scan(fixture_cwd: &Path, args: &[&str], label: &str) {
+    let indexed = eg_in(args, fixture_cwd);
+    let mut scan_args = vec!["--no-index"];
+    scan_args.extend_from_slice(args);
+    let scanned = eg_in(&scan_args, fixture_cwd);
+
+    assert!(
+        indexed.status.success(),
+        "{label}: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    assert_eq!(
+        sorted_lines(&indexed),
+        sorted_lines(&scanned),
+        "{label}: indexed paths must render exactly like the scan path"
+    );
+    assert_eq!(indexed.status.code(), scanned.status.code(), "{label}");
+}
+
+fn nested_needle_fixture(needle: &str) -> Fixture {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("subdir")).unwrap();
+    fs::write(fixture.path("top.txt"), format!("{needle}\n")).unwrap();
+    fs::write(fixture.path("subdir/deep.txt"), format!("{needle}\n")).unwrap();
+    fs::write(fixture.path("miss.txt"), "nothing relevant\n").unwrap();
+    fixture
+}
+
+#[test]
+fn indexed_paths_match_the_scan_path_for_each_argument_form() {
+    let fixture = nested_needle_fixture("argument form needle");
+    let root = fixture.root.to_str().unwrap().to_owned();
+
+    let forms: &[(&str, &[&str])] = &[
+        ("dot slash", &["./"]),
+        ("bare dot", &["."]),
+        ("absolute", &[&root]),
+        ("subdir", &["subdir/"]),
+        ("implicit cwd", &[]),
+    ];
+    for (label, paths) in forms {
+        let mut args = vec!["--files-with-matches", "argument form needle"];
+        args.extend_from_slice(paths);
+        assert_indexed_matches_scan(&fixture.root, &args, label);
+    }
+}
+
+#[test]
+fn indexed_output_modes_match_the_scan_path_rendering() {
+    let fixture = nested_needle_fixture("output mode needle");
+
+    assert_indexed_matches_scan(
+        &fixture.root,
+        &["--files-without-match", "output mode needle", "./"],
+        "files without match",
+    );
+    assert_indexed_matches_scan(
+        &fixture.root,
+        &["output mode needle", "./"],
+        "plain match print",
+    );
+    assert_indexed_matches_scan(
+        &fixture.root,
+        &["output mode needle"],
+        "plain match print implicit cwd",
+    );
+}
+
+#[test]
+fn index_built_from_one_root_prints_paths_for_the_current_argument() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("corpus/subdir")).unwrap();
+    fs::write(fixture.path("corpus/top.txt"), "replay root needle\n").unwrap();
+    fs::write(
+        fixture.path("corpus/subdir/deep.txt"),
+        "replay root needle\n",
+    )
+    .unwrap();
+    let corpus = fixture.path("corpus");
+    let built = eg_in(
+        &[
+            "--files-with-matches",
+            "replay root needle",
+            corpus.to_str().unwrap(),
+        ],
+        &fixture.root,
+    );
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8(built.stderr).unwrap()
+    );
+
+    let from_corpus = eg_in(
+        &["--files-with-matches", "replay root needle", "./"],
+        &corpus,
+    );
+    let from_parent = eg_in(
+        &["--files-with-matches", "replay root needle", "corpus"],
+        &fixture.root,
+    );
+
+    assert_eq!(
+        sorted_lines(&from_corpus),
+        vec!["./subdir/deep.txt", "./top.txt"],
+        "indexed paths must follow this query's argument, not the build-time root"
+    );
+    assert_eq!(
+        sorted_lines(&from_parent),
+        vec!["corpus/subdir/deep.txt", "corpus/top.txt"],
+        "indexed paths must follow a relative argument from another cwd"
+    );
+}
+
 /// A match in a buffer before the one holding the first NUL is reported by the
 /// scan path, so the index has to cover it.
 #[test]
