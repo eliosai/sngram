@@ -8,8 +8,8 @@ suite corpus=".":
     cd {{corpus}} && {{justfile_directory()}}/target/release/eg --bench
 
 # fp suite against the guard corpus
-guard:
-    just suite ~/ripos/gitoxide
+guard corpus="~/repos/django":
+    just suite {{corpus}}
 
 eg action="help" *args:
     case "{{action}}" in \
