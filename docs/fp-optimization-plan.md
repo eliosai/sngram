@@ -226,6 +226,25 @@ positions were rejected on size. That is the accepted floor of this
 format. The single-digit aggregate target was not reachable inside the
 size budget; 27.76% at 0.92x corpus is the frozen trade.
 
+## Restated gates (2026-07-25, schema 20)
+
+The postings schema moved 16 → 20 and the numbers above were re-measured
+on isolated corpus copies. The gates the release table must meet:
+
+| corpus | index build | suite vs scan | FP | FN |
+|---|---:|---:|---:|---:|
+| linux (1.615GB) | 17,154 ms | 6.87x | 26.56% | 0 |
+| k8s | 3,320 ms | 6.44x | 39.64% | 0 |
+| hass-core | 2,095 ms | 6.58x | 44.65% | 0 |
+| django | 783 ms | 3.64x | 26.58% | 0 |
+
+The linux index is 1,467,104,424 bytes, ratio 0.91, and the suite runs
+about 3,960 ms indexed against about 27,000 ms scanning. False positives
+fell on three of the four corpora against their previous measurements.
+The 2026-07-07 speedup row above compared against `rg`; these compare
+indexed `eg` against `eg --no-index` only, because the measuring machine
+had no ripgrep binary.
+
 ## Original targets
 
 - Aggregate suite FP: 33.5% → single digits; gap and scatter classes → <10% each.

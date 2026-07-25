@@ -50,7 +50,7 @@ Do not expose table internals, filenames, constants, or low-level lookup helpers
 
 `crates/python` is the standalone `sngram` Python library. It is a maturin project: the pyo3 bindings crate, the `sngram/` wrapper package, the pyproject, and the lib tests live together in that one directory. It exposes the scan/query core, the embedded production weight table, and the GIL-free training counters. It ships no CLI and no runtime dependencies. This is the package that goes to PyPI.
 
-`train/` is the `sngram-train` project: the corpus training pipeline and the `sngram` training CLI. It depends on the library by path, streams the published corpus rows from the Hugging Face Hub, fetches content from the public Software Heritage bucket, counts byte pairs through Rust, checkpoints every minute, resumes from saved state, and mints one provenance-stamped final table. Keep `.env` under `train/.env`; reading the corpus dataset uses the Hugging Face token there.
+`train/` is the `sngram-train` project: the corpus training pipeline and the `sngram` training CLI. It depends on the library by path and trains on The Stack v3 (`HuggingFaceCode/stack-v3-train`, ODC-By, ungated). It streams the parquet shards from the Hugging Face Hub, reads file content inline from `files[].content`, counts byte pairs through Rust, checkpoints every minute at a consistent quiesce, resumes byte-exactly, and mints one provenance-stamped final table. There is no separate object store and no per-file fetch. Keep `.env` under `train/.env`; reading the dataset uses the Hugging Face token there.
 
 Useful commands:
 
@@ -62,10 +62,12 @@ uv run pytest
 cd train
 uv sync
 uv run pytest
-uv run sngram train --limit 1GB
+uv run sngram train --shards 10 --no-dashboard
 uv run sngram train --mint-dir ./runs/r1
 uv run sngram inspect runs/r1/final_weights.bin
 ```
+
+The `train` options are `--mint-dir`, `--workers`, `--limit`, `--shards`, `--checkpoint-every`, `--resume/--no-resume`, and `--dashboard/--no-dashboard`.
 
 ### `eg`
 
@@ -90,7 +92,7 @@ Rust training lives behind `sngram`'s `learn` feature:
 sngram = { path = "crates/lib", features = ["learn"] }
 ```
 
-Use `sngram::learn::BigramCounter` for local counting and table bytes. Use the Python trainer for full corpus minting. The Python trainer is the source of production tables because it handles dataset streaming, worker coordination, checkpointing, provenance stamping, and event logs.
+Use `sngram::learn::BigramCounter` for local counting and table bytes. The Python trainer mints production tables: it owns shard streaming, worker coordination, checkpointing, provenance stamping, and event logs.
 
 Generated `.bin` weight tables load through `WeightTable::from_bytes`. Released tables move into `crates/lib/data` and get exposed through Cargo features.
 
@@ -129,7 +131,7 @@ Unit tests belong in `mod tests {}` inside the source file that owns the logic. 
 
 ## benchmarking
 
-Use raw Divan and CLI measurements for `eg` performance work.
+`eg` benches run on Divan; the library benches in `crates/lib/benches` run on Criterion.
 
 CLI:
 
@@ -141,9 +143,9 @@ target/release/eg --no-index PATTERN PATH
 rg PATTERN PATH
 ```
 
-`--bench PATTERN PATH` emits one structured JSON report for the indexed path, ending with a `comparison` block that re-runs the query through `--no-index` and `rg`. Bare `--bench` runs the embedded high-false-positive TSV suite in `crates/eg/src/index/data/fp-queries.tsv` and compares indexed search with `--no-index` and `rg` when available.
+`--bench PATTERN PATH` emits one structured JSON report for the indexed path, ending with a `comparison` block that re-runs the query through `--no-index`, and through `rg` when a ripgrep binary is on PATH. Bare `--bench` runs the embedded 296-query TSV suite in `crates/eg/src/index/data/fp-queries.tsv` and compares indexed search with `--no-index`, adding the `rg` leg under the same condition.
 
-Library benches:
+Library benches, from the `sngram-benches` crate at `crates/lib/benches`:
 
 ```sh
 cargo bench -p sngram-benches --bench extract
@@ -151,7 +153,7 @@ cargo bench -p sngram-benches --bench query
 cargo bench -p sngram-benches --bench counter
 ```
 
-Report command lines with results. For hot-path claims, compare indexed `eg`, `eg --no-index`, and `rg` on the same corpus and output mode.
+Report command lines with results. For hot-path claims, compare indexed `eg` against `eg --no-index` on the same corpus and output mode, and add `rg` when a real ripgrep binary is on PATH.
 
 ## code quality
 

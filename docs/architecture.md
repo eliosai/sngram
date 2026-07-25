@@ -16,9 +16,9 @@ engine. The index may return false positives. It must never miss a match.
 | `crates/eg` | the application: a ripgrep fork that prefilters through the index, plus the `eg-indexd` daemon |
 
 The training pipeline lives outside the workspace in `train/`, a uv
-project that depends on the Python package. It draws the published
-corpus manifest from the Hugging Face Hub and mints the production
-weight table.
+project that depends on the Python package. It streams The Stack v3
+parquet shards from the Hugging Face Hub, reads file content inline out
+of each shard, and mints the production weight table.
 
 ## How a gram is chosen
 
@@ -70,8 +70,11 @@ follows Google codesearch, rebuilt for sparse grams instead of trigrams.
 
 ## Measured endline
 
-On a 1.59GB Linux kernel checkout: the index is 1.42GB (0.90x the
-corpus), the 296-query suite runs 2.4x faster than scanning with 27.8%
-aggregate false positives and zero false negatives. The record of how it
-got there, including every rejected design, is
+On a 1.615GB Linux kernel checkout, 2026-07-25: the index builds in
+17,154 ms to 1,467,104,424 bytes (0.91x the corpus), and the 296-query
+suite runs 6.87x faster than scanning with 26.56% aggregate false
+positives and zero false negatives. Three other corpora hold the same
+shape: k8s 6.44x at 39.64% FP, hass-core 6.58x at 44.65%, django 3.64x
+at 26.58%, all with zero false negatives. The record of how it got there,
+including every rejected design, is
 [fp-optimization-plan.md](fp-optimization-plan.md).

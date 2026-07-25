@@ -29,10 +29,11 @@ than trigram decomposition. The plan matches a superset of what the
 regex matches. A prefilter built from it never misses a match, and the
 real regex verifies the candidates it admits.
 
-The weight table is a byte-pair frequency table measured over
-terabytes of curated source code, config, prose, and web text, so
-rarity, and with it selectivity, comes from real data. The trained
-production table ships inside the library.
+The weight table is a byte-pair frequency table measured over terabytes
+of real source repositories, whole trees with their natural mix of code,
+config, markup, and docs, so rarity, and with it selectivity, comes from
+the kind of text people search. The trained production table ships inside
+the library.
 
 ## elgrep
 
@@ -51,18 +52,26 @@ eg 'max_\w+_size' ~/src/linux
 eg --no-index 'max_\w+_size' ~/src/linux   # plain scan for comparison
 ```
 
-On the Linux kernel tree, with a hot daemon-owned index,
-files-with-matches output, and identical hit sets (p50 of 9 runs):
+The embedded 296-query suite runs every query twice, once through the
+index and once through `eg --no-index`, on the same tree with the same
+output mode. Measured 2026-07-25 on isolated corpus copies:
 
-| Pattern | Matched files | elgrep | ripgrep | grep | vs ripgrep |
-|---|---:|---:|---:|---:|---:|
-| `linus tor` | 0 | 10.2 ms | 185.9 ms | 1345.8 ms | 18.2x |
-| `EXPORT_SYMBOL_GPL` | 3610 | 45.4 ms | 202.6 ms | 1093.1 ms | 4.5x |
-| `copy_from_user` | 1224 | 19.2 ms | 199.3 ms | 1121.3 ms | 10.4x |
-| `schedule_timeout` | 418 | 13.6 ms | 177.4 ms | 963.2 ms | 13.0x |
+| Corpus | Index build | Suite vs scan | False positives | False negatives |
+|---|---:|---:|---:|---:|
+| linux (1.615 GB) | 17,154 ms | 6.87x | 26.56% | 0 |
+| k8s | 3,320 ms | 6.44x | 39.64% | 0 |
+| hass-core | 2,095 ms | 6.58x | 44.65% | 0 |
+| django | 783 ms | 3.64x | 26.58% | 0 |
 
-The index is 0.90x the corpus size, and the embedded 296-query suite
-enforces zero false negatives on every run.
+On linux the suite finishes in about 3,960 ms indexed against about
+27,000 ms scanning, and the index is 1,467,104,424 bytes, 0.91x the
+corpus. A false positive is a file the index hands to the verifier that
+the regex then rejects, which costs time and never costs correctness.
+The suite fails the run if any indexed hit set diverges from its scan hit
+set, so zero false negatives is enforced rather than observed.
+
+These are elgrep against itself. Comparisons with ripgrep and grep need a
+ripgrep binary on PATH; `--bench` adds those legs when it finds one.
 [crates/eg/README.md](crates/eg/README.md) covers the CLI, the daemon,
 and the benchmark modes.
 
@@ -95,9 +104,10 @@ let plan = query(&table, r"max_\w+_size")?;
 
 `scan` reads one `BufRead` stream, allocates nothing per gram, and
 ends with a `ScanEvent::Finish` summary of document metadata mined in
-the same pass. `query` returns a `QueryPlan` whose needles carry the
-same keys `scan` emits. Training from Rust lives behind the `learn`
-feature as `sngram::learn::BigramCounter`. The README in
+the same pass. It runs at about 208 MiB/s on code. `query` returns a
+`QueryPlan` whose needles carry the same keys `scan` emits; the worst
+plan in the bench set builds in 4.4 ms. Training from Rust lives behind
+the `learn` feature as `sngram::learn::BigramCounter`. The README in
 [crates/lib](crates/lib) covers the library in depth.
 
 ## The Python package
@@ -127,11 +137,16 @@ surface, including plan tuning and a worked inverted-index example.
 
 ## The trainer
 
-`train/` mints weight tables. It streams The Stack v3 parquet shards
-straight from the Hugging Face Hub, reads only the file content
-columns, counts byte pairs through the Rust core, checkpoints every
-minute, and mints one provenance-stamped table when the stream ends.
-Nothing else is fetched and nothing is prefetched.
+`train/` mints weight tables from The Stack v3
+(`HuggingFaceCode/stack-v3-train`, ODC-By 1.0, ungated): 15.9 TB of
+source text across 713 languages and 173M repositories, about 4.9
+trillion tokens, from the GitHub snapshot of 2025-08-07. It streams the
+8196 parquet shards straight from the Hugging Face Hub, reads file
+content inline from `files[].content`, counts byte pairs through the
+Rust core, checkpoints every minute, and mints one provenance-stamped
+table when the stream ends. One row is one repository and the trainer
+takes its whole file mix, so the trained distribution matches the source
+trees people search. A full pass takes about 13 hours.
 
 ```sh
 cd train

@@ -103,6 +103,11 @@ upgrading: old index keys will not match new query keys. `scan` takes a
 `BufRead` input and emits `ScanEvent::Gram` plus one
 `ScanEvent::Finish` per stream.
 
+0.7 is a correctness and speed release: three classes of missed match
+are fixed, `scan` runs about 208 MiB/s on code, and the worst plan in
+the bench set builds in 4.4 ms. Deployments that persist keys should
+rebuild, and elgrep rebuilds its own indexes on first contact.
+
 ## License
 
 [MIT](https://github.com/eliosai/sngram/blob/main/LICENSE)

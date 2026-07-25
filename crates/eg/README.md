@@ -26,31 +26,45 @@ eg 'max_\w+_size' ~/src/linux
 eg --no-index 'max_\w+_size' ~/src/linux   # plain scan, no index used
 ```
 
+## Upgrading to 0.7
+
+0.7 moves the postings schema from 16 to 20. The daemon rebuilds any
+index it finds at an older schema on first contact, destructively and
+without asking, so the first query against an existing root after the
+upgrade pays for one build. Nothing else about the CLI changes.
+
 ## Benchmarks
 
-These results are from the Linux kernel source tree on a hot daemon-owned
-index. Each row reports 9 wall-time runs per tool, using files-with-matches
-output and identical normalized hit sets.
+The embedded 296-query suite runs every query through the index and again
+through `eg --no-index`, on the same tree with files-with-matches output.
+Measured 2026-07-25 on isolated corpus copies, each with a hot
+daemon-owned index:
 
-| Pattern | Matched files | elgrep p50 / p95 | ripgrep p50 / p95 | grep p50 / p95 | Speedup vs ripgrep | Speedup vs grep |
-|---|---:|---:|---:|---:|---:|---:|
-| `linus tor` | 0 | 10.2 / 11.6 ms | 185.9 / 201.5 ms | 1345.8 / 1360.9 ms | 18.2x | 131.6x |
-| `EXPORT_SYMBOL_GPL` | 3610 | 45.4 / 48.2 ms | 202.6 / 209.5 ms | 1093.1 / 1107.6 ms | 4.5x | 24.1x |
-| `copy_from_user` | 1224 | 19.2 / 21.3 ms | 199.3 / 203.1 ms | 1121.3 / 1162.0 ms | 10.4x | 58.5x |
-| `schedule_timeout` | 418 | 13.6 / 15.3 ms | 177.4 / 183.7 ms | 963.2 / 989.6 ms | 13.0x | 70.8x |
+| Corpus | Index build | Suite vs scan | False positives | False negatives |
+|---|---:|---:|---:|---:|
+| linux (1.615 GB) | 17,154 ms | 6.87x | 26.56% | 0 |
+| k8s | 3,320 ms | 6.44x | 39.64% | 0 |
+| hass-core | 2,095 ms | 6.58x | 44.65% | 0 |
+| django | 783 ms | 3.64x | 26.58% | 0 |
 
-Benchmark commands:
+On linux the suite finishes in about 3,960 ms indexed against about
+27,000 ms scanning, and the index is 1,467,104,424 bytes, 0.91x the
+corpus text. The run fails if any indexed hit set diverges from its scan
+hit set, so the zero false-negative column is enforced, not observed.
+
+Those columns compare elgrep against itself. `--bench` adds a ripgrep leg
+when it finds an `rg` binary on PATH, and the numbers above were taken on
+a machine without one.
+
+```sh
+eg --bench 'max_\w+_size' ~/src/linux   # one indexed query, JSON report
+cd ~/src/linux && eg --bench            # the whole suite
+```
+
+The hand comparison, run from inside the corpus:
 
 ```sh
 eg --files-with-matches --color never --no-heading -e PATTERN ./
-rg --files-with-matches --color never --no-heading -e PATTERN ./
+eg --no-index --files-with-matches --color never --no-heading -e PATTERN ./
 grep -rIl --exclude-dir=.git --exclude-dir=.eg -e PATTERN ./
-```
-
-You can also use `--bench` to inspect one indexed invocation or run the
-embedded false-positive suite.
-
-```sh
-eg --bench 'max_\w+_size' ~/src/linux
-cd ~/src/linux && eg --bench
 ```

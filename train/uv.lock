@@ -415,7 +415,7 @@ wheels = [
 
 [[package]]
 name = "sngram"
-version = "0.5.0"
+version = "0.7.0"
 source = { directory = "../crates/python" }
 
 [package.metadata]
@@ -431,7 +431,7 @@ dev = [
 
 [[package]]
 name = "sngram-train"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },

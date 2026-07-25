@@ -10,9 +10,18 @@ inline.
 ## Source
 
 - Dataset: `HuggingFaceCode/stack-v3-train`, license ODC-By 1.0, not gated
-- 8196 parquet shards under `data/`, 4.71 TB on the wire, 15.9 TB decoded
-- 172.9M rows, one row per repository, GitHub snapshot 2025-08-07
-- Per file: `content`, `language`, `is_vendor` are the only fields read
+- 8196 snappy-compressed parquet shards under `data/`, 4.71 TB on the wire
+- 15.9 TB of decoded source text, about 4.9 trillion tokens
+- 713 languages, 172.9M rows, one row per repository
+- GitHub snapshot 2025-08-07
+
+Snappy expands about 3.3x measured on real shards, which is how 4.71 TB
+on the wire becomes 15.9 TB of source text at the counter.
+
+File content is embedded inline in `files[].content`, so a shard is
+self-contained: no object store, no per-file fetch, no second request per
+file. The reader selects `content`, `language`, `is_vendor`, and
+`size_bytes` and leaves every other column undecoded.
 
 The trainer pins the dataset revision at start and stamps it into the
 checkpoint and the final provenance. A checkpoint from a different
@@ -20,18 +29,19 @@ revision or repo fails loudly instead of training on the wrong corpus.
 
 ## Distribution
 
-The corpus is repository-grouped and the trainer takes each repository's
-natural file mix. No per-format targets, no reweighting, no sampling
-weights: elgrep indexes real source repositories, so the training
-distribution is the repository distribution. A deliberately balanced v2
-mixture measured worse on four of five real corpora, which is why v3
-trains on the natural mix.
+Sampling is repository-realistic. One row is one repository, and the
+trainer takes that repository's whole file mix as it stands. No
+per-format targets, no reweighting, no sampling weights, no small-file
+boost: elgrep indexes real source trees, so the training distribution is
+the repository distribution. An earlier hand-balanced mixture measured
+worse on four of five real corpora.
 
-Two filters apply, both deterministic:
+Vendored files count. `is_vendor` marks about 1.5 percent of files, and
+people search vendored code like any other code, so dropping it would
+train on a corpus nobody indexes. The counters track the vendored share
+separately for reporting.
 
-- `is_vendor` files are dropped; vendored code is duplicated noise
-  (about 1.5 percent of files)
-- files with null content are dropped
+One filter applies: a file with null content is skipped. Nothing else is.
 
 The realised language mix is recorded in every progress event, in the
 mint event, and in the final table provenance, so a minted table can be
@@ -41,15 +51,26 @@ explained later.
 
 1. Resolve the dataset revision and shard listing from the Hub
 2. Stream shards through parallel readers, row group by row group,
-   with only the three file columns selected
+   with only the four file columns selected
 3. Count byte pairs through the Rust `BigramCounter`, GIL released
 4. Checkpoint the counter and every reader position each minute at a
-   consistent pause
+   consistent quiesce
 5. Mint one final provenance-stamped table when the stream ends
 
-Transient network failures retry in place with backoff and resume from
-the current position; nothing is skipped. A killed run resumes from its
-last checkpoint and reproduces the identical table.
+The checkpoint is taken with the readers held still, so the counter and
+every reader position describe the same instant. Resume is byte-exact:
+a killed run picks up at the byte it stopped on and reproduces the
+identical table. Transient network failures retry in place with backoff
+and resume from the current position; nothing is skipped.
+
+## Measured
+
+On the training machine, over real shards, 2026-07-25:
+
+- about 340 MB/s of decoded source text at the counter
+- about 100 to 115 MB/s on the wire, which is the link ceiling
+- peak RSS about 2.2 GB
+- about 13 hours for a full pass over all 8196 shards
 
 ## Environment
 

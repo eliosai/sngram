@@ -2,12 +2,16 @@
 
 The frozen on-disk format under `<root>/.eg/index/postings-v9/`. Five
 files: `table.bin`, `postings.bin`, `summaries.bin`, `manifest.bin`,
-`paths-v1.bin`. Format changes bump a version and rebuild destructively;
-there are no migration readers.
+`paths-v3.bin`. Format changes bump a version and rebuild destructively;
+there are no migration readers. The manifest carries a schema version of
+its own, 20 as of elgrep 0.7, and the daemon rebuilds any index whose
+schema does not match.
 
-Sizes on the Linux kernel reference corpus (93,610 docs, 1.59GB text):
-table 307MB, postings 1019MB, summaries 21MB, manifests 16MB. Total
-1.42GB, 0.90x the corpus.
+On the Linux kernel reference corpus (1.615GB text, 2026-07-25) the
+index totals 1,467,104,424 bytes, 0.91x the corpus, built in 17,154 ms.
+`postings.bin` carries roughly three quarters of that and `table.bin`
+most of the rest; `summaries.bin` and the two manifest files together
+stay under 5%.
 
 ## Sections
 
@@ -95,11 +99,11 @@ These records answer the plan's `ScanNeed`s without touching file
 content. Status distinguishes indexed text, unindexable text (forced),
 and skipped binaries.
 
-## manifest.bin and paths-v1.bin
+## manifest.bin and paths-v3.bin
 
 The binary manifest is the commit point: per-file relative path, display
 path (empty when equal to the relative path), path hash, length, and
-timestamps, used for freshness comparison. `paths-v1.bin` is a flat
+timestamps, used for freshness comparison. `paths-v3.bin` is a flat
 offset-indexed path table the daemon reads without parsing the manifest.
 A JSON manifest is written only under `--debug` or
 `EG_INDEX_JSON_MANIFEST`, for tooling.
