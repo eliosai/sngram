@@ -81,6 +81,7 @@ pub fn scan(
             SummaryStatus::UnknownText,
         ));
     }
+    let bytes = crate::nulquit::without_utf8_bom(bytes);
     let prefix = super::classify::searchable_prefix(bytes);
     if file.is_explicit() && prefix.len() < bytes.len() {
         return Ok(document(

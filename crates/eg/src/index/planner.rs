@@ -1,7 +1,7 @@
 //! Query planning from eg patterns to public sparse-gram plans.
 
 use anyhow::{Context, bail};
-use sngram_types::{PlanExpr, QueryError, QueryPlan, WeightTable};
+use sngram_types::{ByteSet256, PlanExpr, QueryError, QueryPlan, ScanNeed, WeightTable};
 
 use crate::flags::HiArgs;
 
@@ -83,10 +83,155 @@ pub fn query_plan(args: &HiArgs, table: &WeightTable) -> anyhow::Result<IndexPla
             args.patterns()
         )
     })?;
-    let precision = if args.multiline() {
-        super::executor::Precision::Doc
-    } else {
-        super::executor::Precision::Block
+    if args.multiline() {
+        return Ok(IndexPlan {
+            plan,
+            precision: super::executor::Precision::Doc,
+        });
+    }
+    Ok(IndexPlan {
+        plan: line_scoped(plan),
+        precision: super::executor::Precision::Block,
+    })
+}
+
+/// Weaken content-edge needs into line-edge needs.
+///
+/// Line-by-line search hands the matcher one line at a time, so `\A` and `\z`
+/// bind to a line, not to the file. A content need would drop files the
+/// verifier still reports a match in.
+fn line_scoped(plan: QueryPlan) -> QueryPlan {
+    if has_content_edge_need(plan.root()) {
+        return QueryPlan::new(line_scoped_expr(plan.root()));
+    }
+    plan
+}
+
+/// True when any need in the tree binds to the content edges
+fn has_content_edge_need(expr: &PlanExpr) -> bool {
+    let (PlanExpr::AllOf {
+        needs, children, ..
+    }
+    | PlanExpr::AnyOf {
+        needs, children, ..
+    }) = expr
+    else {
+        return false;
     };
-    Ok(IndexPlan { plan, precision })
+    needs
+        .iter()
+        .any(|need| matches!(need, ScanNeed::StartsWith(_) | ScanNeed::EndsWith(_)))
+        || children.iter().any(has_content_edge_need)
+}
+
+fn line_scoped_expr(expr: &PlanExpr) -> PlanExpr {
+    match expr {
+        PlanExpr::All | PlanExpr::None => expr.clone(),
+        PlanExpr::AllOf {
+            grams,
+            needs,
+            children,
+        } => PlanExpr::AllOf {
+            grams: grams.clone(),
+            needs: needs.iter().map(line_scoped_need).collect(),
+            children: children.iter().map(line_scoped_expr).collect(),
+        },
+        PlanExpr::AnyOf {
+            grams,
+            needs,
+            children,
+        } => PlanExpr::AnyOf {
+            grams: grams.clone(),
+            needs: needs.iter().map(line_scoped_need).collect(),
+            children: children.iter().map(line_scoped_expr).collect(),
+        },
+    }
+}
+
+/// A line-scoped need implied by a content-edge need
+fn line_scoped_need(need: &ScanNeed) -> ScanNeed {
+    match need {
+        ScanNeed::StartsWith(edge) => edge_byte_need(edge.as_slice().first(), true),
+        ScanNeed::EndsWith(edge) => edge_byte_need(edge.as_slice().last(), false),
+        other => other.clone(),
+    }
+}
+
+/// The line-edge need one required edge byte implies, or a vacuous need
+fn edge_byte_need(byte: Option<&u8>, starts: bool) -> ScanNeed {
+    let Some(&byte) = byte else {
+        return ScanNeed::MinByteLen(0);
+    };
+    let mut set = ByteSet256::default();
+    set.insert(byte);
+    if starts {
+        ScanNeed::LineStartsWithAnyByte(set)
+    } else {
+        ScanNeed::LineEndsWithAnyByte(set)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sngram_types::{ByteSet256, PlanExpr, QueryPlan, ScanNeed};
+
+    use super::line_scoped;
+
+    fn plan(pattern: &str) -> QueryPlan {
+        sngram::query(&sngram::weights(), pattern).expect("pattern plans")
+    }
+
+    fn all_needs(expr: &PlanExpr) -> Vec<ScanNeed> {
+        let (PlanExpr::AllOf {
+            needs, children, ..
+        }
+        | PlanExpr::AnyOf {
+            needs, children, ..
+        }) = expr
+        else {
+            return Vec::new();
+        };
+        let mut found = needs.clone();
+        found.extend(children.iter().flat_map(all_needs));
+        found
+    }
+
+    fn byte_set(byte: u8) -> ByteSet256 {
+        let mut set = ByteSet256::default();
+        set.insert(byte);
+        set
+    }
+
+    #[test]
+    fn content_start_need_weakens_to_a_line_start_need() {
+        let scoped = line_scoped(plan(r"\A#include"));
+        let found = all_needs(scoped.root());
+
+        assert!(
+            !found
+                .iter()
+                .any(|need| matches!(need, ScanNeed::StartsWith(_)))
+        );
+        assert!(found.contains(&ScanNeed::LineStartsWithAnyByte(byte_set(b'#'))));
+    }
+
+    #[test]
+    fn content_end_need_weakens_to_a_line_end_need() {
+        let scoped = line_scoped(plan(r"return 0;\z"));
+        let found = all_needs(scoped.root());
+
+        assert!(
+            !found
+                .iter()
+                .any(|need| matches!(need, ScanNeed::EndsWith(_)))
+        );
+        assert!(found.contains(&ScanNeed::LineEndsWithAnyByte(byte_set(b';'))));
+    }
+
+    #[test]
+    fn plans_without_content_edges_are_left_alone() {
+        let original = plan("^kfree_skb");
+
+        assert_eq!(original, line_scoped(original.clone()));
+    }
 }

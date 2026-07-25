@@ -110,6 +110,7 @@ impl<'a> CaseRunner<'a> {
             args.push(OsString::from("--index-dir"));
             args.push(dir.as_os_str().to_os_string());
         }
+        args.extend(self.args.shared_corpus_filters());
         args.extend(self.case.flags.iter().map(OsString::from));
         args.push(OsString::from("--"));
         args.push(OsString::from(&self.case.pattern));
@@ -122,6 +123,7 @@ impl<'a> CaseRunner<'a> {
             OsString::from("--no-index"),
             OsString::from("--files-with-matches"),
         ];
+        args.extend(self.args.shared_corpus_filters());
         args.extend(self.case.flags.iter().map(OsString::from));
         args.push(OsString::from("--"));
         args.push(OsString::from(&self.case.pattern));
@@ -134,6 +136,7 @@ impl<'a> CaseRunner<'a> {
             return Ok(None);
         };
         let mut args = vec![OsString::from("--files-with-matches")];
+        args.extend(self.args.shared_corpus_filters());
         args.extend(self.case.flags.iter().map(OsString::from));
         args.push(OsString::from("--"));
         args.push(OsString::from(&self.case.pattern));

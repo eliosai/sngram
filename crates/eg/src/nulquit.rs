@@ -23,9 +23,20 @@ const DECODING_BOMS: [&[u8]; 4] = [
 /// Longest decoding byte-order mark
 const BOM_SNIFF_LEN: usize = 4;
 
+/// Head bytes the searcher removes before the matcher sees a stream
+const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
 /// Return true when the bytes start with a UTF-16/UTF-32 byte-order mark
 pub fn has_decoding_bom(bytes: &[u8]) -> bool {
     DECODING_BOMS.iter().any(|bom| bytes.starts_with(bom))
+}
+
+/// The bytes the matcher sees, with any UTF-8 byte-order mark removed
+///
+/// Sniffing strips this mark, so line one starts after it and anchors bind to
+/// the first real byte
+pub fn without_utf8_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(&UTF8_BOM).unwrap_or(bytes)
 }
 
 /// True when the head is still a proper prefix of some decoding mark
@@ -206,7 +217,7 @@ impl<R: Read> Read for NulQuitReader<R> {
 mod tests {
     use std::io::{Cursor, Read};
 
-    use super::{NulQuitReader, QuitPolicy, has_decoding_bom};
+    use super::{NulQuitReader, QuitPolicy, has_decoding_bom, without_utf8_bom};
 
     fn drain(bytes: &[u8], policy: QuitPolicy) -> Vec<u8> {
         let mut reader = NulQuitReader::new(Cursor::new(bytes.to_vec()), policy);
@@ -226,6 +237,21 @@ mod tests {
             }
             out.extend_from_slice(&buf[..n]);
         }
+    }
+
+    #[test]
+    fn utf8_bom_is_stripped_like_the_searcher_strips_it() {
+        assert_eq!(
+            b"alpha",
+            without_utf8_bom(&[0xEF, 0xBB, 0xBF, b'a', b'l', b'p', b'h', b'a'])
+        );
+        assert_eq!(b"alpha", without_utf8_bom(b"alpha"));
+        assert_eq!(&[0xEF, 0xBB], without_utf8_bom(&[0xEF, 0xBB]));
+        assert_eq!(
+            &[0xFF, 0xFE, b'a'],
+            without_utf8_bom(&[0xFF, 0xFE, b'a']),
+            "transcoding marks are not stripped here"
+        );
     }
 
     #[test]

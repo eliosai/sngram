@@ -33,7 +33,7 @@ impl SearchRoots {
         if roots.is_empty() {
             roots.push(SearchRoot::new(cwd.to_path_buf(), cwd.to_path_buf())?);
         }
-        let build_root = IndexRoot::new(default_build_root(cwd, &roots));
+        let build_root = IndexRoot::new(default_build_root(cwd, &roots)?);
         Ok(Self {
             roots,
             build_root,
@@ -131,6 +131,17 @@ impl SearchRoot {
             _ => self.given.clone(),
         }
     }
+
+    /// Directory an index must cover to answer this root
+    fn covering_dir(&self, cwd: &Path) -> PathBuf {
+        match self.kind {
+            SearchRootKind::Directory => self.path.clone(),
+            SearchRootKind::File => self
+                .path
+                .parent()
+                .map_or_else(|| cwd.to_path_buf(), Path::to_path_buf),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -139,17 +150,31 @@ enum SearchRootKind {
     File,
 }
 
-fn default_build_root(cwd: &Path, roots: &[SearchRoot]) -> PathBuf {
-    if roots.len() != 1 {
-        return cwd.to_path_buf();
-    }
-    match roots[0].kind {
-        SearchRootKind::Directory => roots[0].path.clone(),
-        SearchRootKind::File => roots[0]
-            .path
-            .parent()
-            .map_or_else(|| cwd.to_path_buf(), Path::to_path_buf),
-    }
+/// Smallest directory containing every search root.
+///
+/// The working directory is not it: search paths outside the working directory
+/// would leave the index covering a tree the query never asks about, and every
+/// requested file uncovered.
+fn default_build_root(cwd: &Path, roots: &[SearchRoot]) -> anyhow::Result<PathBuf> {
+    let shared = roots
+        .iter()
+        .map(|root| root.covering_dir(cwd))
+        .reduce(|shared, dir| shared_ancestor(&shared, &dir))
+        .unwrap_or_else(|| cwd.to_path_buf());
+    anyhow::ensure!(
+        roots.len() == 1 || shared.parent().is_some(),
+        "indexed search needs the search paths to share a parent directory; use --no-index"
+    );
+    Ok(shared)
+}
+
+/// Longest path prefix both paths share
+fn shared_ancestor(left: &Path, right: &Path) -> PathBuf {
+    left.components()
+        .zip(right.components())
+        .take_while(|(left, right)| left == right)
+        .map(|(component, _)| component)
+        .collect()
 }
 
 pub fn absolute_path(cwd: &Path, path: &Path) -> PathBuf {
@@ -263,16 +288,47 @@ mod tests {
     }
 
     #[test]
-    fn multiple_paths_build_from_cwd() {
+    fn multiple_paths_build_from_their_shared_parent() {
         let cwd_guard = scratch("multi");
         let cwd = cwd_guard.path().to_path_buf();
-        fs::create_dir_all(cwd.join("src")).expect("src dir");
-        fs::create_dir_all(cwd.join("tests")).expect("tests dir");
+        let crates = cwd.join("crates");
+        fs::create_dir_all(crates.join("eg")).expect("eg dir");
+        fs::create_dir_all(crates.join("lib")).expect("lib dir");
+        let roots = SearchRoots::from_paths(
+            &cwd,
+            &[PathBuf::from("crates/eg"), PathBuf::from("crates/lib")],
+            false,
+        )
+        .expect("roots");
+
+        assert_eq!(roots.build_root().path(), crates.as_path());
+        assert!(roots.is_served_by(roots.build_root()));
+    }
+
+    #[test]
+    fn multiple_paths_outside_the_cwd_are_still_served() {
+        let cwd_guard = scratch("outside-cwd");
+        let elsewhere_guard = scratch("outside-target");
+        let cwd = cwd_guard.path().to_path_buf();
+        let elsewhere = elsewhere_guard.path().to_path_buf();
+        fs::create_dir_all(elsewhere.join("sub")).expect("sub dir");
         let roots =
-            SearchRoots::from_paths(&cwd, &[PathBuf::from("src"), PathBuf::from("tests")], false)
+            SearchRoots::from_paths(&cwd, &[elsewhere.clone(), elsewhere.join("sub")], false)
                 .expect("roots");
 
-        assert_eq!(roots.build_root().path(), cwd.as_path());
+        assert_eq!(roots.build_root().path(), elsewhere.as_path());
+        assert!(roots.is_served_by(roots.build_root()));
+    }
+
+    #[test]
+    fn paths_without_a_shared_parent_are_an_error() {
+        let cwd_guard = scratch("unshared");
+        let cwd = cwd_guard.path().to_path_buf();
+        let err = SearchRoots::from_paths(&cwd, &[PathBuf::from("/"), cwd.clone()], false)
+            .err()
+            .expect("unshared paths must fail");
+
+        assert!(err.to_string().contains("share a parent directory"));
     }
 
     #[test]

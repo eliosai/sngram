@@ -4,6 +4,7 @@ Provides the definition of high level arguments from CLI flags.
 
 use std::{
     collections::HashSet,
+    ffi::OsString,
     path::{Path, PathBuf},
 };
 
@@ -382,10 +383,25 @@ impl HiArgs {
         self.multiline
     }
 
-    /// Return the selected freshness policy for the index.
+    /// Corpus filters `--bench` must hand to its indexed, scan and rg children.
+    ///
+    /// A filter the children do not share would measure two different corpora.
+    pub fn shared_corpus_filters(&self) -> Vec<OsString> {
+        let Some(limit) = self.max_filesize else {
+            return Vec::new();
+        };
+        vec![
+            OsString::from("--max-filesize"),
+            OsString::from(limit.to_string()),
+        ]
+    }
+
     /// Return one regex pattern with eg's CLI semantics encoded as inline
     /// regex flags and alternation. `None` means indexed prefiltering is not
     /// sound for this search mode.
+    ///
+    /// `-w` and `-x` boundaries sit inside the flag group because the verifier
+    /// builds them under the same flags, so `--crlf` line anchors stay CRLF
     pub(crate) fn indexed_pattern(&self) -> Option<String> {
         if self.invert_match {
             return None;
@@ -395,12 +411,13 @@ impl HiArgs {
             return Some(String::new());
         }
         let joined = JoinedPattern::from_patterns(patterns, self.fixed_strings).into_regex();
-        let wrapped = InlineFlags::from_args(self, &joined).wrap(joined);
-        Some(match self.boundary {
-            Some(BoundaryMode::Word) => format!(r"\b(?:{wrapped})\b"),
-            Some(BoundaryMode::Line) => format!("^(?:{wrapped})$"),
-            None => wrapped,
-        })
+        let flags = InlineFlags::from_args(self, &joined);
+        let bounded = match self.boundary {
+            Some(BoundaryMode::Word) => format!(r"\b(?:{joined})\b"),
+            Some(BoundaryMode::Line) => format!("^(?:{joined})$"),
+            None => joined,
+        };
+        Some(flags.wrap(bounded))
     }
 
     /// Returns true when a non-default regex engine may be used.
