@@ -15,6 +15,7 @@ use super::executor::{
 };
 
 use super::{
+    grams::{PackedGram, collapse},
     manifest::CurrentFile,
     summary::{SummaryRecord, SummaryStatus},
     verbatim::HeldDocument,
@@ -25,7 +26,7 @@ pub struct IndexedDocument {
     pub path_hash: u64,
     pub forced_candidate: bool,
     pub held: Option<HeldDocument>,
-    pub hashes: Vec<(u64, u16)>,
+    pub hashes: Vec<PackedGram>,
     pub summary: SummaryRecord,
 }
 
@@ -107,15 +108,7 @@ pub fn scan(
         return Ok(refused);
     };
     let mut hashes = hashes;
-    hashes.sort_unstable();
-    hashes.dedup_by(|next, kept| {
-        if next.0 == kept.0 {
-            kept.1 |= next.1;
-            true
-        } else {
-            false
-        }
-    });
+    collapse(&mut hashes);
     let forced_candidate = super::classify::is_high_entropy(prefix.len(), hashes.len());
     if forced_candidate {
         hashes.clear();
@@ -132,13 +125,14 @@ pub fn scan(
 fn scan_bytes(
     table: &WeightTable,
     bytes: &[u8],
-) -> anyhow::Result<Option<(Vec<(u64, u16)>, ScanSummary)>> {
-    let blocks = BlockMap::new(bytes);
+) -> anyhow::Result<Option<(Vec<PackedGram>, ScanSummary)>> {
+    let mut blocks = BlockMap::new(bytes);
     let mut hashes = Vec::with_capacity(bytes.len().min(MAX_GRAM_PREALLOC));
     let mut summary = None;
     let scan = sngram::scan(table, Cursor::new(bytes), |event| match event {
         ScanEvent::Gram(gram) => {
-            hashes.push((gram.key.value(), blocks.mask(bytes, &gram.span)));
+            let mask = blocks.mask(bytes, &gram.span);
+            hashes.push(PackedGram::new(gram.key.value(), mask));
         },
         ScanEvent::Finish(facts) => summary = Some(*facts),
     });
@@ -154,10 +148,10 @@ fn scan_bytes(
 /// word edge bits
 struct BlockMap {
     newlines: Vec<usize>,
-    cursor: std::cell::Cell<LineCursor>,
+    cursor: LineCursor,
 }
 
-/// Last resolved offset and its line index
+/// Last resolved span end and its line index
 #[derive(Clone, Copy, Default)]
 struct LineCursor {
     offset: usize,
@@ -173,13 +167,13 @@ impl BlockMap {
     fn new(bytes: &[u8]) -> Self {
         Self {
             newlines: memchr::memchr_iter(b'\n', bytes).collect(),
-            cursor: std::cell::Cell::new(LineCursor::default()),
+            cursor: LineCursor::default(),
         }
     }
 
-    fn mask(&self, bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
-        let first = self.line_of(span.start);
-        let last = self.line_of(span.end.saturating_sub(1).max(span.start));
+    fn mask(&mut self, bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
+        let last = self.line_of_end(span.end.saturating_sub(1).max(span.start));
+        let first = self.line_of_start(last, span.start);
         let mut mask = 0u16;
         if last - first >= BUCKET_COUNT {
             mask = BLOCK_BITS;
@@ -188,25 +182,32 @@ impl BlockMap {
                 mask |= 1 << bucket_of(line);
             }
         }
-        mask | word_edges(bytes, span) | line_edges(bytes, span)
+        mask | edge_bits(bytes, span)
     }
 
-    /// Line index of an offset, scanning forward from the previous query
-    fn line_of(&self, offset: usize) -> usize {
-        let mut cursor = self.cursor.get();
-        if offset < cursor.offset {
-            cursor.line = self.newlines.partition_point(|&newline| newline < offset);
+    /// Line index of a span end, which the scanner walks forward
+    fn line_of_end(&mut self, offset: usize) -> usize {
+        if offset < self.cursor.offset {
+            self.cursor.line = self.newlines.partition_point(|&newline| newline < offset);
         } else {
-            while let Some(&newline) = self.newlines.get(cursor.line) {
+            while let Some(&newline) = self.newlines.get(self.cursor.line) {
                 if newline >= offset {
                     break;
                 }
-                cursor.line += 1;
+                self.cursor.line += 1;
             }
         }
-        cursor.offset = offset;
-        self.cursor.set(cursor);
-        cursor.line
+        self.cursor.offset = offset;
+        self.cursor.line
+    }
+
+    /// Line index of a span start, walking back over the span's own newlines
+    fn line_of_start(&self, last: usize, start: usize) -> usize {
+        let mut first = last;
+        while first > 0 && self.newlines[first - 1] >= start {
+            first -= 1;
+        }
+        first
     }
 }
 
@@ -216,45 +217,39 @@ fn bucket_of(line: usize) -> u32 {
     (mixed % BUCKET_COUNT as u64) as u32
 }
 
-/// Word-edge bits for one occurrence: set when a non-word byte or the text
-/// edge borders the span
-fn word_edges(bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
+/// Word and line edge bits for one occurrence, read from the two bytes
+/// bracketing the span; `\r\n` counts as a line end so a CRLF verifier never
+/// loses a line its anchors still match
+fn edge_bits(bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
     let before = span
         .start
         .checked_sub(1)
-        .and_then(|at| bytes.get(at))
-        .is_none_or(|&byte| !is_word_byte(byte));
-    let after = bytes.get(span.end).is_none_or(|&byte| !is_word_byte(byte));
-    u16::from(before) * WORD_START_BIT
-        | u16::from(after) * WORD_END_BIT
-        | u16::from(before && after) * WORD_BOTH_BIT
+        .and_then(|at| bytes.get(at).copied());
+    let after = bytes.get(span.end).copied();
+    let word_start = before.is_none_or(|byte| !is_word_byte(byte));
+    let word_end = after.is_none_or(|byte| !is_word_byte(byte));
+    let line_start = before.is_none_or(|byte| byte == b'\n');
+    let line_end = match after {
+        None | Some(b'\n') => true,
+        Some(b'\r') => bytes.get(span.end + 1).is_none_or(|&byte| byte == b'\n'),
+        Some(_) => false,
+    };
+    u16::from(word_start) * WORD_START_BIT
+        | u16::from(word_end) * WORD_END_BIT
+        | u16::from(word_start && word_end) * WORD_BOTH_BIT
+        | u16::from(line_start) * LINE_START_BIT
+        | u16::from(line_end) * LINE_END_BIT
 }
 
 const fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-/// Line-edge bits for one occurrence, counting `\r\n` so a CRLF verifier
-/// never loses a line its anchors still match
-fn line_edges(bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
-    let starts = span
-        .start
-        .checked_sub(1)
-        .and_then(|at| bytes.get(at))
-        .is_none_or(|&byte| byte == b'\n');
-    let ends = match bytes.get(span.end) {
-        None | Some(b'\n') => true,
-        Some(b'\r') => bytes.get(span.end + 1).is_none_or(|&byte| byte == b'\n'),
-        Some(_) => false,
-    };
-    u16::from(starts) * LINE_START_BIT | u16::from(ends) * LINE_END_BIT
-}
-
 fn document(
     ord: u32,
     path_hash: u64,
     forced_candidate: bool,
-    hashes: Vec<(u64, u16)>,
+    hashes: Vec<PackedGram>,
     status: SummaryStatus,
 ) -> IndexedDocument {
     IndexedDocument {
@@ -303,14 +298,25 @@ impl AsRef<[u8]> for FileBytes {
 mod tests {
     use super::{
         BLOCK_BITS, BlockMap, LINE_END_BIT, LINE_START_BIT, WORD_BOTH_BIT, WORD_END_BIT,
-        WORD_START_BIT, bucket_of, line_edges, word_edges,
+        WORD_START_BIT, bucket_of, edge_bits,
     };
     use sngram_types::ByteRange;
+
+    const WORD_BITS: u16 = WORD_START_BIT | WORD_END_BIT | WORD_BOTH_BIT;
+    const LINE_BITS: u16 = LINE_START_BIT | LINE_END_BIT;
+
+    fn word_edges(bytes: &[u8], span: &ByteRange) -> u16 {
+        edge_bits(bytes, span) & WORD_BITS
+    }
+
+    fn line_edges(bytes: &[u8], span: &ByteRange) -> u16 {
+        edge_bits(bytes, span) & LINE_BITS
+    }
 
     #[test]
     fn same_line_grams_share_one_bucket_bit() {
         let text = b"alpha beta\ngamma\n";
-        let map = BlockMap::new(text);
+        let mut map = BlockMap::new(text);
         let first = map.mask(text, &ByteRange::new(0, 5)) & BLOCK_BITS;
         let second = map.mask(text, &ByteRange::new(6, 10)) & BLOCK_BITS;
         assert_eq!(first, second);
@@ -321,12 +327,25 @@ mod tests {
     #[test]
     fn cursor_line_lookup_matches_binary_search_in_any_order() {
         let text = b"aa\nbb\ncc\ndd\nee\nff\ngg\nhh\n";
-        let map = BlockMap::new(text);
+        let mut map = BlockMap::new(text);
         let fresh = BlockMap::new(text);
         let offsets = [0, 5, 3, 23, 11, 0, 22, 7, 7, 1, 23];
         for &offset in &offsets {
             let expected = fresh.newlines.partition_point(|&newline| newline < offset);
-            assert_eq!(map.line_of(offset), expected, "offset {offset}");
+            assert_eq!(map.line_of_end(offset), expected, "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn span_start_line_walks_back_over_the_spanned_newlines() {
+        let text = b"aa\nbb\ncc\ndd\nee\n";
+        let map = BlockMap::new(text);
+        for start in 0..text.len() {
+            for end in start..text.len() {
+                let last = map.newlines.partition_point(|&newline| newline < end);
+                let expected = map.newlines.partition_point(|&newline| newline < start);
+                assert_eq!(map.line_of_start(last, start), expected, "{start}..{end}");
+            }
         }
     }
 
@@ -336,9 +355,9 @@ mod tests {
             .flat_map(|i| format!("line number {i} with words\n").into_bytes())
             .collect();
         let spans = [(3, 9), (30, 41), (700, 712), (100, 130), (5, 6)];
-        let ordered = BlockMap::new(&text);
+        let mut ordered = BlockMap::new(&text);
         for &(start, end) in &spans {
-            let fresh = BlockMap::new(&text);
+            let mut fresh = BlockMap::new(&text);
             let span = ByteRange::new(start, end);
             assert_eq!(ordered.mask(&text, &span), fresh.mask(&text, &span));
         }
@@ -358,7 +377,7 @@ mod tests {
     #[test]
     fn newline_spanning_gram_sets_both_line_buckets() {
         let text = b"a\nb\nc\nd\ne\nf\n";
-        let map = BlockMap::new(text);
+        let mut map = BlockMap::new(text);
         let mask = map.mask(text, &ByteRange::new(0, 3)) & BLOCK_BITS;
         assert_eq!(mask, 1 << bucket_of(0) | 1 << bucket_of(1));
     }

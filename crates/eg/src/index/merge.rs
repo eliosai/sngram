@@ -50,6 +50,64 @@ impl PartialOrd for Pair {
     }
 }
 
+impl Pair {
+    const ZERO: Self = Self {
+        hash: 0,
+        ord: 0,
+        mask: 0,
+    };
+}
+
+/// Pair counts below this compare instead, where four counting passes cost
+/// more than they save
+const MIN_RADIX_PAIRS: usize = 4096;
+
+/// Sort one run's pairs into (hash, ord) order.
+///
+/// Documents reach a run under ascending ordinals, so counting passes over the
+/// hash bytes alone leave ordinals ascending within every hash. Runs that do
+/// not arrive that way fall back to comparing both fields.
+pub fn sort_pairs(pairs: &mut Vec<Pair>) {
+    if pairs.len() < MIN_RADIX_PAIRS || !ordinals_ascending(pairs) {
+        pairs.sort_unstable();
+        return;
+    }
+    let mut scratch = vec![Pair::ZERO; pairs.len()];
+    scatter(pairs, &mut scratch, 0);
+    scatter(&scratch, pairs, 8);
+    scatter(pairs, &mut scratch, 16);
+    scatter(&scratch, pairs, 24);
+}
+
+/// Whether ordinals never step backwards, which the counting passes rely on
+fn ordinals_ascending(pairs: &[Pair]) -> bool {
+    pairs.windows(2).all(|step| step[0].ord <= step[1].ord)
+}
+
+/// Move every pair into `out` by one byte of its hash, keeping equal bytes in
+/// their arrival order
+fn scatter(input: &[Pair], out: &mut [Pair], shift: u32) {
+    let mut counts = [0u32; 256];
+    for pair in input {
+        counts[digit(pair.hash, shift)] += 1;
+    }
+    let mut total = 0u32;
+    for count in &mut counts {
+        let start = total;
+        total += *count;
+        *count = start;
+    }
+    for &pair in input {
+        let at = &mut counts[digit(pair.hash, shift)];
+        out[*at as usize] = pair;
+        *at += 1;
+    }
+}
+
+const fn digit(hash: u32, shift: u32) -> usize {
+    ((hash >> shift) & 0xFF) as usize
+}
+
 pub fn run_path(runs_dir: &Path, id: usize) -> PathBuf {
     runs_dir.join(format!("{id:08}.run"))
 }
@@ -534,8 +592,8 @@ pub fn push_uvarint(out: &mut Vec<u8>, mut value: u32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PARTITION_COUNT, Pair, RUN_PAIR_SIZE, lower_bound, pair_at, partition_bounds, run_path,
-        write_pair,
+        MIN_RADIX_PAIRS, PARTITION_COUNT, Pair, RUN_PAIR_SIZE, lower_bound, pair_at,
+        partition_bounds, run_path, sort_pairs, write_pair,
     };
     use std::{
         fs::{self, File},
@@ -590,6 +648,56 @@ mod tests {
         assert_eq!(lower_bound(&bytes, 0, 4, 5), 1);
         assert_eq!(lower_bound(&bytes, 0, 4, 6), 3);
         assert_eq!(lower_bound(&bytes, 0, 4, 10), 4);
+    }
+
+    /// One run's worth of pairs: many documents, each under one ascending ord
+    fn run_pairs(count: usize, per_doc: usize) -> Vec<Pair> {
+        (0..count)
+            .map(|i| Pair {
+                hash: (i as u32).wrapping_mul(0x9E37_79B9),
+                ord: (i / per_doc) as u32,
+                mask: (i % 1023 + 1) as u16,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn counting_passes_match_the_comparison_sort() {
+        for count in [MIN_RADIX_PAIRS - 1, MIN_RADIX_PAIRS, 40_000] {
+            let mut sorted = run_pairs(count, 37);
+            sorted.sort_unstable();
+            let mut counted = run_pairs(count, 37);
+            sort_pairs(&mut counted);
+            assert_eq!(counted, sorted, "count {count}");
+        }
+    }
+
+    #[test]
+    fn descending_ordinals_fall_back_to_the_comparison_sort() {
+        let mut pairs = run_pairs(MIN_RADIX_PAIRS * 2, 37);
+        pairs.reverse();
+        let mut sorted = pairs.clone();
+        sorted.sort_unstable();
+        sort_pairs(&mut pairs);
+        assert_eq!(pairs, sorted);
+    }
+
+    #[test]
+    fn equal_hashes_keep_ascending_ordinals() {
+        let mut pairs: Vec<Pair> = (0..MIN_RADIX_PAIRS * 2)
+            .map(|i| Pair {
+                hash: (i % 8) as u32,
+                ord: i as u32,
+                mask: 1,
+            })
+            .collect();
+        sort_pairs(&mut pairs);
+        for step in pairs.windows(2) {
+            assert!(
+                step[0].hash < step[1].hash
+                    || (step[0].hash == step[1].hash && step[0].ord < step[1].ord)
+            );
+        }
     }
 
     #[test]

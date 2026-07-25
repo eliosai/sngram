@@ -611,10 +611,10 @@ fn scan_file_pairs(
     stats
         .selected
         .fetch_add(document.hashes.len(), AtomicOrdering::Relaxed);
-    pairs.extend(document.hashes.into_iter().map(|(hash, mask)| Pair {
-        hash: truncate_hash(hash),
+    pairs.extend(document.hashes.into_iter().map(|gram| Pair {
+        hash: gram.hash(),
         ord: document.ord,
-        mask,
+        mask: gram.mask(),
     }));
     Ok(())
 }
@@ -640,7 +640,7 @@ fn write_run(
     pairs: &mut Vec<Pair>,
     stats: &BuildStats,
 ) -> anyhow::Result<()> {
-    pairs.sort_unstable();
+    merge::sort_pairs(pairs);
     pairs.dedup_by(|next, kept| {
         if next.hash == kept.hash && next.ord == kept.ord {
             kept.mask |= next.mask;

@@ -19,6 +19,7 @@ use super::{
     bench,
     document::IndexedDocument,
     executor::{self, PlanBackend},
+    grams::PackedGram,
     manifest::{
         CurrentFile, CurrentSnapshot, Manifest, ManifestBackend, changed_ordinals, manifest_for,
         manifest_present, read_manifest, write_manifest, write_path_table,
@@ -196,7 +197,10 @@ struct TantivyDf<'a> {
 impl DfStats for TantivyDf<'_> {
     fn entry_count(&self, key: GramKey) -> u64 {
         self.searcher
-            .doc_freq(&Term::from_field_u64(self.fields.gram, key.value()))
+            .doc_freq(&Term::from_field_u64(
+                self.fields.gram,
+                PackedGram::truncate(key.value()),
+            ))
             .unwrap_or(0)
     }
 
@@ -217,7 +221,8 @@ impl PlanBackend for TantivyPlanBackend<'_> {
     }
 
     fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<executor::Posting>> {
-        let ords = self.lookup_term(Term::from_field_u64(self.fields.gram, key.value()))?;
+        let term = Term::from_field_u64(self.fields.gram, PackedGram::truncate(key.value()));
+        let ords = self.lookup_term(term)?;
         Ok(ords.into_iter().map(executor::Posting::full).collect())
     }
 
@@ -506,8 +511,8 @@ fn file_document(fields: IndexFields, file: &IndexedDocument) -> TantivyDocument
     if file.forced_candidate || file.held.is_some() {
         document.add_u64(fields.forced_candidate, 1);
     }
-    for &(hash, _mask) in &file.hashes {
-        document.add_u64(fields.gram, hash);
+    for gram in &file.hashes {
+        document.add_u64(fields.gram, gram.key());
     }
     document
 }
