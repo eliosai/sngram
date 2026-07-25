@@ -1,4 +1,6 @@
 //! Complete execution of public sparse-query plans against an eg index.
+//!
+//! Mask bits run rarest-fact-highest so common masks varint to one byte
 
 use std::{collections::HashMap, rc::Rc};
 
@@ -6,26 +8,33 @@ use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed};
 
 use super::summary::{SummaryIndex, SummaryStatus};
 
-/// All buckets and all word-edge bits set: fully unconstrained
-pub const FULL_MASK: u8 = u8::MAX;
+/// All buckets and all edge bits set: fully unconstrained
+pub const FULL_MASK: u16 =
+    BLOCK_BITS | LINE_START_BIT | LINE_END_BIT | WORD_BOTH_BIT | WORD_START_BIT | WORD_END_BIT;
 
 /// Low five mask bits: which hashed line buckets a gram touches
-pub const BLOCK_BITS: u8 = 0b0001_1111;
-
-/// Some single occurrence carries both word edges at once
-pub const WORD_BOTH_BIT: u8 = 1 << 5;
+pub const BLOCK_BITS: u16 = 0b0001_1111;
 
 /// Some occurrence is preceded by a non-word byte or text start
-pub const WORD_START_BIT: u8 = 1 << 6;
+pub const WORD_START_BIT: u16 = 1 << 5;
 
 /// Some occurrence is followed by a non-word byte or text end
-pub const WORD_END_BIT: u8 = 1 << 7;
+pub const WORD_END_BIT: u16 = 1 << 6;
+
+/// Some single occurrence carries both word edges at once
+pub const WORD_BOTH_BIT: u16 = 1 << 7;
+
+/// Some occurrence starts a line: a line terminator or text start precedes it
+pub const LINE_START_BIT: u16 = 1 << 8;
+
+/// Some occurrence ends a line: a line terminator or text end follows it
+pub const LINE_END_BIT: u16 = 1 << 9;
 
 /// One posting: a document ordinal and the line blocks the gram touches
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Posting {
     pub ord: usize,
-    pub mask: u8,
+    pub mask: u16,
 }
 
 impl Posting {
@@ -219,12 +228,14 @@ fn summary_may_satisfy(expr: &PlanExpr, status: SummaryStatus) -> bool {
 fn needle_may_match(needle: &GramNeedle) -> bool {
     match needle {
         GramNeedle::Key(_) => true,
-        GramNeedle::AnyKey(keys) | GramNeedle::AtWordEdge { keys, .. } => !keys.is_empty(),
+        GramNeedle::AnyKey(keys)
+        | GramNeedle::AtWordEdge { keys, .. }
+        | GramNeedle::AtLineEdge { keys, .. } => !keys.is_empty(),
     }
 }
 
 /// The context bits a needle demands on its postings
-pub fn required_edges(needle: &GramNeedle) -> u8 {
+pub fn required_edges(needle: &GramNeedle) -> u16 {
     match needle {
         GramNeedle::Key(_) | GramNeedle::AnyKey(_) => 0,
         GramNeedle::AtWordEdge {
@@ -236,7 +247,10 @@ pub fn required_edges(needle: &GramNeedle) -> u8 {
             if *whole {
                 return WORD_BOTH_BIT;
             }
-            u8::from(*starts) * WORD_START_BIT | u8::from(*ends) * WORD_END_BIT
+            u16::from(*starts) * WORD_START_BIT | u16::from(*ends) * WORD_END_BIT
+        },
+        GramNeedle::AtLineEdge { starts, ends, .. } => {
+            u16::from(*starts) * LINE_START_BIT | u16::from(*ends) * LINE_END_BIT
         },
     }
 }
@@ -510,7 +524,7 @@ mod tests {
         ords.iter().map(|&ord| Posting::full(ord)).collect()
     }
 
-    fn masked(pairs: &[(usize, u8)]) -> Vec<Posting> {
+    fn masked(pairs: &[(usize, u16)]) -> Vec<Posting> {
         pairs
             .iter()
             .map(|&(ord, mask)| Posting { ord, mask })
@@ -658,6 +672,58 @@ mod tests {
         assert_eq!(sparse, 0);
         assert_eq!(forced, 2);
         assert_eq!(run(&backend, &plan).len() as u64, forced);
+    }
+
+    #[test]
+    fn line_edge_needles_require_their_bits_on_a_posting() {
+        let anchored = LINE_START_BIT | LINE_END_BIT | BLOCK_BITS;
+        let backend = fake_backend(
+            &[(
+                GramKey(1),
+                masked(&[(0, anchored), (1, LINE_START_BIT | BLOCK_BITS)]),
+            )],
+            Vec::new(),
+        );
+        let plan = |starts, ends| {
+            QueryPlan::new(PlanExpr::AllOf {
+                grams: vec![GramNeedle::AtLineEdge {
+                    keys: vec![GramKey(1)],
+                    starts,
+                    ends,
+                }],
+                needs: vec![],
+                children: vec![],
+            })
+        };
+
+        assert_eq!(run(&backend, &plan(true, false)), vec![0, 1]);
+        assert_eq!(
+            run(&backend, &plan(true, true)),
+            vec![0],
+            "a line-start-only posting cannot satisfy a `^lit$` needle"
+        );
+    }
+
+    #[test]
+    fn line_edge_bits_do_not_collide_with_word_or_block_bits() {
+        let edges = [
+            LINE_START_BIT,
+            LINE_END_BIT,
+            WORD_BOTH_BIT,
+            WORD_START_BIT,
+            WORD_END_BIT,
+        ];
+        for (idx, bit) in edges.iter().enumerate() {
+            assert_eq!(bit & BLOCK_BITS, 0, "edge bit {idx} overlaps a line bucket");
+            for other in &edges[idx + 1..] {
+                assert_eq!(bit & other, 0, "edge bits {bit:#b} and {other:#b} overlap");
+            }
+        }
+        assert_eq!(
+            FULL_MASK,
+            BLOCK_BITS | edges.iter().fold(0, |acc, bit| acc | bit),
+            "a forced candidate must satisfy every requirable bit"
+        );
     }
 
     #[test]

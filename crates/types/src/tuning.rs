@@ -96,7 +96,9 @@ fn estimate_candidates(needle: &GramNeedle, df: &dyn DfStats) -> u64 {
     let total = df.total_entries();
     match needle {
         GramNeedle::Key(key) => df.entry_count(*key).min(total),
-        GramNeedle::AnyKey(keys) | GramNeedle::AtWordEdge { keys, .. } => keys
+        GramNeedle::AnyKey(keys)
+        | GramNeedle::AtWordEdge { keys, .. }
+        | GramNeedle::AtLineEdge { keys, .. } => keys
             .iter()
             .map(|&key| df.entry_count(key))
             .sum::<u64>()
@@ -105,7 +107,10 @@ fn estimate_candidates(needle: &GramNeedle, df: &dyn DfStats) -> u64 {
 }
 
 fn sort_keys_by_df(needle: &mut GramNeedle, df: &dyn DfStats) {
-    if let GramNeedle::AnyKey(keys) | GramNeedle::AtWordEdge { keys, .. } = needle {
+    if let GramNeedle::AnyKey(keys)
+    | GramNeedle::AtWordEdge { keys, .. }
+    | GramNeedle::AtLineEdge { keys, .. } = needle
+    {
         keys.sort_by_cached_key(|&key| df.entry_count(key));
         keys.dedup();
     }
