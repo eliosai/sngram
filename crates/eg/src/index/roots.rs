@@ -123,11 +123,15 @@ fn default_build_root(cwd: &Path, roots: &[SearchRoot]) -> PathBuf {
 }
 
 pub fn absolute_path(cwd: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
+    let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         cwd.join(path)
-    }
+    };
+    absolute
+        .components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect()
 }
 
 #[cfg(test)]
@@ -143,6 +147,23 @@ mod tests {
             .prefix(&format!("eg-roots-{name}-"))
             .tempdir()
             .expect("scratch dir")
+    }
+
+    #[test]
+    fn absolute_path_drops_current_dir_components() {
+        let cwd = Path::new("/repo");
+        assert_eq!(
+            PathBuf::from("/repo/vendor"),
+            super::absolute_path(cwd, Path::new("./vendor"))
+        );
+        assert_eq!(
+            PathBuf::from("/repo"),
+            super::absolute_path(cwd, Path::new("."))
+        );
+        assert_eq!(
+            PathBuf::from("/other"),
+            super::absolute_path(cwd, Path::new("/other/."))
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ mod flags;
 mod haystack;
 mod index;
 mod logger;
+mod nulquit;
 mod search;
 mod upstream;
 
