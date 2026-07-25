@@ -10,7 +10,8 @@ use core::cmp::Ordering;
 
 use sngram_types::Gram;
 
-use super::strings::{Order, StringSet};
+use super::order::Order;
+use super::strings::StringSet;
 
 /// The operator at a query node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +125,7 @@ impl Query {
 
     fn implies_inner(&self, other: &Self) -> bool {
         if self.is(Op::And) || (self.is(Op::Or) && self.is_atom()) {
-            return grams_imply(&self.grams, other);
+            return grams_imply(self.grams.as_slice(), other);
         }
         // an OR implies `other` when every alternative and every lone gram does
         self.is(Op::Or)
@@ -245,7 +246,7 @@ const fn invert(op: Op) -> Op {
 }
 
 /// Whether the conjunction of grams `t` implies query `q`.
-fn grams_imply(t: &StringSet, q: &Query) -> bool {
+fn grams_imply(t: &[Gram], q: &Query) -> bool {
     match q.op {
         Op::Or => q.sub.iter().any(|qq| grams_imply(t, qq)) || any_gram_in(t, &q.grams),
         Op::And => q.sub.iter().all(|qq| grams_imply(t, qq)) && q.grams.is_subset_of(t),
@@ -254,15 +255,13 @@ fn grams_imply(t: &StringSet, q: &Query) -> bool {
 }
 
 /// Whether any single gram of `t` already appears in `set`.
-fn any_gram_in(t: &StringSet, set: &StringSet) -> bool {
-    t.as_slice()
-        .iter()
-        .any(|g| StringSet::of(g.clone()).is_subset_of(set))
+fn any_gram_in(t: &[Gram], set: &StringSet) -> bool {
+    t.iter().any(|g| set.contains(g))
 }
 
 /// Whether the presence of the single gram `g` implies query `q`.
 fn gram_implies(g: &Gram, q: &Query) -> bool {
-    grams_imply(&StringSet::of(g.clone()), q)
+    grams_imply(core::slice::from_ref(g), q)
 }
 
 #[cfg(test)]
@@ -335,7 +334,7 @@ mod tests {
         let actual = left.and(right);
         // common "abc" implies each side, so the AND collapses to "abc"
         assert!(grams_imply(
-            &StringSet::of(Gram::from(&b"abc"[..])),
+            StringSet::of(Gram::from(&b"abc"[..])).as_slice(),
             &actual
         ));
     }

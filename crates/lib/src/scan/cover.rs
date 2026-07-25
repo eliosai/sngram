@@ -1,40 +1,60 @@
 //! Literal covering grams for query planning.
 
 use std::collections::VecDeque;
+use std::ops::Range;
 
-use sngram_types::{Gram, WeightTable};
+use sngram_types::WeightTable;
 
 use super::engine;
 use super::settings::ScanSettings;
 
-/// Minimal covering grams of a single literal.
-pub fn minimal_cover(table: &WeightTable, literal: &[u8]) -> Vec<Gram> {
-    let mut grams = Vec::new();
-    emit_cover_spans(table, literal, |span| {
-        if ScanSettings::emits_len(span.len()) {
-            grams.push(Gram::from(&literal[span.start..span.end]));
+/// A covering pass over short literals, reused across a whole flush.
+///
+/// The monotonic stack is the pass's only carried state; the literal scanner
+/// is built per literal so the document scanner it shares keeps its exact
+/// shape.
+pub struct Cover<'t> {
+    table: &'t WeightTable,
+    stack: CoverStack,
+}
+
+impl<'t> Cover<'t> {
+    /// A pass bound to `table`.
+    pub const fn new(table: &'t WeightTable) -> Self {
+        Self {
+            table,
+            stack: CoverStack::new(),
         }
-    });
-    grams
-}
-
-/// Every raw gram guaranteed to be indexed for a document containing `literal`.
-pub fn guaranteed_cover(table: &WeightTable, literal: &[u8]) -> Vec<Gram> {
-    let mut grams = minimal_cover(table, literal);
-    engine::scan_literal(table, literal, |gram| {
-        grams.push(Gram::from(&literal[gram.span.as_range()]));
-    });
-    grams
-}
-
-fn emit_cover_spans(table: &WeightTable, literal: &[u8], mut emit: impl FnMut(CoverSpan)) {
-    let mut stack = CoverStack::new();
-
-    for start in 0..literal.len().saturating_sub(1) {
-        let weight = table.weight(literal[start], literal[start + 1]);
-        stack.observe(start, weight, &mut emit);
     }
-    stack.drain(&mut emit);
+
+    /// Visit the span of each minimal covering gram, the chain that covers
+    /// `literal` end to end.
+    pub fn each_minimal_span(&mut self, literal: &[u8], mut visit: impl FnMut(Range<usize>)) {
+        self.stack.reset();
+        for start in 0..literal.len().saturating_sub(1) {
+            let weight = self.table.weight(literal[start], literal[start + 1]);
+            self.stack.observe(start, weight, &mut emitter(&mut visit));
+        }
+        self.stack.drain(&mut emitter(&mut visit));
+    }
+
+    /// Visit the span of every raw gram guaranteed to be indexed for a
+    /// document containing `literal`.
+    pub fn each_guaranteed_span(&mut self, literal: &[u8], mut visit: impl FnMut(Range<usize>)) {
+        self.each_minimal_span(literal, &mut visit);
+        engine::literal_scanner(self.table).push_bytes(literal, literal.len(), &mut |gram| {
+            visit(gram.span.as_range());
+        });
+    }
+}
+
+/// Adapt a span visitor to the emitted-length filter the index applies.
+fn emitter(visit: &mut impl FnMut(Range<usize>)) -> impl FnMut(CoverSpan) + '_ {
+    move |span| {
+        if ScanSettings::emits_len(span.len()) {
+            visit(span.start..span.end);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +94,10 @@ impl CoverStack {
         Self {
             entries: VecDeque::new(),
         }
+    }
+
+    fn reset(&mut self) {
+        self.entries.clear();
     }
 
     fn observe(&mut self, start: usize, weight: u32, emit: &mut impl FnMut(CoverSpan)) {
@@ -139,11 +163,22 @@ mod tests {
         WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
     }
 
+    fn spans(literal: &[u8], guaranteed: bool) -> Vec<Range<usize>> {
+        let table = table();
+        let mut cover = Cover::new(&table);
+        let mut out = Vec::new();
+        if guaranteed {
+            cover.each_guaranteed_span(literal, |at| out.push(at));
+        } else {
+            cover.each_minimal_span(literal, |at| out.push(at));
+        }
+        out
+    }
+
     #[test]
     fn minimal_cover_produces_bounded_grams() {
-        let table = table();
-        for gram in minimal_cover(&table, b"MAX_FILE_SIZE") {
-            assert!(ScanSettings::emits_len(gram.len()));
+        for at in spans(b"MAX_FILE_SIZE", false) {
+            assert!(ScanSettings::emits_len(at.len()));
         }
     }
 
@@ -151,22 +186,35 @@ mod tests {
     fn guaranteed_cover_includes_literal_scan_grams() {
         let table = table();
         let literal = b"alpha_beta_gamma";
-        let cover: HashSet<Vec<u8>> = guaranteed_cover(&table, literal)
+        let cover: HashSet<Vec<u8>> = spans(literal, true)
             .into_iter()
-            .map(|gram| gram.as_bytes().to_vec())
+            .map(|at| literal[at].to_vec())
             .collect();
-        engine::scan_literal(&table, literal, |gram| {
+        let mut scanner = engine::literal_scanner(&table);
+        scanner.push_bytes(literal, literal.len(), &mut |gram| {
             assert!(cover.contains(&literal[gram.span.as_range()]));
         });
     }
 
     #[test]
     fn cover_never_emits_out_of_bounds_spans() {
-        let table = table();
         let literal = b"short and longer literal";
-        emit_cover_spans(&table, literal, |span| {
-            assert!(span.start <= span.end);
-            assert!(span.end <= literal.len());
-        });
+        for at in spans(literal, false) {
+            assert!(at.start <= at.end);
+            assert!(at.end <= literal.len());
+        }
+    }
+
+    #[test]
+    fn a_reused_pass_matches_a_fresh_one() {
+        let table = table();
+        let long = vec![b'q'; 300];
+        let literals: [&[u8]; 3] = [&long, b"alpha_beta_gamma", b"MAX_FILE_SIZE"];
+        let mut shared = Cover::new(&table);
+        for literal in literals {
+            let mut reused = Vec::new();
+            shared.each_guaranteed_span(literal, |at| reused.push(at));
+            assert_eq!(reused, spans(literal, true));
+        }
     }
 }

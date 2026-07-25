@@ -174,6 +174,7 @@ impl<'a> Analyzer<'a> {
     fn fold_concat(&self, subs: &[Hir]) -> RegexpInfo {
         let mut accs: Vec<Option<RegexpInfo>> = vec![None];
         let mut pending: Vec<Look> = Vec::new();
+        let mut variants: Vec<RegexpInfo> = Vec::new();
         let (subs, trailing) = self.split_trailing_anchor(subs);
         for sub in subs {
             if let HirKind::Look(look) = sub.kind() {
@@ -181,7 +182,7 @@ impl<'a> Analyzer<'a> {
                 continue;
             }
 
-            let variants = self.analyze_variants(sub);
+            self.analyze_variants(sub, &mut variants);
             if variants.is_empty() {
                 return RegexpInfo::no_match();
             }
@@ -197,15 +198,20 @@ impl<'a> Analyzer<'a> {
         self.merge_infos(infos)
     }
 
-    /// Analyze a concat child, optionally exposing a small set of alternatives
-    /// that should stay branch-local until more surrounding context is known.
-    fn analyze_variants(&self, hir: &Hir) -> Vec<RegexpInfo> {
+    /// Analyze a concat child into `variants`, optionally exposing a small set
+    /// of alternatives that should stay branch-local until more surrounding
+    /// context is known. Refills the caller's buffer instead of allocating a
+    /// fresh one per child.
+    fn analyze_variants(&self, hir: &Hir, variants: &mut Vec<RegexpInfo>) {
+        variants.clear();
         if let HirKind::Class(cls) = hir.kind()
             && let Some((exact, wide)) = classes::split_mixed_class(cls)
         {
-            return vec![self.fold_info(exact), self.fold_info(wide)];
+            variants.push(self.fold_info(exact));
+            variants.push(self.fold_info(wide));
+            return;
         }
-        vec![self.analyze(hir)]
+        variants.push(self.analyze(hir));
     }
 
     /// Cross the live concat alternatives with a child's branch variants.
@@ -218,33 +224,46 @@ impl<'a> Analyzer<'a> {
         if accs.len().saturating_mul(variants.len()) > MAX_CONCAT_ALTERNATIVES {
             accs = vec![Some(self.merge_accs(accs))];
         }
-        let pending_at_seam = pending.clone();
-        pending.clear();
+        let pending_at_seam = core::mem::take(pending);
+        if let ([variant], [acc]) = (variants, accs.as_mut_slice()) {
+            *acc = self.join_variant(acc.take(), variant, &pending_at_seam);
+            if acc.is_none() {
+                accs.clear();
+            }
+            return accs;
+        }
         accs.into_iter()
-            .flat_map(|acc| self.join_variants(acc.as_ref(), variants, &pending_at_seam))
+            .flat_map(|acc| self.join_variants(acc, variants, &pending_at_seam))
             .map(Some)
             .collect()
     }
 
+    /// Join one live accumulator with each branch variant. The accumulator
+    /// carries every gram the plan has committed so far, so the last variant
+    /// takes it by move and only the earlier ones pay for a copy.
     fn join_variants(
         &self,
-        acc: Option<&RegexpInfo>,
+        mut acc: Option<RegexpInfo>,
         variants: &[RegexpInfo],
         pending: &[Look],
     ) -> Vec<RegexpInfo> {
-        variants
-            .iter()
-            .filter_map(|variant| self.join_variant(acc, variant, pending))
-            .collect()
+        let last = variants.len().saturating_sub(1);
+        let mut joined = Vec::with_capacity(variants.len());
+        for (at, variant) in variants.iter().enumerate() {
+            let prev = if at == last { acc.take() } else { acc.clone() };
+            if let Some(info) = self.join_variant(prev, variant, pending) {
+                joined.push(info);
+            }
+        }
+        joined
     }
 
     fn join_variant(
         &self,
-        acc: Option<&RegexpInfo>,
+        mut prev: Option<RegexpInfo>,
         variant: &RegexpInfo,
         pending: &[Look],
     ) -> Option<RegexpInfo> {
-        let mut prev = acc.cloned();
         let mut info = variant.clone();
         let mut seam_looks = pending.to_vec();
         if looks::looks_blocked(&mut seam_looks, prev.as_mut(), Some(&mut info)) {

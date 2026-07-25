@@ -11,8 +11,9 @@ use sngram_types::Gram;
 use super::algebra::Query;
 use super::analyze::{Analyzer, BOUNDARY_GROW, BOUNDARY_KEEP, MAX_EXACT, MAX_EXACT_BYTES, MAX_SET};
 use super::info::RegexpInfo;
+use super::order::Order;
 use super::settings::QuerySettings;
-use super::strings::{Order, StringSet};
+use super::strings::StringSet;
 
 /// Most strings ever covered in one flush, and the largest exact cross
 /// product built in one concat step. Case-folded text doubles per character
@@ -157,7 +158,7 @@ fn reduce_set_skeletal(t: &mut StringSet, order: Order) {
     const SKELETAL_COUNT: usize = 16;
     let mut keep = SKELETAL_KEEP.min(t.max_len());
     loop {
-        truncate_to(t, order, keep);
+        t.truncate(order, keep);
         t.clean(order);
         if t.len() <= SKELETAL_COUNT || keep <= 1 {
             break;
@@ -178,7 +179,7 @@ fn reduce_set(t: &mut StringSet, order: Order) {
     };
     let mut keep = BOUNDARY_KEEP.min(t.max_len());
     loop {
-        truncate_to(t, order, keep);
+        t.truncate(order, keep);
         t.clean(order);
         // never truncate a non-empty string to the seam-severing "" artifact
         if t.len() <= target || keep <= 1 {
@@ -188,36 +189,20 @@ fn reduce_set(t: &mut StringSet, order: Order) {
     }
 }
 
-pub fn truncate_to(t: &mut StringSet, order: Order, keep: usize) {
-    let items = mem::take(t).into_vec();
-    for s in items {
-        if s.len() <= keep {
-            t.push(s);
-        } else if order == Order::Prefix {
-            t.push(Gram::from(&s[..keep]));
-        } else {
-            t.push(Gram::from(&s[s.len() - keep..]));
-        }
-    }
-}
-
 /// Drop strings made redundant by a shorter one already in the set: if `ab`
 /// is a possible prefix, `abc` adds nothing.
 fn dedup_redundant(t: &mut StringSet, order: Order) {
-    let items = mem::take(t).into_vec();
-    let mut kept: Vec<Gram> = Vec::new();
-    for s in items {
-        let covered = kept.last().is_some_and(|p| match order {
+    let mut kept: Option<Gram> = None;
+    t.retain(|s| {
+        let covered = kept.as_ref().is_some_and(|p| match order {
             Order::Prefix => s.starts_with(p.as_bytes()),
             Order::Suffix => s.ends_with(p.as_bytes()),
         });
         if !covered {
-            kept.push(s);
+            kept = Some(s.clone());
         }
-    }
-    for s in kept {
-        t.push(s);
-    }
+        !covered
+    });
 }
 
 fn take_set(info: &mut RegexpInfo, order: Order) -> StringSet {
@@ -283,9 +268,9 @@ mod tests {
     }
 
     #[test]
-    fn truncate_to_respects_prefix_and_suffix_bounds() {
+    fn truncate_respects_prefix_and_suffix_bounds() {
         let mut prefixes = set(&[b"a", b"abcd", b"abcdef"], Order::Prefix);
-        truncate_to(&mut prefixes, Order::Prefix, 3);
+        prefixes.truncate(Order::Prefix, 3);
         prefixes.clean(Order::Prefix);
 
         assert!(prefixes.as_slice().iter().all(|member| member.len() <= 3));
@@ -293,7 +278,7 @@ mod tests {
         assert!(contains_member(&prefixes, b"abc"));
 
         let mut suffixes = set(&[b"a", b"abcd", b"zcd", b"abcdef"], Order::Suffix);
-        truncate_to(&mut suffixes, Order::Suffix, 3);
+        suffixes.truncate(Order::Suffix, 3);
         suffixes.clean(Order::Suffix);
 
         assert!(suffixes.as_slice().iter().all(|member| member.len() <= 3));

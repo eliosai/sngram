@@ -1,0 +1,671 @@
+# Frozen plan digests: <fnv1a64 of the rendered plan> <rendered bytes> <pattern>
+# Regenerate only when a planner change is meant to change plans.
+3755aae17ac1f1fd	344	MAX_FILE
+e31775cfb3eb55eb	1689	MAX_FILE_SIZE_LIMIT_EXCEEDED
+b1c068fe7dacda66	6803	MAX_[A-Z]+_SIZE
+66844bf3e0635ec3	1447	(foo|bar|baz)_handler
+b9a12e9118b7f045	713	/usr/local/.*\.conf
+d69266fe45a7cad8	508	(?i)error
+eb158c5ce1f61a59	5676	fn\s+\w+\(.*\)\s*->
+ddcd295afb28af7f	246	TODO|FIXME
+2cfc3085eea76568	452	#\[derive\(
+034ada1de2579a42	454	\.unwrap\(\)
+334df8ee648d1976	675	pub async fn
+70555865248918df	382	impl .* for 
+0536a92e6e7d6e14	591	return Err\(
+f6309980d6def3a0	664	use crate::
+7cd2d747a97386b1	5908	fn \w+\(
+6edbae770d1a84ca	17335	pub(\(crate\))? \w+:
+84e58aa1566e7423	847	grams @> ARRAY
+d70b3a5503fdc9e7	39894	((((((abc|abd){4}){4}){4}){4}){4}){4}
+8e02809f6ed72802	2034	(?i)abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz
+f1455e6d3a841810	1894	(aa000.*bb000|aa001.*bb001|aa002.*bb002|aa003.*bb003|aa004.*bb004|aa005.*bb005)
+653794da7eb037a5	141048	[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
+6d2867aea2fbe805	1639	^[ \t]*#define CONFIG
+114893ced79a8c33	19985	EXPORT_SYMBOL\(\w+\);[ \t]*$
+16a333b78ecce023	9865	[A-Za-z\p{Greek}]term_var
+cfc75573c9eb1208	19293	read[A-Za-z\p{Cyrillic}]lock
+010dcbd532d45b33	104	\bµs\b
+1fa3331a0368992c	16801	[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}
+dd3822b90ccf077d	171	(?i)aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+697cdad22027e97d	52822	(?i)abcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnop
+7d8932a49fa2dceb	669	sched_clock
+bc8f9c972650d1ef	795	usb_submit_urb
+a2e964dd1af6ddd9	589	request_irq
+b5b884762a77e705	215	kfree
+30e185599d2d0ed0	516	static int
+8dcab426038e7636	1001	EXPORT_SYMBOL_GPL
+cb5c6d0e994921dd	1772	DEFINE_PER_CPU_SHARED_ALIGNED
+ec7f517389f940cd	723	CONFIG_PREEMPT
+9073098768edb67a	536	Everything
+72787439854f1886	371	->owner
+d4a328034a5f0c0f	369	kzalloc\(
+8ceaee9c6d4dfca1	514	dev->name
+07307ca5c1b281b1	768	out of memory
+be9532bf1139f44f	105	EXP
+150ee9c9f765183c	145	4096
+91d47759a86dbdcc	582	0xdeadbeef
+351c34edc4722ba4	137	\\n\\t
+9db8d65c0504bd16	1432	#include <linux/module.h>
+df3e0eb66ca55ec1	1405	/* fallthrough */
+406ece1d62cff225	401	kfree(skb)
+77fc9ea6856b4b43	63	a.*b
+1e4ed3b992de9ff7	139	arr[0]
+302e8ca0b9e0cae7	35	i++
+9bb878d2e7655ff0	779	max_file_size
+7d8932a49fa2dceb	669	sched_clock
+ec7f517389f940cd	723	CONFIG_PREEMPT
+e493165ef8be3038	749	Out Of Memory
+8dcab426038e7636	1001	EXPORT_SYMBOL_GPL
+6d62559f6bf74bcf	530	kobject_get
+6e7b4c05f713aab4	881	subsys_initcall
+7472406b1bd6e01a	181	xhci
+b568a1e078409010	1294	(?i)NetDev_Priv
+fc7e4a0bf551814c	1475	(?i:readl)_relaxed
+e3fb59c067fc5ff1	640	mutex_lock
+b5b884762a77e705	215	kfree
+1b0c0f24b9530dbd	97	err
+40e4af47ecee6138	1858	sched[_-]clock
+b7bf168c5c6999d8	1511	skb[0-9]
+a540ed114309f5f8	991	reg[0-7]
+26b00903c3d3e768	644	[RT]X_RING
+8b10f5be0d960bd0	1204	m[ae]x_size
+4f740068ea704fe4	2132	s[ck][bh]_buff
+ec9ce4aa7a68e708	98	ab[^cde]fgh
+e938673c098a003e	1330	[xyz]table_entry
+94b5c63d0729ba84	2267	netdev_priv[0-9(]
+674b3fc4b26a1b83	1784	sched_clock|sched-clock
+ccfd671b1e5c62f1	1294	(max|min)_file_size
+8cfb52018b9486cb	886	usb_submit_urb|kfree
+b9996520aaa055d6	1151	(kmalloc|kzalloc|kcalloc)
+29b397595bc1b526	719	EXPORT_SYMBOL|EXPORT_SYMBOL_GPL
+6422eae1e2d19ede	2754	((raw_)?spin|mutex)_lock
+447fe1cae693172f	872	netif_(rx|tx)
+7af17fb45b600554	1165	[Kk]config|[Mm]akefile
+f04d8a07dd3c1b67	3217	(open|close|read|write|ioctl)_file
+d9e5f51df072e9a3	333	(?:un)?likely\(
+9011b7377fa49f7d	1360	get_?user_pages
+3995b613f1f84aa6	409	pci_dev(_put)?
+ba970fd5aaed0f14	887	__?builtin_expect
+002eac6a01e065e9	90	x{3}
+6429ea775b86e388	90	=={2}
+2229647908e7b57d	164	(ab){3}
+49d90b3bbf42c357	91	ff{2,}
+c16fcf2c4bc91b17	695	0x[0-9a-f]{8}
+774f22a9c4d00570	365	e{2,4}print
+feef1d71c8146d52	63	[0-9]{0,3}ms
+1c7369da8e0f0970	350	sched.*clock
+560d7e1a19a4765c	375	request.+irq
+2a2e9e4e59f5e2e3	22423	max_\w+_size
+08dfeb7ae336315c	62140	static\s+void\s+init
+13ce3947a5a72404	634	usb_submit.*usb_free
+16502ddaf0e97a4c	153	foo.{0,20}bar
+46396f06c62b9908	1028	#include.*linux/sched
+35b8db21d3109196	560	for_each.*entry.*list
+b608b8d7a3a8fa7f	3821	kern[a-z]*builds
+3862ce029fb6658f	1265	^static DEFINE_MUTEX
+2d3004e3b3f9376e	1483	MODULE_LICENSE\("GPL"\);$
+02d44203ecd15c8a	966	^#define CONFIG
+b985ed468e765203	558	\bkfree_skb\b
+db3067db32fd17ad	440	kfree(?-u:\B)_skb
+a6967c17e2f878e3	24454	init\w+register
+85b43e51e17770bf	633	[0-9]+msecs
+1f9032484bc2cb52	57967	v[0-9]+\.[0-9]+
+c84a02252393e444	600	mem+set
+1096c952963d7aa6	323	(foo)+bar
+1a67c5fbf3e631f1	520	z*alloc_page
+5026769fc11e968d	158	kmal.oc
+93d3bca8cae3a1b6	2730	dma[_-]mapping[_-]error
+add7b8b181064fba	671	do_exit\(code\)
+35bbca4059560831	374	page\[i\]
+5c0b190b3f375233	215	\$\(CC\)
+a633a7358f3c7ca2	214	\{ 0 \}
+9711b97561c4f856	147	\*pos
+3f62956cfa5eaa79	671	printk\("\\n"\)
+e4c79b6562342797	299	Björn
+b7177cb514f055c2	105	→
+acfe88c0373c4e4c	298	björn
+0ddf6eade70205fb	289	序列
+4867e5c3445f0a26	515	caf[éè]
+9113b0aa32a5b055	63	\\0
+ddcd295afb28af7f	246	TODO|FIXME
+460b136fd9841c04	1454	__attribute__\(\(packed\)\)
+c0b78dbdf1f449ba	490	if \(!ptr\)
+810e610716c960d8	871	return -EINVAL;
+7345df85999aac7f	940	static inline int
+5f4ca3f236b87938	826	printk\(KERN_ERR
+6ba7fa37456f8eef	1034	printk_ratelimit\(\)
+1dbf719d45be3737	610	memcpy\(.*sizeof
+c057684f7e2b77fe	916	kmalloc\(.*GFP_KERNEL
+7a1db648882fb45a	996	container_of\(ptr
+d9c7247331d6665f	499	LIST_HEAD\(
+889416e8284e4c13	723	module_init\(.*_init\)
+316c1172c20b5400	1055	#ifdef CONFIG_SMP
+e71e71962b041a76	1168	smp_mb__after_atomic
+9ea6552fd5aed5e6	702	this_cpu_ptr
+0ff9357508ee452b	1090	rcu_read_lock_held
+b48185a529f31fdb	21810	unlikely\(!\w
+b5a6e10b659cab09	664	\(void \*\)dev
+9950ccac4d05a213	1653	(z*abcdefz*)(z*(ghijk|lmnop)z*)
+61d4eac06fbb28a9	446	a+hello|b+world
+6a7c94b8fb61436f	91	(bbbb)a?
+bae9d17ab3587702	378	(abcd)(efgh)
+58a3f1a042be3327	215	a{5,}bcd
+526baf2ad546a9f4	206	(ab){2,}c
+b8a768c46da63c09	434	(abc){2,}def
+924a76616cebccfc	132	a{2}b{2}
+c84a02252393e444	600	mem+set
+aaf254d0875183a7	637	rea+d_lock
+af71184c86018698	1	t\bhe
+af71184c86018698	1	foo$bar
+af71184c86018698	1	kfree\B\(
+b99c52fa3064c180	73632	read[a-zA-Z][a-zA-Z]lock
+84e70b105a15b1ab	121519	init[0-9a-zA-Z_][0-9a-zA-Z_]call
+4eba7630997b2fc4	8397	dev[a-zA-Z]attr
+ca5ba3e4ce5d5525	1863	trace_event_raw_event_sched_switch
+44b5b33f1ebdc9a1	11501	(?i)netif_receive_skb_list_internal
+1c7369da8e0f0970	350	sched.*?clock
+560d7e1a19a4765c	375	request.+?irq
+047b0fdd11ebc8c7	5230	get_?user_?pages_?fast
+05b0384782071bbf	1969	kfree|unregister_netdevice_notifier
+e3fb59c067fc5ff1	640	mutex_lock
+d2f090dd16a1e44f	20119	mutex\Wlock
+ec7f517389f940cd	723	CONFIG_PREEMPT
+fb1bede7bb5b95cc	145	(?-u)\x7fELF
+a2e964dd1af6ddd9	589	request_irq
+a2e964dd1af6ddd9	589	request_irq
+5e700f75a0ccb16a	587	pgtable\);\n\}
+2d52bfec8d90b401	727	request_irq$
+297925494b716c7d	11512	(?i)very_long_function_name_with_many_parts_and_then_some_more_tail
+188875009bf3bd20	14795	[!-~]the_quick_brown_fox_jumped_over_the_lazy_dog_while_the_cat_watched_from_the_windowsill_yes
+1d0ca9b16a54f55f	16485	(?i:very_long_function_name_with_many_parts).*[a-h]another_extremely_long_trailing_literal_block_that_should_be_covered_maximally_here_nowz
+00079f20d1b6f7eb	589	init(xy){2,}done
+b7d4baf9156f6b9c	440	foo\b[x+]bar
+3a260e3c85eca690	5444	\p{Greek}term_var
+1465d8e6ba9bdc15	61408	v[0-9]+\.[0-9]+\.[0-9]+
+77995ad443e3f13a	3566	([0-9]{1,3}\.){3}[0-9]
+8ca490d47cdf5b75	900	0x[0-9a-fA-F]{16}
+78dc065d08d7d292	174	0xff\b
+3ecf30150a59e3fb	1052	1UL << [0-9]+
+e1e30ca104aa0fb3	90	x{5}
+4c1a433bd49d7ca9	213	ab{5}cd
+39a89b8904ba8c37	14505	\w{4,8}_ops
+bb793dbfcab9a9af	916	EXPORT_SYMBOL$
+02d44203ecd15c8a	966	^#define CONFIG
+edebaab42e7b2eef	4716	GFP_(KERNEL|ATOMIC|NOWAIT|NOFS|NOIO|USER)
+502930285ded183f	5779	IRQF_(SHARED|ONESHOT|TRIGGER_HIGH|TRIGGER_LOW|NO_SUSPEND)
+56d37eca78add5e6	2582	((un)?register|(de)?activate)_netdev
+56a00dfb981f852b	29704	int \(\*\w+\)\(
+638575d2e1e1e5ac	23561	static const struct \w+_operations
+5bdfad3fe554f080	450	skb->data
+74cf85a4c7c68348	955	\(struct sock \*\)
+f0847d5f4275f3d4	104	%pS
+2429ac9ece602f46	247	0x%08x
+2dbbb1991afb5405	559	pr_err\("%s:
+e154a4f00de4d896	1035	-E(INVAL|NOMEM|BUSY|AGAIN)
+4e6d599dedc763be	513	ERR_PTR\(-E
+87041aaac7ba8f6c	1732	SPDX-License-Identifier: GPL
+a9df263bdd3e55bd	856	Signed-off-by:
+be1f58a55a7953e9	942	spin_lock_irqsave
+5d97170d741e022e	1346	netif_receive_skb_core
+61cf7571dcbf5f79	558	TaskStruct
+010dcbd532d45b33	104	µs
+00909df8d6f0f514	263	中文
+7dbae9187e07d91e	1487	include/linux/netdevice\.h
+8d18804ea4adbe78	742	spin_lock.*spin_unlock
+6aa56c8a9c26684f	618	static.*return -E
+af71784c860190ca	1	.*
+43dcaac57f351e0f	114	\w+
+f4b7b107a59f2f0a	13	.
+77fc9ea6856b4b43	63	ab
+ba0f0f963435fcd8	82	[a-z]+
+f4b7b107a59f2f0a	13	[^x]+
+af71784c860190ca	1	^
+88cc34a19a244cad	63	a.b
+a508a6324c99e3fb	34	kfree|ab
+1465d8e6ba9bdc15	61408	v[0-9]+\.[0-9]+\.[0-9]+
+77995ad443e3f13a	3566	[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}
+443fdd6d2c80ce47	695	0x[0-9a-f]{16}
+0dfdbd7ea9161a85	900	0x[0-9a-fA-F]{8}
+6ae0a11ab4642c09	1004	1 << [0-9]+
+e1e30ca104aa0fb3	90	x{5}
+4c1a433bd49d7ca9	213	ab{5}cd
+6d2867aea2fbe805	1639	^[ \t]*#define CONFIG
+35b0e318a6e30764	3258	^[ \t]*static inline
+114893ced79a8c33	19985	EXPORT_SYMBOL\(\w+\);[ \t]*$
+114893ced79a8c33	19985	EXPORT_SYMBOL\(\w+\);[ \t]*$
+16a333b78ecce023	9865	[A-Za-z\p{Greek}]term_var
+cfc75573c9eb1208	19293	read[A-Za-z\p{Cyrillic}]lock
+cfc75573c9eb1208	19293	read[A-Za-z\p{Cyrillic}]lock
+1fa3331a0368992c	16801	[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}
+9e93a8ac54ca2aa5	66778	[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}
+4803de50d8de02ad	3469	READ[A-Z]lock_IRQ
+d57210421b2b43c4	4743	(?i:(read|write|cmpxchg)_once)
+af71784c860190ca	1	.*
+30e185599d2d0ed0	516	static int
+39a89b8904ba8c37	14505	\w{4,8}_ops
+bb793dbfcab9a9af	916	EXPORT_SYMBOL$
+02d44203ecd15c8a	966	^#define CONFIG
+e94c5b6241c364a9	28253	EXPORT_SYMBOL\(\w+\);$
+4839d12e89ac44ed	2591	^#define CONFIG_[A-Z_]+
+edebaab42e7b2eef	4716	GFP_(KERNEL|ATOMIC|NOWAIT|NOFS|NOIO|USER)
+38c36fb26c62de63	6124	IRQF_(SHARED|ONESHOT|TRIGGER_RISING|TRIGGER_FALLING|NO_SUSPEND)
+56d37eca78add5e6	2582	((un)?register|(de)?activate)_netdev
+56a00dfb981f852b	29704	int \(\*\w+\)\(
+638575d2e1e1e5ac	23561	static const struct \w+_operations
+5bdfad3fe554f080	450	skb->data
+74cf85a4c7c68348	955	\(struct sock \*\)
+f0847d5f4275f3d4	104	%pS
+2429ac9ece602f46	247	0x%08x
+2dbbb1991afb5405	559	pr_err\("%s:
+e154a4f00de4d896	1035	-E(INVAL|NOMEM|BUSY|AGAIN)
+4e6d599dedc763be	513	ERR_PTR\(-E
+87041aaac7ba8f6c	1732	SPDX-License-Identifier: GPL
+a9df263bdd3e55bd	856	Signed-off-by:
+be1f58a55a7953e9	942	spin_lock_irqsave
+5d97170d741e022e	1346	netif_receive_skb_core
+61cf7571dcbf5f79	558	TaskStruct
+010dcbd532d45b33	104	\bµs\b
+010dcbd532d45b33	104	µs
+00909df8d6f0f514	263	中文
+7dbae9187e07d91e	1487	include/linux/netdevice\.h
+8d18804ea4adbe78	742	spin_lock.*spin_unlock
+6aa56c8a9c26684f	618	static.*return -E
+1b82048a3dae9306	657	hello world
+1b82048a3dae9306	657	hello world
+6addb10567698590	656	Hello World
+cb325eb48fa0b9b5	139	TODO
+7c76bf79f6eb4cca	223	FIXME
+249921e70b14c495	91	XXX
+b80dd5d1ddce3181	591	workaround
+5446586b1a468b8a	479	deprecated
+76446efc68724870	406	username
+293291417d0134b1	373	password
+cb1f3e5c129aa8d3	263	timeout
+2f737e88aba27841	174	error
+6bce931e29d8f37a	104	log
+1b0c0f24b9530dbd	97	err
+102766df6fd2a24e	104	usb
+173d7f5beae06f12	104	net
+8bc59538750f46e4	180	main
+fd0282aa0cfebe37	806	buffer overflow
+3c91d3de8c13e3da	664	memory leak
+7d0bbe12444ccf6a	738	race condition
+19f99a116863788b	789	use after free
+3e9cad7c425d28e0	596	double free
+55b00e115173489e	586	off by one
+a38966a5002891c9	845	not implemented
+f4dcc05577e39ab1	453	don't use
+556344adbbb65d98	298	broken
+e7e3243504176fed	146	hack
+e5185faf7a3450b4	639	kernel panic
+ca674bd675a29d1b	605	Kernel Panic
+e2976fa694f1e9cf	635	for example
+00759d7309dd850f	697	in the future
+c92579f17d8b8cf7	606	as well as
+728a5c7173a41730	1103	should never happen
+a5f231f25331764f	642	This function
+6e3a734d792fa228	475	Note that
+ea0a4bc02048aa52	510	no longer
+e50b43ed2d95ae9d	1059	hello_world_xyzzy
+ab4f771129620631	1574	SuperCaliFragilisticName
+332895853cd3bd48	1479	purple monkey dishwasher
+2fde0bbdb57de416	320	the the the the the
+dacdff4501bb9082	1098	qwerty_zxcvb_asdfg
+dccd63d8d5881c9c	1075	0xfeedfacecafebeef
+ba2c65c5c6c441bd	928	xyzzy_alpha.*xyzzy_omega
+7bef2455e6863845	154	if.*goto
+36817240e0af73db	525	kmalloc.*kfree
+486d25c887b22321	381	case.*break;
+ab515225523b413d	459	static.*int.*return
+ccf66fb9318574f3	219	^}$
+c97c2e46d96a6b86	712	^\treturn;$
+bff69feeac4444b9	328	^#endif
+456b2a2e8a1d0d38	165	^ \*
+3ed8e6c6d8db170f	793	compatible = "
+47148c785d266e84	845	status = "okay"
+85e5e87ddf90cc50	729	obj-\$\(CONFIG_
+af71784c860190ca	1	
+af71784c860190ca	1	()
+af71784c860190ca	1	a|
+af71784c860190ca	1	|a
+af71784c860190ca	1	(|)
+af71784c860190ca	1	^
+af71784c860190ca	1	$
+af71784c860190ca	1	^$
+af71784c860190ca	1	\b
+af71784c860190ca	1	\B
+af71784c860190ca	1	.*
+f4b7b107a59f2f0a	13	.+
+af71784c860190ca	1	(?s).*
+b7ebb0c2ea54d83c	83	[]
+a17b6ec39ae873c6	85	[^]
+af71784c860190ca	1	a{0}
+2820ecca68966ac8	35	(a{0})b
+af71784c860190ca	1	(?i)
+96c34dfbfa23d684	74	(?i)a
+96c34dfbfa23d684	74	(?i)A
+03cb93d8ed9f0b1c	74	(?i)ß
+ccf8d261f6610fe5	63	(?i)İ
+c3caeacada864659	104	(?u)ﬀ
+af71784c860190ca	1	a**
+af71784c860190ca	1	(a*)*
+77fc9ea6856b4b43	63	(a+)+b
+af71784c860190ca	1	((a|b)*c)*
+c446cf7e84e29e10	98	x{1000}
+6f971bf17105098a	175	(?i)x{200}
+f4b7b107a59f2f0a	13	[\x00-\xff]
+e50359e617b70a38	103	(?-u)[\x80-\xff]
+f4b7b107a59f2f0a	13	(?-u).
+f4b7b107a59f2f0a	13	\p{Any}
+f4b7b107a59f2f0a	13	\PL
+13d49f238e72e8fe	8467	(?i)(abc|ABD|aBe){3}
+ccf86f45c95b1f7d	94	\Qa.b*c\E
+77fc9ea6856b4b43	63	a(?:)b
+af71784c860190ca	1	(?:a|)(?:b|)
+76306317dfe1cc95	279	^(?:a|b)$
+f7d40345ecbf3f9e	97	\bfoo\B
+d158d76db1af57cb	279	(?m)^# .*$
+2b849f3bc529d97b	42	\r\n
+7073d5e1799499b6	189	a\z
+99b2f4d496a915fc	300	\Aabc
+af71184c86018698	1	é\A
+f4b7b107a59f2f0a	13	(?m:$)(_42|\S)
+af71184c86018698	1	(\)µ \w|[^a-z]éMAX)$日本(?m:^)
+f4b7b107a59f2f0a	13	(((?i:\.)|é\B|(?i:420))\A|(?i:\z(?i:-\.))|(?m:$)((?:\s)+?|\x00\t_\x00))
+9f4547160a13a65f	92	(?i:[A-Za-z_])
+db02fc39ad78dc62	100	(?i:(?:\p{Cyrillic}){2})
+913eb9a434ee795d	92	((?i:\Aabc\t)|(?i:(?i:[a-z])))
+c8e6c522e7beffcf	162	(?:(?:z_){1,4})+?\b\z
+f4b7b107a59f2f0a	13	\b[^a-z]
+787243facff6ca7a	618	(?:MAXé\x0042){2,}
+f4b7b107a59f2f0a	13	(((\(/|[a-c0-2_]|abc日本)|\zb)|((\x00|\x00)|(?i:\n))|(?i:MAX-)impl(?:\d){4,8})
+af71784c860190ca	1	(?:(?i:((\n\x00|日本0)|.(?m:^)|(\./|foo日本))))*?
+f4b7b107a59f2f0a	13	(\w|foo)
+af71784c860190ca	1	((?:[0-9a-f]){0,3}|\dabcdb|(?:\n )*?)
+f4b7b107a59f2f0a	13	((?m:$)(?:\S){3}|(?m:^)[[:alpha:]]\B|[a-z]0\B)
+f4b7b107a59f2f0a	13	((\(^|([0-9a-f]| |bar_bazé)|([A-Za-z\p{Greek}]|b))|((?:\nbar_baz)+?|[\x00-\x1f]$)|(?:(?:日本 ){2}){1,4})$
+af71784c860190ca	1	(?:\W)?
+af71784c860190ca	1	(?i:(?:\d)??)
+f4b7b107a59f2f0a	13	((abc\B|\b[0-9a-f])|(\A\(|(?i:\x00)|(\n0|[0-9a-f]|42)))
+f4f13107a5a26729	13	(?i:([A-Za-z\p{Greek}]|\.MAX|\W))((foo|/|foo)|(?:impl)*?|(?m:^)abc42)((([\x00-\x1f]|impl\t|/µ)|z42\S|µ\z)|(?m:^)( |\S)|(?i:(bar_bazimpl|[A-Za-z\p{Greek}]|bar_baz_)))
+24f2fe758e0a466d	5028	\Wa0\t
+3285d360765331f9	350	^a\t-ab
+af71784c860190ca	1	(?m:^)(?:(?:MAX)?){1,4}
+e581b596fc152f11	14894	\p{Cyrillic}bfoo a42日本(?i:(?:[A-Z])?)(?i:(?:foo\) 0)?)
+f4b7b107a59f2f0a	13	(\.0|[A-Z]|[[:alpha:]])
+af71784c860190ca	1	((?:abc\))*|z\n\b|\dfoo -)
+2f38817dea3a4608	1015	(?i:(?i:zbar_baz$))
+f4b7b107a59f2f0a	13	(((?i:$-)|(\w_é\(|(--|implbar_baz)))|(?:(?:\)impl 日本){2,}){2})
+b1e2df95388f9c64	77	(\)|\()
+af71784c860190ca	1	(?:foo\x00ab\x00)??
+76b69b051e9d1cb9	9857	((?i:\d)(?:_\)){3}|(?m:$)$aab)
+78c94e09209c3ab0	42	(((?:MAX)*|(日本_|bé|[0-9a-f])|(?i:abc))|日本\)\B(abca|MAX|bar_bazabcd)|(42|\w)(?i:\n))foo(.42bar_baz|(?:\)_)??|(?i:abcd))^
+d7ea5396d89ee049	188	[A-Za-z\p{Greek}]\z
+af71184c86018698	1	abc\n(?m:^)abcd^a
+f4b7b107a59f2f0a	13	((?:bar_baz){0,3}_:- aa|(?i:(é|\s))|(?i:(?m:$)abb))
+3e4e12411de31234	65177	(((?i:b)|_\x00\)|foo\x00[a-c0-2_])MAX[0-9a-f]abcdµb\z|((?i:\S)|b µ)\.[\x00-\x1f](?i:日本\t))
+5a0c31e21e5051e6	169	^-a
+a508a6324c99e3fb	34	(?:(\t|[A-Z])){2,}
+028f737d8df3a26d	18355	0z/(?i:µz)0(\p{Cyrillic}|\s)(?:\d)??
+af71784c860190ca	1	^((?:\S)?|a\p{Greek})\b
+88dc5f198911bde8	146	impl\b
+f4b7b107a59f2f0a	13	((?i:[a-c0-2_])|(?i:日本\()|(?i:.))
+6381139c2b9c7a21	184	(?i:[A-Z]$\z)
+af71184c86018698	1	(?i:\z(?i:/MAX(?m:^)))
+8a3fe7c6978eba61	105	0/\t
+af71784c860190ca	1	(\A[[:alpha:]]|(?:\n ){0,3})
+44e2001e300b628b	13912	( 日本$|\z_ab|([A-Za-z\p{Greek}]|é))\x00\n:/\z
+af71784c860190ca	1	(?:((?:( _|\x00))+?|(\W[[:alpha:]]|(?i:_-)|(MAX|/))|µµ\Sabc[A-Za-z\p{Greek}]/))*?
+72f3c32241e32923	146	abz\x00.
+f4b7b107a59f2f0a	13	(([0-9a-f]|:|fooabc)|(ab/|a|[0-9a-f]))
+f4b7b107a59f2f0a	13	(((µz|00)|\z\p{Cyrillic}|(?m:^)\.MAX)|$\B-)
+af71184c86018698	1	impl(?m:^)\)[A-Z]\z(?m:$)$
+e709d14212791842	140	aabc
+af71184c86018698	1	(?m:$)\p{Greek}\B
+f4b7b107a59f2f0a	13	\b(?i:(?i:.))
+1df6f1ed799bf311	5395	(?i:(([A-Za-z_]|_a|\s)|(\.|a|\./)|(?:abc\(){1,4}))42(?:(bar_bazµ\(\d|日本-^))??
+d1c4b9d1a43bcee3	96	(?i:\d)
+0864c4bcd2433323	11055	(MAX|impl|bar_baz)0([0-9a-f]|b_)
+af71784c860190ca	1	(?:(?m:^)/\(:\b-)?
+24f122bbd8324f47	184	((?i:42z\A)|(?i:(é/|\d|a)))bar_baz(?:(?:\zbar_baz\))??)+?
+310e8ce2800e676f	35	(a|bar_bazz)
+6f598cb6b062d400	91	\x00\b$
+f4b7b107a59f2f0a	13	^((\W|[a-z])|(?:日本){4,8})
+af71784c860190ca	1	(?i:(?m:^)(?:abcd)?(?m:^))
+d40896aea9f2d649	1019	[A-Z]a/
+1286fb1e17d4c9d5	126	(z|\S)\z
+af71784c860190ca	1	((?:\s[[:alpha:]]){3}|(fooMAX日本é|(?m:^)0)|((?:[A-Z])*|(-é| 日本|日本日本)))
+af71184c86018698	1	\z(?m:$)(?m:^)([[:alpha:]]|[0-9]|[0-9a-f])
+8e77b00c9e4eac62	290	_zaéé
+af71184c86018698	1	\z[0-9](?m:^)
+f4b7b107a59f2f0a	13	(?i:(\S(?m:$)|\.\x00\b|(az|\(\.|\)é)))
+af71184c86018698	1	(?i:\x00\p{Cyrillic}\.(?:[0-9])??)(?m:^)
+a5f487a9f36d2c82	165	(?:b\t){2,}
+cc9fa9e065d91853	3960	(?:[^a-z])??é(\w|abcd\)|_0)
+f5277107a5a546ec	13	((?i:\x00abcdbar_bazab)|(?i:(?:\W){3}))
+dc73e29068af2e50	101	(((?i:aabcéMAX)|(?i:(?i:\s))|(?i:zµ(?m:$)))|(?:[A-Z]bar_baz){4,8}(日本|abcdMAX|.)(?m:^))
+af71184c86018698	1	\z[A-Za-z_]
+af71784c860190ca	1	(?:([a-z]|foo|-)){0,3}
+81ee59daa35dce2b	96	\B(abc|[0-9]|  )$
+af71784c860190ca	1	(?:(?:\A(?i:bar_bazab))??){2}
+2c0af66ae343cf18	105	\babc
+aac475a70667bd4c	469	(?:\n)??zMAXé 42
+60b9c81148f7ca73	27296	\A([[:alpha:]]| )foo(abb|\x00\x00)
+af71784c860190ca	1	\B(?:(/-|[A-Z])\x00foo(?m:^))?
+a4a71ba7ba32545d	125	[a-z]\x00
+f4b7b107a59f2f0a	13	(\z\w|(a\(|.|[[:alpha:]]))
+47d62b6f19d56046	124	(?m:$)(?i:\n)\z
+af71184c86018698	1	([^a-z]|MAXimpl)(?:\p{Greek}){2,5}?(?m:^)(?i:(é\A|\nfoo日本foo |$\p{Greek}))
+af71184c86018698	1	µ(?m:^)
+b5398af4481a6396	382	(?i:(?i:\(abc))
+f4b7b107a59f2f0a	13	((?i:([A-Za-z_]|MAXb|abcd))|\B(?:a)+?|implabcdb日本µ(?:\t)*?)
+a508a6324c99e3fb	34	(ab|é)\b\B\b
+8ac01aae602d7660	183	\A\x00
+3d65e052b9fbb48c	407	(?:_日本z)+?
+50be0b18f8c9a275	8971	(?m:^)z42[A-Za-z_]\z
+af71784c860190ca	1	((?:(?i:(?:ab\t)?))*|(/\x00z\n(?m:$)|(?:[[:alpha:]])*(?m:$)|(?i:\Afoo)))
+1b800d6c7248407d	290	(?:\nfoo){2,5}?
+0e5a8c03bbb85a69	404	foo42/\((?:\p{Cyrillic})??
+139ae85e49dbba86	819	((?i:\.foo(?m:$))|(?:(?i:/\t)){2}|µ\(impl\n\B)
+83c2c1e45ff1f159	241514	(?:(?i:MAXbar_baz \W)é(?i:/ab)){2,}
+951650df6180d5b1	687	µimplabcé0
+de55b8e8b9111188	932	(\(|abcd)(abcdµ|foo\.)
+af71784c860190ca	1	(?:(?i:(?:impl)*?))?
+af71184c86018698	1	(?i:(?:\.)+?$a(é-[0-9]|(?i:.)))
+af71784c860190ca	1	(?:MAX)??
+af71784c860190ca	1	(?:\d\A){0,3}
+a1193de8f6cd4f47	2198	(?i:(?i:ab:bar_bazabcdimpl))
+f4b7b107a59f2f0a	13	((?i:(([0-9a-f]|\x00)|(abc_|µ|éabc)|$\n))|\A日本\(\x000z(?m:^)\S)
+f4b7b107a59f2f0a	13	(?m:$).
+ee77b7904492d2b5	104	ab \z\b
+cc6a8ad1ed19b443	32176	(?i:[A-Za-z_][0-9a-f])$
+f4b7b107a59f2f0a	13	((?m:^)(?i:(impl\t|MAXbar_baz|42))|(?m:^)(?i:(?i:abcd/))|((?m:$)[0-9]\t[a-z]\.日本|((?: )+?|impl\((?m:^)|(impl|/))))
+80aa2bb50ed9cd48	333	abcd\.z\.
+f4b7b107a59f2f0a	13	((\p{Greek}|\n|日本abc)|(impl|[A-Za-z_]))
+af71184c86018698	1	[A-Za-z\p{Greek}]\./(?m:^)/(?:babcd)?b\WMAX
+af71184c86018698	1	\B\W^zabcd[\x00-\x1f]\A
+258bfe9358c3dcae	324	(?i:foo/)
+af71184c86018698	1	(?:(?m:$)µ)+?
+af71784c860190ca	1	(?:(([a-c0-2_]|[A-Za-z_])|(?i:42b)))?
+f5277107a5a546ec	13	((\p{Greek}|\p{Greek}|-)\b|(0|[A-Z]|é)\z)((/:|abcd\n|\W)|b-)((\S|[A-Za-z\p{Greek}]|foo)|[a-z]bar_bazµ|abc/_)
+2820ecca68966ac8	35	(bimpl|b)
+90934069b7c5ebce	205	(?:abc(?m:$)){1,4}
+a2c1bacc00490bc7	96	\b(?:abcdimpl)*\n(?:[\x00-\x1f])+?
+af71784c860190ca	1	(?:((?:\S){0,3}\b|((:日本|\t\t)|(-|\d|日本))))??
+1f2a986abb10d7a1	91	(?:\)){3}
+af71784c860190ca	1	(?:$µ/)*
+af71784c860190ca	1	(?:( éMAX|\b[a-c0-2_]|$b)){0,3}
+f4f13107a5a26729	13	(([A-Za-z_][0-9]|(?i:[[:alpha:]]))µ(?:a\B)??|((?i:(\x00/|0\n|-日本))|\b(?:\n )+)|(?i:([\x00-\x1f]|/abcd)[0-9]abc[\x00-\x1f]))
+d6a2ffe86f7476b1	3534	[\x00-\x1f]foo\(42
+f4b7b107a59f2f0a	13	(( |日本bar_baz)|(?i:za)|(?i:/))
+b82ebb8cad992ffe	9616	(?i:(?i:abcd\nimpl\s))
+6e31873fb6ae0861	4974	(((?i:[0-9])|([a-z]|impl0))|(?:[^a-z])+b\b|((?:\)){2,}|(?:\))??|(\t|/0|\W)))0(?:\A\W\z){3}
+10131646aed31d49	105	0$
+9b4f442afd475c63	174	((?:é42){1,4}|(?:\x00MAX)*)
+f4b7b107a59f2f0a	13	((?:(bar_baza|\d)){1,4}|((?:\d){3}|(a |é|[\x00-\x1f])|-ab(?m:^))|\B $)
+af71784c860190ca	1	(((\x00\.|-impl|\tbar_baz)(?m:^)|(?m:^)(?:\p{Greek})?|((-|\d|abc)|\timplfooMAX/))|(?i:$日本foo)^(?:[A-Za-z\p{Greek}])*|(a|\()\A(?m:$))
+b6198bcc31b521bf	2786	abcdimpl\d
+f4f13107a5a26729	13	([[:alpha:]]|\x00)(-|z\n)
+7c34334627b385ca	35	^(?i:[^a-z]:\W)
+af71184c86018698	1	(?m:$)(([A-Za-z\p{Greek}]| )|(µ|/impl)|a\z)(b|[A-Za-z_]|42\t)(?m:^)(?m:^)
+f4b7b107a59f2f0a	13	([a-c0-2_]|\W)
+321603b089da7a0a	239	 é\b(?m:$)
+af71184c86018698	1	abcd\(\d\z42\tfoo(?m:$)\w
+af71184c86018698	1	\z$0\(\z\b
+af71184c86018698	1	bar_bazimpl^
+f4b7b107a59f2f0a	13	((_|\)|\(\n)|µfoo\A|(?:bz){2,5}?)
+6528e5ef2669c7eb	292	(?i:(?i:\d))(?i:[A-Za-z\p{Greek}])(?m:$)
+af71184c86018698	1	^\B(?m:$)b^
+58dbdd7cd4e078e8	69	(?i:µ)
+f4f13107a5a26729	13	([A-Z]|\.|\.MAX)([^a-z]|abc)
+f4b7b107a59f2f0a	13	((-|\t\(|\(:)|$\s)(?:(?i:é)){0,3}
+cff74cea0ab53c14	35	((?:[a-c0-2_]\B)*?|$(\t-|\s)|(?i:[a-z]0-a))\.(\A\z:|(_42|(?i:\w)))
+967252dfd409c3c1	559	MAXaabcd-_
+af71784c860190ca	1	(?:(?i:[^a-z])){0,3}
+0828227fac386df4	84	\b((?i:b)|[\x00-\x1f]\z)
+f4b7b107a59f2f0a	13	((?m:$)42\A(?i:[A-Za-z\p{Greek}])|\b((?i:42)|(ab42|\w|[^a-z])))
+f4b7b107a59f2f0a	13	(日本|\s)
+af71184c86018698	1	(?i::(?m:^))
+8ebfe7d9fa15c452	28096	(é_\z|abc\s|\d日本)abc((?:bar_bazab)??|(?i:[a-c0-2_])|bar_baz (?m:$))
+af71784c860190ca	1	(?i:(?:\):-a){0,3}(?m:$))
+d62de4311a28561a	79	[^a-z]\p{Greek}
+b9f4633d001197a1	436	(/0|日本42)\b 
+af71784c860190ca	1	((\W-\w|(?i:bar_bazb)|\tab^)|(?:\B\p{Cyrillic})*?|(?i:\w\p{Greek}))
+6280e82d91afd7da	40819	(?:(?i:(?:é){4,8})){1,4}(?:((?i:\))|(ab|[A-Za-z_]|[0-9]))){0,3}
+351da1098b380b66	33	(?:MAX)*?
+f4b7b107a59f2f0a	13	((b|bé|[A-Za-z_])|(?:MAX){2,}|0µabc)
+f4b7b107a59f2f0a	13	((([\x00-\x1f]|\w)|(?i:é日本))|(?i:\n\x00.)|\w\S(\p{Cyrillic}|[^a-z]))
+c0c1008ce78f9343	2211	((?i:(?:\n)+?)(?:(\n|\./)){2}|[a-z]\.(?m:$)[\x00-\x1f]\A|(?i:(?i:µ\x00))\x00(?i:\b42foo))
+f4b7b107a59f2f0a	13	(?i:.)
+af71184c86018698	1	\B\tMAX^
+f4b7b107a59f2f0a	13	((?i:foo)|aé\b|(?m:^)\s)(?m:^)
+f4b7b107a59f2f0a	13	^(([0-9a-f]/\S|\d/[A-Za-z_])|(^\W|(?i:[a-c0-2_])))
+a5d78c4a4b7ec9e7	1080	42日本/[a-c0-2_]
+dca74f111624ec7b	880	((?:\tabcd){3}|(?i:bimpl))
+0b8752a50041b4f7	728	(?i:bar_baz\B(?:z)*)
+af71184c86018698	1	(?i:((?i:MAXab)|(?i:µ/)))\z((z|[A-Za-z\p{Greek}])|(/a|日本abc)|(?i:\W))
+af71184c86018698	1	\)\t^
+e6155d387e7eecc9	222	\(\)\.:_\B
+d1501ee59ce818ca	17337	(?i:(?:\d){2,5}?)impl(?i:(\p{Cyrillic}|[0-9a-f]))
+8459f5267c08edb9	7991	((?m:$)\w|(abc\n|[A-Za-z\p{Greek}]|\tfoo))([a-c0-2_]42|(?i:_)|bar_bazab\B)-(?i:[a-c0-2_]日本-/)\.((?i:/ )|.[a-c0-2_])
+f4b7b107a59f2f0a	13	(日本|impl|[A-Za-z_])
+b153246d6329f076	84	\s^^
+f4b7b107a59f2f0a	13	((?i:日本impl) bar_baz-|(?i:(abcabc|-|bar_baz)))
+af71784c860190ca	1	(?:(\z0abc|(?:42){2,5}?)){0,3}\b
+57bb392f463769de	876	(?i:bar_baz\))
+af71184c86018698	1	\z(?i:\n\n)
+3e6cf565269c2463	380	(\(\.\p{Cyrillic}^|(?m:^)(:ab|fooab|z\t))
+af71784c860190ca	1	(?:(MAXb\.\((?i:\p{Greek})|(?m:^)(?i:bar_baz))){0,3}
+6ebafe34afb5e992	63	(?:é)+?
+686af62996cceaaf	1255	(?i:/ )/(abc|:0|:_)
+0020549fe5ed861c	281	(([0-9a-f]|ab\n|[A-Za-z\p{Greek}])|(\S|\.b)|(日本_|bfoo|_))a(?i:/0)\z
+af71184c86018698	1	\b$(?i:^abc)
+440e1ccc308aa021	6304	\x00\n0\w
+d2cd64f6f1ebc407	13973	(?i:\W)abcd\n\.MAX\S
+af71184c86018698	1	(?:z-(?m:^)){2,}\A
+af71184c86018698	1	(?m:$)(- \(abcd|(?i:-))\)(?:(?:\d:z){0,3})*
+9465af7ab2009927	334	abcdab\n
+9a446e5d88538509	3599	(impl|ab-)\n(?i:zfoo)
+f4b7b107a59f2f0a	13	(^[[:alpha:]]\z|((?i:[\x00-\x1f])|abcd/42)|((?:\x00){4,8}|(日本\(|MAXabcd|日本)|\b\x00a))
+4ff575be0a20a132	4788	(?i:éµa) (?:\n\t){1,4}$\z
+164c3905eb646bf8	381	(?i:/abc)
+49a9f2cb0c7d201a	221	(?m:^)(?i:\w)
+f4b7b107a59f2f0a	13	((?m:$)\(ab\n(?i:zabcd)|(z|bar_baz|\.)\B)
+6cef3aa8447b290a	92	\z(?i:(\Sabar_baz42|[A-Za-z_]\W))
+0f7b312aa8e5557e	168	(?: b){3}
+f4b7b107a59f2f0a	13	((?i:ab\n)|(?:_a){4,8}|(\p{Cyrillic}|.|bar_bazµ))
+2c885b9a13f87bea	11087	(?i:abc/foo([A-Za-z\p{Greek}]|[a-z]))
+af71184c86018698	1	(?i:((?:(?m:$)foo){3}|abc\Abar_baz$))
+f4b7b107a59f2f0a	13	(foo42|[a-z]|\p{Greek})
+4f027318dcc27610	151	(?m:^)(?:\p{Cyrillic})+?
+8748c23b7b23ad68	501	(((?m:$)\p{Greek}|(?i:abcd))|(?i: \()\(42é\t)
+af71784c860190ca	1	$(?i:(?:foo){0,3})(?m:^)
+b03f69cb08109f0d	414	(:µ|ababc|日本0)
+f4b7b107a59f2f0a	13	\W\z\B
+f4b7b107a59f2f0a	13	( \p{Cyrillic}(z日本|[[:alpha:]])|(z $|(\w|ébar_baz|0impl))|(?:(\d| bar_baz)){3})
+7b51f0b15d229944	118	(((?: )+?|[0-9]\B)|(?i:\n\.42impl)|(?:/abc){2,5}?a(-µ| |\d))(?m:$)
+00f1563a579551d0	125	\)[[:alpha:]]
+b058ada543867776	9412	(?:\p{Greek}abcMAXµ)+
+92d4cd11bce3be28	14251	([A-Za-z\p{Greek}]bar_baz[0-9a-f]|\té$)(?m:^)
+d6c00461264cbefa	459	(?:\Babµµ\B){3}
+f4b7b107a59f2f0a	13	(\w|_)
+f5b4cb2fbef320a8	13745	(?i:\d)(?:-a){2,5}?
+f4b7b107a59f2f0a	13	((?m:^)(\w|\n/)|((impl|/|_)|(µ|.)|(ab|[A-Za-z\p{Greek}])))
+ac0414e8bceceeff	160	$(?:(foo-|abcz))?[A-Za-z\p{Greek}]0/ab(\w|MAX|a)
+6ebafe34afb5e992	63	(?:é)+
+efeeff9bb86d1575	288	(?i:bab)(?:µ)?
+3e918094a332136d	14694	(?:(?:\w)??(bar_baz|42\n))+
+2c3e9a884140717e	43539	(\z(?i:b[0-9a-f])|(?:\)é)?abcd(\x00|b|a/)é(?:implabcd日本\W){2,5}?|(?:(?:[a-c0-2_]){2}){4,8}\b(?m:$)[[:alpha:]])
+d8e265782a9eecd1	180	\x00_foo
+af71184c86018698	1	\t\.42\(^
+ed59a7dba42f7baf	81	^((_|abcabcd)|\AMAX\x00|a(?m:$))
+f4b7b107a59f2f0a	13	(?i:(((?:é:)+?|__\b|\w\w)|(?i:[A-Z]\s)|(?i:(?i: ))))
+a508a6324c99e3fb	34	(\)abc|\tab|\x00\))
+af71184c86018698	1	(?:0 ){4,8}^
+21f7afeaaf97e6c5	435	(?i:(?i:\Bimpl))
+af71184c86018698	1	\b\A(?:(?m:^)ab\n)+
+af71784c860190ca	1	(?:é)*
+b33070511c1face3	167	(?: :){4,8}\b
+af71184c86018698	1	(abcd^\b|(\s|[A-Za-z\p{Greek}]|foo)\A)
+af71784c860190ca	1	(?:^:abcdab\x00abc日本\s\w \t^)?
+5b549233fa031afa	763	é\d
+9fc4f751d046b6e7	167	(?:(?:/z){2}){1,4}
+af71784c860190ca	1	((?:/:é \()??|$(?i:\p{Greek})|(\.\n|/-|µ)z(?:\(){2,5}?)
+af71784c860190ca	1	(?i:(?:\.\A)*?)(?:(?i:\s\B)){0,3}
+728ba5435ff3aea2	1463	\(impl\p{Greek}
+1286fb1e17d4c9d5	126	\B\S(?m:$)
+af71784c860190ca	1	(?:\wµfoo( 42|\.))?
+f94300e926447e39	1835	(?i:日本z\x00bar_baz\.(?i: ))\b
+a600928104f9661e	718	bar_bazabcdabc
+d581379cbb9095a4	1212	(?i:42b_é\()
+f4f13107a5a26729	13	(\s-\B|^é42$)
+f4b7b107a59f2f0a	13	((?m:^)(?:.){3}(?m:^)|([0-9a-f](?m:$)|(foo|éa|[A-Za-z\p{Greek}])|.\B)$|(?i:\n\z\)_\z))
+553635d01c4328c8	537	日本日本 
+dad56b7ea35dea89	219	\B(?:42\n){3}
+af71184c86018698	1	(?m:$)b\( [A-Za-z\p{Greek}]\wabc(\p{Cyrillic}|\p{Cyrillic}|\t)
+af71784c860190ca	1	(((?:(\s|\S)){3}|((?:µ){0,3}|(\(|[\x00-\x1f]))|((.|\x00:)|(?i:impl)|(?::)?))|((?:zbar_baz){2,5}?|(_\.|ab|日本))\t[A-Z]abz\t[A-Za-z_]|((abc \(\n|b^|(\d|\w))|(?i:\x00ab(?m:^))|(?:(\.abc|[\x00-\x1f]))+?))
+d8316535c9543e19	220	日本\B
+af71184c86018698	1	\t:µ-(?m:^)
+af71784c860190ca	1	(((?://)?|:foo\z|(?i:ababc))|impl (\d| bar_baz|\()|\b\p{Cyrillic}(?i:[\x00-\x1f]))
+af71784c860190ca	1	((?:(?:MAX:){2,5}?)*?|(?:(é42|[a-z])){1,4})$
+69df6eed542210c0	56	(_\)|bar_baz)
+f4b7b107a59f2f0a	13	((?i:a)|(\)| |[A-Z])|$foo\x00)
+cd12e91e7f535611	1169	(?:(?:/a){2,5}?0(?:abcd\))+){2}
+f4b7b107a59f2f0a	13	((?:ab $^42){2,}|(?i:(?:\w(?m:^)){1,4})|(?i:(?i:\S))\z)
+e20d196dfd8db3fb	193	\A_
+bf3e5db8a8f6204b	664	(?:MAX_42/µ){2,}
+af71784c860190ca	1	(((\t|[A-Za-z_]|abcd)|(42ab|\t|[[:alpha:]]))|(?:\n){2,5}?a\t_|(?:(?i:ab))*)
+913eb9a434ee795d	92	(?i:(?:(?i:(?:[[:alpha:]])+)){1,4})
+bf1d9c3a95a33cc5	387	(?i:MAX/)
+af71184c86018698	1	(abcd|/|[[:alpha:]])(?m:$) b
+a400ff4b794f0afa	469	\A\B\S0implbz
+af71784c860190ca	1	(?:^\B(é|\S))*
+a508a6324c99e3fb	34	(?:.){2}
+578c67a71502c58d	169	^/0\b
+f4b7b107a59f2f0a	13	((?i:(?i:\d))|(?i:[[:alpha:]])日本ababab|(?i:(?:\x00){2,5}?))
+af71184c86018698	1	$([0-9]\AMAXzbar_baz\né|([a-z]|MAXbar_baz|impl)\B)
+841e9554deda8d50	2894	éab\.[A-Z]
+af71784c860190ca	1	(?i:(?:[0-9])*?)
+f4b7b107a59f2f0a	13	(\B([A-Z]|\té|-)|:0^é([0-9a-f]|[\x00-\x1f]|µ))
+af71184c86018698	1	(?:(_|\)|MAX)^/(?i:\p{Cyrillic})ab(?i:\S)){2,}
+e60e737131b81149	1150	(?i:bar_bazimpl)
+c4e8f7e21f4f0558	158	(?:[A-Z]){2,}$
+af71184c86018698	1	__\z\Bé(?:bé)??z(?: ){2}
+f4b7b107a59f2f0a	13	(\B\)bar_baz[0-9a-f]z(\nimpl|MAX|\n)|(?:[\x00-\x1f][A-Za-z_])??(?i: )^|(((日本\x00|:\()|(?i:\x00)|\):MAX[0-9])|(42|\t_)日本(?i:\s)))
+0ab4be862986e2b4	158	:µ\n
+c553baafa2fb533a	937	MAX MAXbimplMAX(?:MAX )+
+ac6957e15b7ca054	36460	\w[A-Z]ab:é(?:[0-9])?\b
+af71784c860190ca	1	(((?:(?:\p{Greek})?){0,3}|(?m:$)([A-Za-z_]|\x00é))|$(abcd[a-z]|(\(|[[:alpha:]]|\na)|\A\)impl)|\.\./^$\x00\B)
+54f7af8d7830b8ee	366	(?i:bfoo)
+6d1cb743158f836c	56	(?i:(日本0|0a))
+bfba85397ff24720	9180	(\WMAX[^a-z](?i:\w)|(?i:abc^))
+af71784c860190ca	1	(((日本impl.|\W\z)|\A(fooµ|abcd日本|[A-Z]))|(abc$\((?i:z)|(?:(?i://))*?))
+af71184c86018698	1	\)\A
+85238ae5dd339389	220	(?i:.)日本(.|impl|\( )
+844c2364f4ca1fad	7886	(?i:bar_bazfoo/\sa.\z)
+af71184c86018698	1	(?m:$)foo(?m:^)abc(?i:(_b|[a-z]))(?m:^)
+8dad9f943450126a	947	(?i:\)bar_baz)
+14ed9c51d7f379a3	74	(?m:$)[\x00-\x1f]\z
+f4b7b107a59f2f0a	13	(((?:[^a-z])+|( |\p{Greek}|.))|(?i:(?i:\())|.\A^)
+e31b338e28990079	788	(?i:(?:abbar_baz\W)*(?:abc){3}-(?i: ))

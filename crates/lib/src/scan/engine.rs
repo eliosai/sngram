@@ -1,6 +1,6 @@
 //! Streaming sparse n-gram scanner.
 
-use sngram_types::{HashKey, ScanEvent, ScannedGram, WeightTable};
+use sngram_types::{HashKey, ScanEvent, WeightTable};
 
 use super::facts::SummaryBuilder;
 use super::settings::ScanSettings;
@@ -105,10 +105,10 @@ fn first_upper_index(chunk: &[u8]) -> Option<usize> {
     chunk.iter().position(u8::is_ascii_uppercase)
 }
 
-/// Scan one literal alone, emitting its raw grams with literal-relative spans.
-pub fn scan_literal(table: &WeightTable, literal: &[u8], mut emit: impl FnMut(ScannedGram)) {
-    let mut scanner = SpaceScanner::new(table, HashKey::UNKEYED, SpanMap::Literal);
-    scanner.push_bytes(literal, literal.len(), &mut emit);
+/// A scanner over one standalone literal, emitting its raw grams with
+/// literal-relative spans.
+pub fn literal_scanner(table: &WeightTable) -> SpaceScanner<'_> {
+    SpaceScanner::new(table, HashKey::UNKEYED, SpanMap::Literal)
 }
 
 #[cfg(test)]
@@ -292,7 +292,8 @@ mod tests {
     #[test]
     fn literal_scan_has_content_spans() {
         let mut grams = Vec::new();
-        scan_literal(&table(), b"abcdef", |gram| {
+        let table = table();
+        literal_scanner(&table).push_bytes(b"abcdef", 6, &mut |gram| {
             grams.push(gram.content_span());
         });
 
@@ -305,7 +306,8 @@ mod tests {
     fn literal_scan_emits_raw_keys() {
         let literal = b"abcdef";
         let mut keys = HashSet::new();
-        scan_literal(&table(), literal, |gram| {
+        let table = table();
+        literal_scanner(&table).push_bytes(literal, literal.len(), &mut |gram| {
             keys.insert(gram.key);
         });
 

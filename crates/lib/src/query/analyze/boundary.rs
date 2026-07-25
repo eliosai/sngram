@@ -2,7 +2,8 @@
 
 use sngram_types::Gram;
 
-use super::super::strings::{Order, StringSet};
+use super::super::order::Order;
+use super::super::strings::StringSet;
 
 /// Distinct first- or last-bytes a wide class may keep before that side is
 /// dropped to `{""}` (boundary unknown).

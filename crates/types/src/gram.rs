@@ -32,6 +32,8 @@ type InlineBuf = [u8; GramSettings::INLINE_CAP];
 #[derive(Clone)]
 pub struct Gram(Repr);
 
+/// Inline buffers are always zero past `len`, so a padded word comparison
+/// orders them the same way their bytes do.
 #[derive(Clone)]
 enum Repr {
     Inline { len: u8, buf: InlineBuf },
@@ -138,7 +140,12 @@ impl Borrow<[u8]> for Gram {
 
 impl PartialEq for Gram {
     fn eq(&self, other: &Self) -> bool {
-        self.as_bytes() == other.as_bytes()
+        match (&self.0, &other.0) {
+            (Repr::Inline { len: a, buf: ab }, Repr::Inline { len: b, buf: bb }) => {
+                a == b && words(ab) == words(bb)
+            },
+            _ => self.as_bytes() == other.as_bytes(),
+        }
     }
 }
 
@@ -152,8 +159,30 @@ impl PartialOrd for Gram {
 
 impl Ord for Gram {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.as_bytes().cmp(other.as_bytes())
+        match (&self.0, &other.0) {
+            (Repr::Inline { len: a, buf: ab }, Repr::Inline { len: b, buf: bb }) => {
+                words(ab).cmp(&words(bb)).then_with(|| a.cmp(b))
+            },
+            _ => self.as_bytes().cmp(other.as_bytes()),
+        }
     }
+}
+
+/// The inline buffer as big-endian words, the integer image whose order and
+/// equality match the padded bytes. The last word overlaps the one before it
+/// so the whole buffer is covered by whole loads.
+fn words(buf: &InlineBuf) -> [u64; 3] {
+    [
+        word_at(buf, 0),
+        word_at(buf, 8),
+        word_at(buf, GramSettings::INLINE_CAP - 8),
+    ]
+}
+
+fn word_at(buf: &InlineBuf, at: usize) -> u64 {
+    let mut word = [0u8; 8];
+    word.copy_from_slice(&buf[at..at + 8]);
+    u64::from_be_bytes(word)
 }
 
 impl Hash for Gram {
@@ -221,6 +250,30 @@ mod tests {
         assert_eq!(Gram::empty().len(), 0);
         assert_eq!(Gram::empty(), Gram::from(&b""[..]));
         assert!(Gram::empty().is_empty());
+    }
+
+    #[test]
+    fn packed_order_agrees_with_byte_order() {
+        const ALPHABET: [u8; 6] = [0, 1, b'a', b'b', 0x7f, 0xff];
+        let mut corpus: Vec<Vec<u8>> = Vec::new();
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..1200 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let len = usize::try_from(state % 26).unwrap_or(0);
+            let bytes: Vec<u8> = (0..len)
+                .map(|at| ALPHABET[usize::try_from((state >> at) % 6).unwrap_or(0)])
+                .collect();
+            corpus.push(bytes);
+        }
+        for a in &corpus {
+            for b in &corpus {
+                let (ga, gb) = (Gram::from(a.as_slice()), Gram::from(b.as_slice()));
+                assert_eq!(ga.cmp(&gb), a.cmp(b), "{a:?} vs {b:?}");
+                assert_eq!(ga == gb, a == b, "{a:?} vs {b:?}");
+            }
+        }
     }
 
     #[test]

@@ -10,10 +10,10 @@ use std::mem;
 
 use super::algebra::Query;
 use super::analyze::{Analyzer, MAX_EXACT, MAX_SET};
-use super::flush::truncate_to;
 use super::info::RegexpInfo;
+use super::order::Order;
 use super::settings::QuerySettings;
-use super::strings::{Order, StringSet};
+use super::strings::StringSet;
 
 /// Bound on the seam cross product flushed at a concat boundary. Beyond it
 /// the boundary strings are truncated back toward codesearch's two-byte
@@ -237,7 +237,7 @@ fn seam_side(set: &StringSet, order: Order) -> Option<StringSet> {
     let mut edge = set.clone();
     let mut keep = edge.max_len().saturating_sub(1);
     while keep >= 1 {
-        truncate_to(&mut edge, order, keep);
+        edge.truncate(order, keep);
         edge.clean(order);
         if edge.len() <= MAX_SET {
             return Some(edge);
@@ -261,7 +261,7 @@ fn shrink_seam(mut left: StringSet, mut right: StringSet) -> Option<(StringSet, 
         if keep == 0 {
             return None;
         }
-        truncate_to(bigger, order, keep);
+        bigger.truncate(order, keep);
         bigger.clean(order);
     }
     Some((left, right))

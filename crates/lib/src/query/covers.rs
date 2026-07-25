@@ -1,14 +1,16 @@
 //! Covering-gram lookup and OR-of-covers query building.
 
+use core::ops::Range;
+
 use sngram_types::Gram;
 
-use crate::scan;
+use crate::scan::cover::Cover;
 
 use super::algebra::{Op, Query};
 use super::analyze::{Analyzer, MAX_SET};
-use super::flush::truncate_to;
+use super::order::Order;
 use super::settings::QuerySettings;
-use super::strings::{Order, StringSet};
+use super::strings::StringSet;
 
 /// Branch count past which a flushed set covers each string minimally
 /// instead of maximally.
@@ -69,7 +71,7 @@ impl Analyzer<'_> {
         let mut fitted = set.clone();
         while fitted.max_len() > QuerySettings::MIN_GRAM_LEN {
             let keep = fitted.max_len() - 1;
-            truncate_to(&mut fitted, order, keep);
+            fitted.truncate(order, keep);
             fitted.clean(order);
             if fitted.min_len() < QuerySettings::MIN_GRAM_LEN {
                 return q;
@@ -84,14 +86,11 @@ impl Analyzer<'_> {
     /// The covers of each string in `set` — maximal or minimal — or `None`
     /// when a string covers to nothing or the total exceeds `cap`.
     fn branch_covers(&self, set: &StringSet, minimal: bool, cap: usize) -> Option<Vec<StringSet>> {
+        let mut cover = Cover::new(self.table());
         let mut covers = Vec::with_capacity(set.len());
         let mut total = 0;
         for s in set.as_slice() {
-            let grams = if minimal {
-                self.minimal_cover_set(s)
-            } else {
-                self.guaranteed_cover_set(s)
-            };
+            let grams = cover_set(&mut cover, s.as_bytes(), minimal);
             if grams.is_empty() {
                 return None;
             }
@@ -116,26 +115,13 @@ impl Analyzer<'_> {
         if set.len() > cap {
             return None;
         }
+        let mut cover = Cover::new(self.table());
         let mut grams = StringSet::new();
         for s in set.as_slice() {
-            grams.push(self.single_cover(s.as_bytes())?);
+            grams.push(single_cover(&mut cover, s.as_bytes())?);
         }
         grams.clean(Order::Prefix);
         Some(grams)
-    }
-
-    /// The strongest single guaranteed gram for a branch: longest first,
-    /// then lexicographic for stable plans.
-    fn single_cover(&self, s: &[u8]) -> Option<Gram> {
-        self.guaranteed_cover_set(s)
-            .into_vec()
-            .into_iter()
-            .max_by(|a, b| {
-                spans_center(s, a)
-                    .cmp(&spans_center(s, b))
-                    .then_with(|| a.len().cmp(&b.len()))
-                    .then_with(|| a.as_bytes().cmp(b.as_bytes()))
-            })
     }
 
     pub fn and_or_grams(&self, q: Query, grams: StringSet) -> Query {
@@ -156,51 +142,81 @@ impl Analyzer<'_> {
         self.spend(spent);
         q.and(or)
     }
+}
 
-    /// The minimal covering grams of `s`, chaining it end to end.
-    fn minimal_cover_set(&self, s: &[u8]) -> StringSet {
-        let mut set = StringSet::new();
-        for gram in scan::cover::minimal_cover(self.table(), s) {
-            set.push(gram);
-        }
-        set.clean(Order::Prefix);
-        set
+/// The covering grams of one branch, cleaned.
+///
+/// The minimal cover chains `s` end to end. The maximal one adds every gram
+/// [`crate::scan`] would emit for `s` alone: a gram's emission depends only on
+/// the bigram weights inside its span, so each of those is emitted for any
+/// document containing `s` too.
+fn cover_set(cover: &mut Cover<'_>, s: &[u8], minimal: bool) -> StringSet {
+    let mut set = StringSet::new();
+    let mut keep = |at: Range<usize>| set.push(Gram::from(&s[at]));
+    if minimal {
+        cover.each_minimal_span(s, &mut keep);
+    } else {
+        cover.each_guaranteed_span(s, &mut keep);
     }
+    set.clean(Order::Prefix);
+    set
+}
 
-    /// Every gram guaranteed to be indexed for a document containing `s`.
-    ///
-    /// A gram's emission by [`crate::scan`] depends only on the bigram
-    /// weights inside its span, so each gram the scan emits for `s` alone is
-    /// also emitted when scanning any document that contains `s`. This is the
-    /// maximal sound constraint set; the minimal covering set is included for
-    /// its equal-weight plateau grams the scan's dedup collapses.
-    fn guaranteed_cover_set(&self, s: &[u8]) -> StringSet {
-        let mut set = StringSet::new();
-        for gram in scan::cover::guaranteed_cover(self.table(), s) {
-            set.push(gram);
+/// The strongest single guaranteed gram for a branch: longest first, then
+/// lexicographic for stable plans. Ranks the cover as it streams, whose order
+/// and duplicates cannot move a maximum.
+fn single_cover(cover: &mut Cover<'_>, s: &[u8]) -> Option<Gram> {
+    let mut best: Option<(bool, Range<usize>)> = None;
+    cover.each_guaranteed_span(s, |at| {
+        if let Some(spans) = ranks_above(s, best.as_ref(), &at) {
+            best = Some((spans, at));
         }
-        set.clean(Order::Prefix);
-        set
+    });
+    best.map(|(_, at)| Gram::from(&s[at]))
+}
+
+/// Whether the gram at `at` outranks the one kept so far, and the center flag
+/// to store with it. Ranking is by center span, then length, then bytes; the
+/// center test runs only where it can change the answer.
+fn ranks_above(s: &[u8], best: Option<&(bool, Range<usize>)>, at: &Range<usize>) -> Option<bool> {
+    let gram = &s[at.clone()];
+    let Some((top, kept)) = best else {
+        return Some(spans_center(s, at, gram));
+    };
+    let kept_gram = &s[kept.clone()];
+    let longer = (gram.len(), gram) > (kept_gram.len(), kept_gram);
+    if *top && !longer {
+        return None;
     }
+    let spans = spans_center(s, at, gram);
+    let above = if spans == *top { longer } else { spans };
+    above.then_some(spans)
 }
 
 /// True when some occurrence of `gram` in `s` covers the center byte, so a
-/// branch's single gram keeps the middle its edge windows cannot pin
-fn spans_center(s: &[u8], gram: &Gram) -> bool {
+/// branch's single gram keeps the middle its edge windows cannot pin.
+/// The occurrence at `at` is checked first, then the other placements that
+/// straddle the center.
+fn spans_center(s: &[u8], at: &Range<usize>, gram: &[u8]) -> bool {
     let center = s.len() / 2;
-    let gram = gram.as_bytes();
-    s.windows(gram.len())
-        .enumerate()
-        .any(|(at, window)| window == gram && at <= center && center < at + gram.len())
+    if at.start <= center && center < at.end {
+        return true;
+    }
+    if gram.is_empty() || gram.len() > s.len() {
+        return false;
+    }
+    let first = center.saturating_sub(gram.len() - 1);
+    let last = center.min(s.len() - gram.len());
+    (first..=last).any(|start| &s[start..start + gram.len()] == gram)
 }
 
 /// The longest edge truncation of `set` that collapses to at most
 /// [`MAX_SET`] distinct strings of gram length
 fn distinct_edge(set: &StringSet, order: Order) -> Option<StringSet> {
+    let mut edge = set.clone();
     let mut keep = set.max_len().saturating_sub(1);
     while keep >= QuerySettings::MIN_GRAM_LEN {
-        let mut edge = set.clone();
-        truncate_to(&mut edge, order, keep);
+        edge.truncate(order, keep);
         edge.clean(order);
         if edge.min_len() < QuerySettings::MIN_GRAM_LEN {
             return None;

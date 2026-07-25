@@ -13,6 +13,7 @@ mod edges;
 mod flush;
 mod info;
 mod needs;
+mod order;
 mod parser;
 mod pattern;
 mod planner;
