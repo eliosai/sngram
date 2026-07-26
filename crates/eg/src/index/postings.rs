@@ -18,7 +18,7 @@ use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 
-use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed, WeightTable};
+use sngram_types::{DfStats, GramKey, QueryPlan, WeightTable};
 
 use crate::flags::HiArgs;
 
@@ -33,11 +33,13 @@ use super::merge::{
 use super::progress::{BuildPhase, BuildProgress};
 use super::{
     bench,
-    executor::{self, PlanBackend},
+    executor::{self, PlanBackend, combine},
     manifest, merge,
     summary::{self, SummaryIndex, SummaryRecord},
     verbatim::{self, HeldDocument, HeldIndex},
 };
+
+mod fast;
 
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const TABLE_FILE_NAME: &str = "table.bin";
@@ -171,7 +173,7 @@ pub fn query_index(
     let lookup_started_at = Instant::now();
     let held = index.held_candidates(args)?;
     let held_count = u64::try_from(held.len()).unwrap_or(u64::MAX);
-    let candidates = executor::union_sorted(
+    let candidates = combine::union_sorted(
         execute_plan(index, &plan, index_plan.precision, &forced)?,
         held,
     );
@@ -206,8 +208,8 @@ fn execute_plan(
     precision: executor::Precision,
     forced: &[usize],
 ) -> anyhow::Result<Vec<usize>> {
-    if let Some(candidates) = FastAllOf::try_execute(index, plan, precision)? {
-        return Ok(executor::union_sorted(candidates, forced.to_vec()));
+    if let Some(candidates) = fast::FastAllOf::try_execute(index, plan, precision)? {
+        return Ok(combine::union_sorted(candidates, forced.to_vec()));
     }
     executor::execute(index, plan, precision)
 }
@@ -1065,144 +1067,6 @@ fn fill_masks(payload: &[u8], decoder: &Decoder, out: &mut [executor::Posting]) 
             slot.mask = mask;
         }
     })
-}
-
-struct FastAllOf<'a> {
-    index: &'a PostingsIndex,
-    driver: FastNeedle,
-    filters: Vec<FastNeedle>,
-    needs: &'a [ScanNeed],
-    precision: executor::Precision,
-}
-
-impl<'a> FastAllOf<'a> {
-    fn try_execute(
-        index: &'a PostingsIndex,
-        plan: &'a QueryPlan,
-        precision: executor::Precision,
-    ) -> anyhow::Result<Option<Vec<usize>>> {
-        let Some(query) = Self::from_plan(index, plan, precision)? else {
-            return Ok(None);
-        };
-        Ok(Some(query.execute()))
-    }
-
-    fn from_plan(
-        index: &'a PostingsIndex,
-        plan: &'a QueryPlan,
-        precision: executor::Precision,
-    ) -> anyhow::Result<Option<Self>> {
-        let PlanExpr::AllOf {
-            grams,
-            needs,
-            children,
-        } = plan.root()
-        else {
-            return Ok(None);
-        };
-        if grams.is_empty() || !children.is_empty() {
-            return Ok(None);
-        }
-        let mut needles = Self::needles(index, grams)?;
-        needles.sort_by_key(FastNeedle::len);
-        let driver = needles.remove(0);
-        Ok(Some(Self {
-            index,
-            driver,
-            filters: needles,
-            needs,
-            precision,
-        }))
-    }
-
-    fn needles(
-        index: &'a PostingsIndex,
-        grams: &'a [GramNeedle],
-    ) -> anyhow::Result<Vec<FastNeedle>> {
-        grams
-            .iter()
-            .map(|needle| FastNeedle::open(index, needle))
-            .collect()
-    }
-
-    fn execute(self) -> Vec<usize> {
-        let mut candidates = Vec::new();
-        for posting in self.driver.postings() {
-            if self.keeps(posting) {
-                candidates.push(posting.ord);
-            }
-        }
-        candidates
-    }
-
-    fn keeps(&self, posting: executor::Posting) -> bool {
-        let status = self.index.summaries.status(posting.ord);
-        if !status.is_text() {
-            return false;
-        }
-        let mut blocks = self.effective(posting.mask) & executor::BLOCK_BITS;
-        for filter in &self.filters {
-            let Some(filter_mask) = filter.mask_at(posting.ord) else {
-                return false;
-            };
-            blocks &= self.effective(filter_mask);
-            if blocks == 0 {
-                return false;
-            }
-        }
-        self.needs.iter().all(|need| status.satisfies(need))
-    }
-
-    const fn effective(&self, mask: u16) -> u16 {
-        match self.precision {
-            executor::Precision::Block => mask,
-            executor::Precision::Doc => mask | executor::BLOCK_BITS,
-        }
-    }
-}
-
-struct FastNeedle {
-    lists: Vec<Vec<executor::Posting>>,
-    len: usize,
-}
-
-impl FastNeedle {
-    fn open(index: &PostingsIndex, needle: &GramNeedle) -> anyhow::Result<Self> {
-        let required = executor::required_edges(needle);
-        let mut lists = needle
-            .keys()
-            .map(|key| index.lookup(key.value()))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        if required != 0 {
-            for list in &mut lists {
-                list.retain(|posting| posting.mask & required == required);
-            }
-        }
-        let len = lists.iter().map(Vec::len).sum();
-        Ok(Self { lists, len })
-    }
-
-    const fn len(&self) -> usize {
-        self.len
-    }
-
-    fn postings(&self) -> Vec<executor::Posting> {
-        let mut acc: Vec<executor::Posting> = Vec::new();
-        for list in &self.lists {
-            acc = executor::union_postings(&acc, list);
-        }
-        acc
-    }
-
-    fn mask_at(&self, ord: usize) -> Option<u16> {
-        let mut mask = 0u16;
-        for list in &self.lists {
-            if let Ok(idx) = list.binary_search_by_key(&ord, |posting| posting.ord) {
-                mask |= list[idx].mask;
-            }
-        }
-        (mask != 0).then_some(mask)
-    }
 }
 
 /// Memory-map one section file and verify its header, magic, length, and optional sampled checksum.

@@ -7,6 +7,9 @@ use std::{collections::HashMap, rc::Rc};
 use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed};
 
 use super::summary::{SummaryIndex, SummaryStatus};
+use combine::{borrowed, intersect_all, union_all, union_sorted};
+
+pub mod combine;
 
 /// All buckets and all edge bits set: fully unconstrained
 pub const FULL_MASK: u16 =
@@ -73,7 +76,9 @@ pub fn execute<B: PlanBackend>(
     if !plan.is_none() {
         candidates = union_sorted(candidates, forced_candidates(backend, plan)?);
     }
-    candidates.retain(|&ord| summary_may_satisfy(plan.root(), backend.summaries().status(ord)));
+    let summaries = backend.summaries();
+    let filter = SummaryFilter::new(plan.root());
+    candidates.retain(|&ord| filter.admits(summaries, ord));
     Ok(candidates)
 }
 
@@ -96,10 +101,12 @@ pub fn forced_candidates<B: PlanBackend>(
     if plan.is_none() {
         return Ok(Vec::new());
     }
+    let summaries = backend.summaries();
+    let filter = SummaryFilter::new(plan.root());
     Ok(backend
         .forced_candidates()?
         .into_iter()
-        .filter(|&ord| summary_may_satisfy(plan.root(), backend.summaries().status(ord)))
+        .filter(|&ord| filter.admits(summaries, ord))
         .collect())
 }
 
@@ -194,33 +201,110 @@ fn count_need(summaries: &SummaryIndex, need: &ScanNeed) -> u64 {
     u64::try_from(summaries.count_satisfying(need)).unwrap_or(u64::MAX)
 }
 
-fn summary_may_satisfy(expr: &PlanExpr, status: SummaryStatus) -> bool {
+/// The summary-only filter one plan applies to every candidate ordinal
+struct SummaryFilter<'a> {
+    root: &'a PlanExpr,
+    verdict: Verdict,
+}
+
+impl<'a> SummaryFilter<'a> {
+    fn new(root: &'a PlanExpr) -> Self {
+        Self {
+            root,
+            verdict: verdict_of(root),
+        }
+    }
+
+    fn admits(&self, summaries: &SummaryIndex, ord: usize) -> bool {
+        match self.verdict {
+            Verdict::No => false,
+            Verdict::Yes => summaries.is_text(ord),
+            Verdict::Summary => {
+                summaries.is_text(ord) && shape_may_satisfy(self.root, &summaries.status(ord))
+            },
+        }
+    }
+}
+
+/// Whether a plan shape decides itself before any summary is read
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Yes,
+    No,
+    Summary,
+}
+
+fn verdict_of(expr: &PlanExpr) -> Verdict {
     match expr {
-        PlanExpr::All => status.is_text(),
+        PlanExpr::All => Verdict::Yes,
+        PlanExpr::None => Verdict::No,
+        PlanExpr::AllOf {
+            grams,
+            needs,
+            children,
+        } => all_of_verdict(grams, needs, children),
+        PlanExpr::AnyOf {
+            grams,
+            needs,
+            children,
+        } => any_of_verdict(grams, needs, children),
+    }
+}
+
+fn all_of_verdict(grams: &[GramNeedle], needs: &[ScanNeed], children: &[PlanExpr]) -> Verdict {
+    if !grams.iter().all(needle_may_match) {
+        return Verdict::No;
+    }
+    let children = children.iter().map(verdict_of).collect::<Vec<_>>();
+    if children.contains(&Verdict::No) {
+        return Verdict::No;
+    }
+    if needs.is_empty() && children.iter().all(|child| *child == Verdict::Yes) {
+        return Verdict::Yes;
+    }
+    Verdict::Summary
+}
+
+fn any_of_verdict(grams: &[GramNeedle], needs: &[ScanNeed], children: &[PlanExpr]) -> Verdict {
+    if grams.iter().any(needle_may_match) {
+        return Verdict::Yes;
+    }
+    let children = children.iter().map(verdict_of).collect::<Vec<_>>();
+    if children.contains(&Verdict::Yes) {
+        return Verdict::Yes;
+    }
+    if needs.is_empty() && children.iter().all(|child| *child == Verdict::No) {
+        return Verdict::No;
+    }
+    Verdict::Summary
+}
+
+/// Whether a plan shape can still hold once the document is known to be text
+fn shape_may_satisfy(expr: &PlanExpr, status: &SummaryStatus) -> bool {
+    match expr {
+        PlanExpr::All => true,
         PlanExpr::None => false,
         PlanExpr::AllOf {
             grams,
             needs,
             children,
         } => {
-            status.is_text()
-                && grams.iter().all(needle_may_match)
+            grams.iter().all(needle_may_match)
                 && needs.iter().all(|need| status.satisfies(need))
                 && children
                     .iter()
-                    .all(|child| summary_may_satisfy(child, status))
+                    .all(|child| shape_may_satisfy(child, status))
         },
         PlanExpr::AnyOf {
             grams,
             needs,
             children,
         } => {
-            status.is_text()
-                && (grams.iter().any(needle_may_match)
-                    || needs.iter().any(|need| status.satisfies(need))
-                    || children
-                        .iter()
-                        .any(|child| summary_may_satisfy(child, status)))
+            grams.iter().any(needle_may_match)
+                || needs.iter().any(|need| status.satisfies(need))
+                || children
+                    .iter()
+                    .any(|child| shape_may_satisfy(child, status))
         },
     }
 }
@@ -295,10 +379,8 @@ impl<B: PlanBackend> Executor<'_, B> {
         let all_text = || full_postings(self.backend.summaries().text_ordinals());
         let mut candidates = intersect_all(lists, all_text);
         if !needs.is_empty() {
-            candidates.retain(|posting| {
-                let status = self.backend.summaries().status(posting.ord);
-                needs.iter().all(|need| status.satisfies(need))
-            });
+            let summaries = self.backend.summaries();
+            candidates.retain(|posting| summaries.meets(posting.ord, needs));
         }
         Ok(candidates)
     }
@@ -309,25 +391,27 @@ impl<B: PlanBackend> Executor<'_, B> {
         needs: &[ScanNeed],
         children: &[PlanExpr],
     ) -> anyhow::Result<Vec<Posting>> {
-        let mut acc = Vec::new();
+        let mut lists = Vec::with_capacity(grams.len() + needs.len() + children.len());
         for gram in grams {
-            acc = union_postings(&acc, &self.eval_needle(gram)?);
+            lists.push(self.eval_needle(gram)?);
         }
         for need in needs {
             let ords = self.backend.summaries().ordinals_satisfying(need);
-            acc = union_postings(&acc, &full_postings(ords));
+            lists.push(full_postings(ords));
         }
         for child in children {
-            acc = union_postings(&acc, &self.eval(child)?);
+            lists.push(self.eval(child)?);
         }
-        Ok(acc)
+        Ok(union_all(&borrowed(&lists)))
     }
 
     fn eval_needle(&mut self, needle: &GramNeedle) -> anyhow::Result<Vec<Posting>> {
-        let mut acc = Vec::new();
+        let mut lists = Vec::new();
         for key in needle.keys() {
-            acc = union_postings(&acc, &self.lookup_cached(key)?);
+            lists.push(self.lookup_cached(key)?);
         }
+        let slices = lists.iter().map(|list| list.as_slice()).collect::<Vec<_>>();
+        let mut acc = union_all(&slices);
         let required = required_edges(needle);
         if required != 0 {
             acc.retain(|posting| posting.mask & required == required);
@@ -349,137 +433,6 @@ impl<B: PlanBackend> Executor<'_, B> {
         self.cache.insert(key, Rc::clone(&list));
         Ok(list)
     }
-}
-
-fn intersect_all(
-    mut lists: Vec<Rc<Vec<Posting>>>,
-    all_text: impl FnOnce() -> Vec<Posting>,
-) -> Vec<Posting> {
-    lists.sort_by_key(|list| list.len());
-    let mut iter = lists.into_iter();
-    let Some(first) = iter.next() else {
-        return all_text();
-    };
-    let mut acc = first.as_ref().clone();
-    for list in iter {
-        acc = intersect_postings(&acc, &list);
-        if acc.is_empty() {
-            break;
-        }
-    }
-    acc
-}
-
-/// List-length ratio past which intersection gallops through the longer side
-const GALLOP_RATIO: usize = 16;
-
-/// Keep ordinals present in both lists whose block masks overlap
-fn intersect_postings(left: &[Posting], right: &[Posting]) -> Vec<Posting> {
-    let (short, long) = if left.len() <= right.len() {
-        (left, right)
-    } else {
-        (right, left)
-    };
-    if short.len().saturating_mul(GALLOP_RATIO) < long.len() {
-        return gallop_intersect(short, long);
-    }
-    let mut out = Vec::new();
-    let mut i = 0;
-    let mut j = 0;
-    while i < left.len() && j < right.len() {
-        match left[i].ord.cmp(&right[j].ord) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-            std::cmp::Ordering::Equal => {
-                push_overlap(&mut out, left[i], right[j]);
-                i += 1;
-                j += 1;
-            },
-        }
-    }
-    out
-}
-
-/// Binary-search each short-list ordinal inside the remaining long tail
-fn gallop_intersect(short: &[Posting], long: &[Posting]) -> Vec<Posting> {
-    let mut out = Vec::new();
-    let mut base = 0usize;
-    for &posting in short {
-        let tail = &long[base..];
-        match tail.binary_search_by_key(&posting.ord, |p| p.ord) {
-            Ok(at) => {
-                push_overlap(&mut out, posting, tail[at]);
-                base += at + 1;
-            },
-            Err(at) => base += at,
-        }
-        if base >= long.len() {
-            break;
-        }
-    }
-    out
-}
-
-fn push_overlap(out: &mut Vec<Posting>, a: Posting, b: Posting) {
-    let mask = a.mask & b.mask;
-    if mask & BLOCK_BITS != 0 {
-        out.push(Posting { ord: a.ord, mask });
-    }
-}
-
-pub fn union_postings(left: &[Posting], right: &[Posting]) -> Vec<Posting> {
-    let mut out = Vec::with_capacity(left.len() + right.len());
-    let mut i = 0;
-    let mut j = 0;
-    while i < left.len() && j < right.len() {
-        match left[i].ord.cmp(&right[j].ord) {
-            std::cmp::Ordering::Less => {
-                out.push(left[i]);
-                i += 1;
-            },
-            std::cmp::Ordering::Greater => {
-                out.push(right[j]);
-                j += 1;
-            },
-            std::cmp::Ordering::Equal => {
-                out.push(Posting {
-                    ord: left[i].ord,
-                    mask: left[i].mask | right[j].mask,
-                });
-                i += 1;
-                j += 1;
-            },
-        }
-    }
-    out.extend_from_slice(&left[i..]);
-    out.extend_from_slice(&right[j..]);
-    out
-}
-
-pub fn union_sorted(left: Vec<usize>, right: Vec<usize>) -> Vec<usize> {
-    let mut out = Vec::with_capacity(left.len() + right.len());
-    let mut i = 0;
-    let mut j = 0;
-    while i < left.len() && j < right.len() {
-        match left[i].cmp(&right[j]) {
-            std::cmp::Ordering::Less => {
-                out.push(left[i]);
-                i += 1;
-            },
-            std::cmp::Ordering::Greater => {
-                out.push(right[j]);
-                j += 1;
-            },
-            std::cmp::Ordering::Equal => {
-                out.push(left[i]);
-                i += 1;
-                j += 1;
-            },
-        }
-    }
-    out.extend_from_slice(&left[i..]);
-    out.extend_from_slice(&right[j..]);
-    out
 }
 
 #[cfg(test)]

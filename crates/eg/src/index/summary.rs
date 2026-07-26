@@ -37,9 +37,9 @@ impl SummaryStatus {
         matches!(self, Self::Known(_) | Self::UnknownText)
     }
 
-    pub fn satisfies(self, need: &ScanNeed) -> bool {
+    pub fn satisfies(&self, need: &ScanNeed) -> bool {
         match self {
-            Self::Known(summary) => need.satisfied_by(&summary),
+            Self::Known(summary) => need.satisfied_by(summary),
             Self::UnknownText => true,
             Self::Skipped => false,
         }
@@ -122,6 +122,23 @@ impl SummaryIndex {
         self.base
             .dense_status(ord)
             .unwrap_or(SummaryStatus::Skipped)
+    }
+
+    /// True when a document holds text, read from its status byte alone
+    pub fn is_text(&self, ord: usize) -> bool {
+        matches!(
+            self.base.status_byte(ord),
+            Some(STATUS_UNKNOWN_TEXT | STATUS_KNOWN)
+        )
+    }
+
+    /// True when a document meets every need, decoding its summary at most once
+    pub fn meets(&self, ord: usize, needs: &[ScanNeed]) -> bool {
+        if needs.is_empty() {
+            return true;
+        }
+        let status = self.status(ord);
+        needs.iter().all(|need| status.satisfies(need))
     }
 
     pub fn text_ordinals(&self) -> Vec<usize> {
@@ -251,6 +268,12 @@ impl SummarySegment {
     fn dense_status(&self, ord: u32) -> Option<SummaryStatus> {
         let idx = usize::try_from(ord).ok()?;
         Some(self.record(idx)?.status)
+    }
+
+    /// One record's status byte without decoding the summary behind it
+    fn status_byte(&self, idx: usize) -> Option<u8> {
+        let at = idx.checked_mul(RECORD_SIZE)?;
+        self.body().get(at).copied()
     }
 
     fn record(&self, idx: usize) -> Option<SummaryRecord> {
