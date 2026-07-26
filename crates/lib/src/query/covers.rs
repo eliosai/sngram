@@ -35,11 +35,11 @@ impl Analyzer<'_> {
         }
         let cap = self.flush_cap();
         if set.len() <= MAX_MAXIMAL_COVER_BRANCHES
-            && let Some(covers) = self.branch_covers(set, false, cap)
+            && let Some(covers) = self.maximal_covers(set, cap)
         {
             return self.or_covers(q, covers);
         }
-        if let Some(covers) = self.branch_covers(set, true, cap) {
+        if let Some(covers) = self.minimal_covers(set, cap) {
             return self.or_covers(q, covers);
         }
         if let Some(grams) = self.branch_single_covers(set, self.budget_left()) {
@@ -76,31 +76,35 @@ impl Analyzer<'_> {
             if fitted.min_len() < QuerySettings::MIN_GRAM_LEN {
                 return q;
             }
-            if let Some(covers) = self.branch_covers(&fitted, true, cap) {
+            if let Some(covers) = self.minimal_covers(&fitted, cap) {
                 return self.or_covers(q, covers);
             }
         }
         q
     }
 
-    /// The covers of each string in `set` — maximal or minimal — or `None`
-    /// when a string covers to nothing or the total exceeds `cap`.
-    fn branch_covers(&self, set: &StringSet, minimal: bool, cap: usize) -> Option<Vec<StringSet>> {
+    /// The maximal covers of each string in `set`, or `None` when a string
+    /// covers to nothing or the total exceeds `cap`.
+    fn maximal_covers(&self, set: &StringSet, cap: usize) -> Option<Vec<StringSet>> {
         let mut cover = Cover::new(self.table());
-        let mut covers = Vec::with_capacity(set.len());
-        let mut total = 0;
-        for s in set.as_slice() {
-            let grams = cover_set(&mut cover, s.as_bytes(), minimal);
-            if grams.is_empty() {
-                return None;
-            }
-            total += grams.len();
-            if total > cap {
-                return None;
-            }
-            covers.push(grams);
-        }
-        Some(covers)
+        gather_covers(set, cap, |s| {
+            let mut grams = StringSet::new();
+            cover.each_guaranteed_span(s, |at| grams.push(Gram::from(&s[at])));
+            grams.clean(Order::Prefix);
+            grams
+        })
+    }
+
+    /// The minimal covers of each string in `set`, or `None` when a string
+    /// covers to nothing or the total exceeds `cap`.
+    fn minimal_covers(&self, set: &StringSet, cap: usize) -> Option<Vec<StringSet>> {
+        let mut cover = Cover::new(self.table());
+        gather_covers(set, cap, |s| {
+            let mut grams = StringSet::new();
+            cover.each_minimal_span(s, |at| grams.push(Gram::from(&s[at])));
+            grams.clean(Order::Prefix);
+            grams
+        })
     }
 
     /// One selective gram per string in a large exact/prefix/suffix set.
@@ -144,22 +148,36 @@ impl Analyzer<'_> {
     }
 }
 
-/// The covering grams of one branch, cleaned.
+/// Cover every string in `set` with `of`, stopping at the first branch that
+/// covers to nothing or takes the total over `cap`.
 ///
-/// The minimal cover chains `s` end to end. The maximal one adds every gram
-/// [`crate::scan`] would emit for `s` alone: a gram's emission depends only on
-/// the bigram weights inside its span, so each of those is emitted for any
-/// document containing `s` too.
-fn cover_set(cover: &mut Cover<'_>, s: &[u8], minimal: bool) -> StringSet {
-    let mut set = StringSet::new();
-    let mut keep = |at: Range<usize>| set.push(Gram::from(&s[at]));
-    if minimal {
-        cover.each_minimal_span(s, &mut keep);
-    } else {
-        cover.each_guaranteed_span(s, &mut keep);
+/// A set holding more strings than `cap` is refused unwalked: every string
+/// spends at least one gram, so such a walk always ends over the cap, and the
+/// single-gram pass would then re-cover the same branches.
+///
+/// The minimal cover chains a string end to end. The maximal one adds every
+/// gram [`crate::scan`] would emit for that string alone: a gram's emission
+/// depends only on the bigram weights inside its span, so each of those is
+/// emitted for any document containing the string too.
+fn gather_covers(
+    set: &StringSet,
+    cap: usize,
+    mut of: impl FnMut(&[u8]) -> StringSet,
+) -> Option<Vec<StringSet>> {
+    if set.len() > cap {
+        return None;
     }
-    set.clean(Order::Prefix);
-    set
+    let mut covers = Vec::with_capacity(set.len());
+    let mut total = 0;
+    for s in set.as_slice() {
+        let grams = of(s.as_bytes());
+        total += grams.len();
+        if grams.is_empty() || total > cap {
+            return None;
+        }
+        covers.push(grams);
+    }
+    Some(covers)
 }
 
 /// The strongest single guaranteed gram for a branch: longest first, then
@@ -214,17 +232,16 @@ fn spans_center(s: &[u8], at: &Range<usize>, gram: &[u8]) -> bool {
 /// [`MAX_SET`] distinct strings of gram length
 fn distinct_edge(set: &StringSet, order: Order) -> Option<StringSet> {
     let mut edge = set.clone();
-    let mut keep = set.max_len().saturating_sub(1);
-    while keep >= QuerySettings::MIN_GRAM_LEN {
-        edge.truncate(order, keep);
-        edge.clean(order);
-        if edge.min_len() < QuerySettings::MIN_GRAM_LEN {
-            return None;
-        }
-        if edge.len() <= MAX_SET {
-            return Some(edge);
-        }
-        keep -= 1;
+    edge.clean(order);
+    if edge.min_len() < QuerySettings::MIN_GRAM_LEN {
+        return None;
     }
-    None
+    let hi = edge.max_len().saturating_sub(1);
+    let keep = edge.longest_fit(order, hi, MAX_SET)?;
+    if keep < QuerySettings::MIN_GRAM_LEN {
+        return None;
+    }
+    edge.truncate(order, keep);
+    edge.clean(order);
+    Some(edge)
 }

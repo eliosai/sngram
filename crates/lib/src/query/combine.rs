@@ -235,16 +235,12 @@ fn seam_side(set: &StringSet, order: Order) -> Option<StringSet> {
         return Some(set.clone());
     }
     let mut edge = set.clone();
-    let mut keep = edge.max_len().saturating_sub(1);
-    while keep >= 1 {
-        edge.truncate(order, keep);
-        edge.clean(order);
-        if edge.len() <= MAX_SET {
-            return Some(edge);
-        }
-        keep -= 1;
-    }
-    None
+    edge.clean(order);
+    let hi = edge.max_len().saturating_sub(1);
+    let keep = edge.longest_fit(order, hi, MAX_SET)?;
+    edge.truncate(order, keep);
+    edge.clean(order);
+    Some(edge)
 }
 
 /// Truncate the larger seam side, one byte at a time, until the cross product

@@ -71,6 +71,7 @@ impl Gram {
 
     /// The gram's bytes.
     #[must_use]
+    #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         match &self.0 {
             Repr::Inline { len, buf } => &buf[..usize::from(*len)],
@@ -139,10 +140,13 @@ impl Borrow<[u8]> for Gram {
 }
 
 impl PartialEq for Gram {
+    /// Padding past `len` is always zero, so two inline buffers are equal
+    /// exactly when their raw bytes are; byte order never enters equality.
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
             (Repr::Inline { len: a, buf: ab }, Repr::Inline { len: b, buf: bb }) => {
-                a == b && words(ab) == words(bb)
+                a == b && ab == bb
             },
             _ => self.as_bytes() == other.as_bytes(),
         }
@@ -152,12 +156,14 @@ impl PartialEq for Gram {
 impl Eq for Gram {}
 
 impl PartialOrd for Gram {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Gram {
+    #[inline]
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         match (&self.0, &other.0) {
             (Repr::Inline { len: a, buf: ab }, Repr::Inline { len: b, buf: bb }) => {
@@ -168,9 +174,10 @@ impl Ord for Gram {
     }
 }
 
-/// The inline buffer as big-endian words, the integer image whose order and
-/// equality match the padded bytes. The last word overlaps the one before it
-/// so the whole buffer is covered by whole loads.
+/// The inline buffer as big-endian words, the integer image whose order
+/// matches the padded bytes. The last word overlaps the one before it so the
+/// whole buffer is covered by whole loads.
+#[inline]
 fn words(buf: &InlineBuf) -> [u64; 3] {
     [
         word_at(buf, 0),
@@ -179,6 +186,7 @@ fn words(buf: &InlineBuf) -> [u64; 3] {
     ]
 }
 
+#[inline]
 fn word_at(buf: &InlineBuf, at: usize) -> u64 {
     let mut word = [0u8; 8];
     word.copy_from_slice(&buf[at..at + 8]);

@@ -4,13 +4,12 @@
 //! [`Order`]s and deduplicates, so later passes can merge and truncate
 //! prefixes or suffixes in a single linear scan.
 //!
-//! A set remembers the order it was last sorted in. The window-shrinking
-//! loops truncate the same set to ever-shorter strings, and truncation is
-//! monotone in both orders, so those passes re-sort nothing.
+//! A set remembers the order it was last sorted in, and truncation is monotone
+//! in both orders, so shortening a sorted set re-sorts nothing.
 
 use sngram_types::Gram;
 
-use super::order::{Order, Shape, cmp_in};
+use super::order::{Order, Shape, cmp_in, shared_in};
 
 /// A set of byte strings. Always present; absence is modelled with `Option`.
 #[derive(Debug, Clone, Default)]
@@ -153,6 +152,38 @@ impl StringSet {
         } else {
             Shape::Loose
         };
+    }
+
+    /// The longest `keep` in `1..=hi` whose [`Self::truncate`] leaves at most
+    /// `target` distinct strings, or `None` when even one byte leaves more.
+    ///
+    /// Two neighbours in `order` collapse under a `keep`-byte truncation
+    /// exactly when `keep` is at most the bytes they share at that end, so one
+    /// pass over the neighbours prices every `keep` at once. The set must be
+    /// cleaned in `order`.
+    #[must_use]
+    pub fn longest_fit(&self, order: Order, hi: usize, target: usize) -> Option<usize> {
+        if hi == 0 {
+            return None;
+        }
+        if self.items.len() <= target {
+            return Some(hi);
+        }
+        let mut cuts = vec![0usize; hi];
+        for pair in self.items.windows(2) {
+            let shared = shared_in(order, &pair[0], &pair[1]);
+            if shared < hi {
+                cuts[shared] += 1;
+            }
+        }
+        let mut distinct = 1;
+        for (keep, split) in cuts.iter().enumerate() {
+            distinct += split;
+            if distinct > target {
+                return (keep > 0).then_some(keep);
+            }
+        }
+        Some(hi)
     }
 
     /// Union with `other`, cleaned in `order`, reusing this set's storage.
@@ -335,6 +366,61 @@ mod tests {
         // "a"+"aa" and "aa"+"a" collide, so no count can be trusted up front
         assert_eq!(ragged.cross_len(&ragged), None);
         assert_eq!(ragged.cross(&ragged, Order::Prefix).len(), 3);
+    }
+
+    /// The shrinking loop `longest_fit` replaced: cut one byte at a time
+    /// until the set fits, reporting the last length that did.
+    fn shrink_to_fit(t: &StringSet, order: Order, hi: usize, target: usize) -> Option<usize> {
+        let mut cut = t.clone();
+        for keep in (1..=hi).rev() {
+            cut.truncate(order, keep);
+            cut.clean(order);
+            if cut.len() <= target {
+                return Some(keep);
+            }
+        }
+        None
+    }
+
+    /// A spread of sets whose truncations collapse at different lengths.
+    fn fit_corpus() -> Vec<StringSet> {
+        let mut corpus = vec![StringSet::new(), set(&[b""]), set(&[b"abcdef"])];
+        let mut wide = StringSet::new();
+        let mut ragged = StringSet::new();
+        for a in b'a'..=b'f' {
+            for b in b'a'..=b'f' {
+                wide.push(Gram::from(&[a, b, b'q', a][..]));
+                ragged.push(Gram::from(&[a; 1][..]));
+                ragged.push(Gram::from(&[a, b, b'z'][..]));
+            }
+        }
+        corpus.push(wide);
+        corpus.push(ragged);
+        corpus
+    }
+
+    /// Every bound one set is asked for agrees with the shrinking loop.
+    fn check_fits(t: &StringSet, order: Order) {
+        for hi in 0..6 {
+            for target in 1..8 {
+                assert_eq!(
+                    t.longest_fit(order, hi, target),
+                    shrink_to_fit(t, order, hi, target),
+                    "{order:?} hi {hi} target {target} {:?}",
+                    t.as_slice()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn longest_fit_matches_shrinking_one_byte_at_a_time() {
+        for order in [Order::Prefix, Order::Suffix] {
+            for mut t in fit_corpus() {
+                t.clean(order);
+                check_fits(&t, order);
+            }
+        }
     }
 
     #[test]

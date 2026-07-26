@@ -7,15 +7,18 @@ use sngram_types::WeightTable;
 
 use super::engine;
 use super::settings::ScanSettings;
+use super::space::SpaceScanner;
 
 /// A covering pass over short literals, reused across a whole flush.
 ///
-/// The monotonic stack is the pass's only carried state; the literal scanner
-/// is built per literal so the document scanner it shares keeps its exact
-/// shape.
+/// The monotonic stack and the literal scanner are the pass's carried state;
+/// both are rewound per literal, so a pass over thousands of branches builds
+/// each of them once. The scanner waits for the first guaranteed cover, since
+/// a pass that only chains minimal covers never runs it.
 pub struct Cover<'t> {
     table: &'t WeightTable,
     stack: CoverStack,
+    scanner: Option<SpaceScanner<'t>>,
 }
 
 impl<'t> Cover<'t> {
@@ -24,6 +27,7 @@ impl<'t> Cover<'t> {
         Self {
             table,
             stack: CoverStack::new(),
+            scanner: None,
         }
     }
 
@@ -42,7 +46,12 @@ impl<'t> Cover<'t> {
     /// document containing `literal`.
     pub fn each_guaranteed_span(&mut self, literal: &[u8], mut visit: impl FnMut(Range<usize>)) {
         self.each_minimal_span(literal, &mut visit);
-        engine::literal_scanner(self.table).push_bytes(literal, literal.len(), &mut |gram| {
+        let table = self.table;
+        let scanner = self
+            .scanner
+            .get_or_insert_with(|| engine::literal_scanner(table));
+        scanner.restart();
+        scanner.push_bytes(literal, literal.len(), &mut |gram| {
             visit(gram.span.as_range());
         });
     }
@@ -205,12 +214,24 @@ mod tests {
         }
     }
 
+    /// A literal that wraps the scanner's prefix ring before the given length
+    fn wrapping_literal(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|at| b"abcdefghijklmnopqrstuvwxyz_0123"[at % 31])
+            .collect()
+    }
+
     #[test]
     fn a_reused_pass_matches_a_fresh_one() {
         let table = table();
-        let long = vec![b'q'; 300];
-        let literals: [&[u8]; 3] = [&long, b"alpha_beta_gamma", b"MAX_FILE_SIZE"];
         let mut shared = Cover::new(&table);
+        for len in [300usize, 16, 127, 128, 129, 3, 400, 5] {
+            let literal = wrapping_literal(len);
+            let mut reused = Vec::new();
+            shared.each_guaranteed_span(&literal, |at| reused.push(at));
+            assert_eq!(reused, spans(&literal, true), "length {len}");
+        }
+        let literals: [&[u8]; 2] = [b"alpha_beta_gamma", b"MAX_FILE_SIZE"];
         for literal in literals {
             let mut reused = Vec::new();
             shared.each_guaranteed_span(literal, |at| reused.push(at));

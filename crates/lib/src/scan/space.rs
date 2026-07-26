@@ -103,6 +103,23 @@ impl<'t> SpaceScanner<'t> {
         }
     }
 
+    /// Rewind to the pristine state so one scanner walks many short inputs.
+    ///
+    /// Only the ring slot a start-0 gram reads needs clearing: every other
+    /// slot is written at its own position before any gram can read it, and
+    /// an empty stack is never read either.
+    pub const fn restart(&mut self) {
+        self.stack_len = 0;
+        self.ring[ScanSettings::PREFIX_RING - 1] = 0;
+        self.prefix_hash = 0;
+        self.pos = 0;
+        self.prev = 0;
+        self.last_changed_end = match self.transform {
+            Transform::Raw => usize::MAX,
+            Transform::Folded => 0,
+        };
+    }
+
     pub fn push_bytes<F>(&mut self, chunk: &[u8], content_bytes: usize, emit: &mut F)
     where
         F: FnMut(ScannedGram),

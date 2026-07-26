@@ -156,37 +156,31 @@ fn spill_exact(info: &mut RegexpInfo, exact: &StringSet) {
 fn reduce_set_skeletal(t: &mut StringSet, order: Order) {
     const SKELETAL_KEEP: usize = BOUNDARY_KEEP / 2;
     const SKELETAL_COUNT: usize = 16;
-    let mut keep = SKELETAL_KEEP.min(t.max_len());
-    loop {
-        t.truncate(order, keep);
-        t.clean(order);
-        if t.len() <= SKELETAL_COUNT || keep <= 1 {
-            break;
-        }
-        keep -= 1;
-    }
+    let hi = SKELETAL_KEEP.min(t.max_len());
+    cut_to_fit(t, order, hi, SKELETAL_COUNT);
 }
 
-/// Shrink `t` back under its bounds: strings are truncated to
-/// [`BOUNDARY_KEEP`] bytes of context, then to ever-shorter prefixes (or
-/// suffixes) until an overflowing set drops to [`REGROW_TARGET`] strings,
-/// de-duplicating between passes.
+/// Shrink `t` back under its bounds: the longest edge window of at most
+/// [`BOUNDARY_KEEP`] bytes that leaves an overflowing set at
+/// [`REGROW_TARGET`] strings.
 fn reduce_set(t: &mut StringSet, order: Order) {
     let target = if t.len() > MAX_SET {
         REGROW_TARGET
     } else {
         MAX_SET
     };
-    let mut keep = BOUNDARY_KEEP.min(t.max_len());
-    loop {
-        t.truncate(order, keep);
-        t.clean(order);
-        // never truncate a non-empty string to the seam-severing "" artifact
-        if t.len() <= target || keep <= 1 {
-            break;
-        }
-        keep -= 1;
-    }
+    let hi = BOUNDARY_KEEP.min(t.max_len());
+    cut_to_fit(t, order, hi, target);
+}
+
+/// Truncate `t` to the longest edge window of at most `hi` bytes that leaves
+/// at most `target` strings, keeping one byte when none fits: a non-empty
+/// string must never become the seam-severing `""` artifact. `t` must be
+/// cleaned in `order`.
+fn cut_to_fit(t: &mut StringSet, order: Order, hi: usize, target: usize) {
+    let keep = t.longest_fit(order, hi, target).unwrap_or(1);
+    t.truncate(order, keep);
+    t.clean(order);
 }
 
 /// Drop strings made redundant by a shorter one already in the set: if `ab`
