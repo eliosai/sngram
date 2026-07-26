@@ -38,7 +38,7 @@ path, still fail.
 
 ## Upgrading to 0.7
 
-0.7 moves the postings schema from 16 to 20. The daemon rebuilds any
+0.7 moves the postings schema from 16 to 21. The daemon rebuilds any
 index it finds at an older schema on first contact, destructively and
 without asking, so the first query against an existing root after the
 upgrade pays for one build. Nothing else about the CLI changes.
@@ -52,13 +52,13 @@ daemon-owned index:
 
 | Corpus | Index build | Suite vs scan | False positives | False negatives |
 |---|---:|---:|---:|---:|
-| linux (1.615 GB) | 17,154 ms | 6.87x | 26.56% | 0 |
-| k8s | 3,320 ms | 6.44x | 39.64% | 0 |
-| hass-core | 2,095 ms | 6.58x | 44.65% | 0 |
-| django | 783 ms | 3.64x | 26.58% | 0 |
+| linux (1.615 GB) | 13,101 ms | 7.87x | 26.56% | 0 |
+| k8s | 2,611 ms | 7.59x | 39.64% | 0 |
+| hass-core | 1,649 ms | 7.47x | 44.65% | 0 |
+| django | 678 ms | 4.21x | 26.58% | 0 |
 
-On linux the suite finishes in about 3,960 ms indexed against about
-27,000 ms scanning, and the index is 1,467,104,424 bytes, 0.91x the
+On linux the suite finishes in about 3,630 ms indexed against about
+28,600 ms scanning, and the index is 1,467,104,135 bytes, 0.91x the
 corpus text. The run fails if any indexed hit set diverges from its scan
 hit set, so the zero false-negative column is enforced, not observed.
 

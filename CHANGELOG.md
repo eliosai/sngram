@@ -3,28 +3,69 @@
 ## 0.7.0
 
 Indexes built by earlier versions are rebuilt on first use: the postings
-schema moved from 16 to 20.
+schema moved from 16 to 21.
 
 ### Correctness
 
-- Indexed search covers the bytes before a file's first NUL. A file with a
-  single NUL near its end used to be dropped whole, so a 3.4 MB protobuf
-  whose only NUL sat 82 bytes from the end never matched.
-- Binary files are searched deterministically. Whether a match near the end
-  of such a file was reported used to depend on how wide a directory tree
-  the search covered.
-- Indexed output prints the path spelling the query asked for. `eg PATTERN ../`
-  returned nothing at all when an index existed.
+Five ways an indexed search could return fewer matches than a plain scan:
+
+- A tree being written to could be served from a generation built before the
+  last writes. Roughly one query in eight returned in milliseconds having
+  missed every new file. A query whose index lost its freshness proof now
+  answers from the same walk and workers `--no-index` uses.
+- Any file holding a NUL was dropped whole, so a 3.4 MB protobuf whose only
+  NUL sat 82 bytes from the end never matched. The bytes before the first NUL
+  are indexed.
+- Binary files were searched differently depending on how wide a directory
+  tree the search covered.
+- A UTF-8 byte order mark was indexed as content, so an anchored query whose
+  only hit sat on line one of such a file was lost.
+- `\A` and `\z` were planned as file edges, but search hands the matcher one
+  line at a time. `os\z` on django returned nothing where a scan returned 202
+  files.
+
+Also:
+
+- `eg PATTERN ../` returned nothing whenever an index existed, and a
+  multi-path search built its index at the working directory rather than
+  anywhere containing the requested paths.
+- `-w` and `-x` under `--crlf` asked for a line ending in the last pattern
+  byte while the verifier saw the carriage return.
+- Anchored patterns carry line-start and line-end requirements into the plan.
 - Tiny binary prefixes are decided from bytes held in the index rather than
   forced into every candidate set.
-- Anchored patterns carry line-start and line-end requirements into the plan.
+
+### Behaviour
+
+- Queries the index cannot express, an inverted match, `--passthru`, binary
+  flags, a stdin pipe, or a pattern too broad to prefilter, now scan instead
+  of exiting 2. Invalid patterns and missing paths still fail.
+- The daemon claims at most a third of the system inotify limit, refuses a
+  tree whole when it does not fit, and says which knob to turn. It previously
+  took as many watches as it wanted, which starved editors and language
+  servers, and then hung for an hour when the kernel refused.
+- The daemon releases watches for trees without a live lease, and reclaims
+  staging from an interrupted build, generations a schema change retired, and
+  the state shell of a corpus that is gone.
+- A tree under continuous writes waits for quiet instead of rebuilding once
+  per event.
 
 ### Performance
 
-- Index build is about five times faster: scan work is split by bytes rather
-  than file count, and the postings merge runs in parallel.
+Measured on isolated corpus copies, same weight table throughout.
+
+| corpus | index build | speedup vs scan | false positives |
+|---|---|---|---|
+| linux 1.6 GB | 88.5 s to 13.1 s | 6.83x to 7.87x | 27.75% to 26.56% |
+| kubernetes | 6.8 s to 2.6 s | 6.72x to 7.59x | 39.69% to 39.64% |
+| django | 1.6 s to 0.7 s | 3.83x to 4.21x | 28.04% to 26.58% |
+| home-assistant | 3.8 s to 1.6 s | 7.20x to 7.47x | 44.65% |
+
 - `sngram::scan` runs at about 208 MiB/s on code, up from 90.
-- Query plan construction drops from 65 ms to 4.4 ms on its worst case.
+- Query plan construction drops from 65 ms to 4.4 ms on its worst pattern.
+- Posting decode runs at 174 million postings per second, up from 113.
+- Index build stopped chunking scan work by file count, which left one thread
+  with thousands of generated headers while the rest idled.
 
 ### Training
 
@@ -34,12 +75,27 @@ schema moved from 16 to 20.
   files are counted.
 - A full pass over 15.9 TB of decoded source takes about 13 hours at roughly
   340 MB/s, holding about 2.2 GB of memory.
+- A stalled shard listing used to hang startup with no output. Each attempt is
+  bounded and transport failures retry.
+
+### Attribution
+
+`eg --help` credited ripgrep's author as this project's. The byline now comes
+from package metadata. ripgrep keeps every credit it had and gains an explicit
+one in the help description and the man page, and its license now ships with
+the code copied from it. See `LICENSE-RIPGREP-MIT`.
 
 ## Known issues
 
 - `--heading` output from an indexed search separates file blocks with two
-  blank lines where a scan uses one, and `-A`/`-B` repeat the `--` marker
-  the same way. Each candidate file is printed into its own buffer while
-  the printer keeps its separator state, so both the trailing and the
-  leading separator are written. No match is added or lost, and every
-  other output mode is byte identical between the two paths.
+  blank lines where a scan uses one, and `-A`/`-B` repeat the `--` marker the
+  same way. Each candidate file is printed into its own buffer while the
+  printer keeps its separator state, so both the trailing and the leading
+  separator are written. No match is added or lost, and every other output
+  mode is byte identical between the two paths.
+- A query landing in the window right after a rebuild publishes can still
+  trust a slightly old generation. Closing it means ordering the walk against
+  the watcher event stream.
+- With about 6,000 watches per large repository and a third of a 65,536 limit,
+  roughly four large trees can be watched at once. The fifth is refused until
+  capacity frees rather than evicting the least recently used tree.

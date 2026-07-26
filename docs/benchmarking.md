@@ -70,10 +70,10 @@ The four corpora as measured on 2026-07-25:
 
 | Corpus | Index build | Suite vs scan | False positives | False negatives |
 |---|---:|---:|---:|---:|
-| linux (1.615 GB) | 17,154 ms | 6.87x | 26.56% | 0 |
-| k8s | 3,320 ms | 6.44x | 39.64% | 0 |
-| hass-core | 2,095 ms | 6.58x | 44.65% | 0 |
-| django | 783 ms | 3.64x | 26.58% | 0 |
+| linux (1.615 GB) | 13,101 ms | 7.87x | 26.56% | 0 |
+| k8s | 2,611 ms | 7.59x | 39.64% | 0 |
+| hass-core | 1,649 ms | 7.47x | 44.65% | 0 |
+| django | 678 ms | 4.21x | 26.58% | 0 |
 
 Rules that keep numbers honest: benches get a quiet machine with no
 concurrent cargo builds, hot-path claims compare indexed `eg` against

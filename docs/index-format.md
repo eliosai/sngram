@@ -8,7 +8,7 @@ its own, 20 as of elgrep 0.7, and the daemon rebuilds any index whose
 schema does not match.
 
 On the Linux kernel reference corpus (1.615GB text, 2026-07-25) the
-index totals 1,467,104,424 bytes, 0.91x the corpus, built in 17,154 ms.
+index totals 1,467,104,135 bytes, 0.91x the corpus, built in 13,101 ms.
 `postings.bin` carries roughly three quarters of that and `table.bin`
 most of the rest; `summaries.bin` and the two manifest files together
 stay under 5%.

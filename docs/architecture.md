@@ -71,8 +71,8 @@ follows Google codesearch, rebuilt for sparse grams instead of trigrams.
 ## Measured endline
 
 On a 1.615GB Linux kernel checkout, 2026-07-25: the index builds in
-17,154 ms to 1,467,104,424 bytes (0.91x the corpus), and the 296-query
-suite runs 6.87x faster than scanning with 26.56% aggregate false
+13,101 ms to 1,467,104,135 bytes (0.91x the corpus), and the 296-query
+suite runs 7.87x faster than scanning with 26.56% aggregate false
 positives and zero false negatives. Three other corpora hold the same
 shape: k8s 6.44x at 39.64% FP, hass-core 6.58x at 44.65%, django 3.64x
 at 26.58%, all with zero false negatives. The record of how it got there,

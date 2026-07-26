@@ -58,13 +58,13 @@ output mode. Measured 2026-07-25 on isolated corpus copies:
 
 | Corpus | Index build | Suite vs scan | False positives | False negatives |
 |---|---:|---:|---:|---:|
-| linux (1.615 GB) | 17,154 ms | 6.87x | 26.56% | 0 |
-| k8s | 3,320 ms | 6.44x | 39.64% | 0 |
-| hass-core | 2,095 ms | 6.58x | 44.65% | 0 |
-| django | 783 ms | 3.64x | 26.58% | 0 |
+| linux (1.615 GB) | 13,101 ms | 7.87x | 26.56% | 0 |
+| k8s | 2,611 ms | 7.59x | 39.64% | 0 |
+| hass-core | 1,649 ms | 7.47x | 44.65% | 0 |
+| django | 678 ms | 4.21x | 26.58% | 0 |
 
-On linux the suite finishes in about 3,960 ms indexed against about
-27,000 ms scanning, and the index is 1,467,104,424 bytes, 0.91x the
+On linux the suite finishes in about 3,630 ms indexed against about
+28,600 ms scanning, and the index is 1,467,104,135 bytes, 0.91x the
 corpus. A false positive is a file the index hands to the verifier that
 the regex then rejects, which costs time and never costs correctness.
 The suite fails the run if any indexed hit set diverges from its scan hit
