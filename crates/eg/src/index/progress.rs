@@ -18,6 +18,8 @@ const BUILDING: &str = "building index";
 /// Line printed above the bar the first time a tree is indexed
 const COLD_BUILD_NOTE: &str = "building a sparse n-gram index. This wait happens once per tree.";
 const PROGRESS_POLL: Duration = Duration::from_millis(100);
+/// Waits shorter than this paint nothing
+const SHOW_AFTER: Duration = Duration::from_millis(150);
 const SCAN_UPDATE_FILES: u64 = 512;
 const WALK_UPDATE_ITEMS: u64 = 512;
 const SNAPSHOT_UPDATE_FILES: u64 = 512;
@@ -316,34 +318,37 @@ struct BuildProgressCursor {
 pub struct BuildProgressRenderer {
     bar: ProgressBar,
     last_poll: Instant,
+    started: Instant,
     enabled: bool,
     spinner: bool,
+    shown: bool,
 }
 
 impl BuildProgressRenderer {
     /// Create a terminal renderer: phase progress, or one steady spinner
     pub fn new(enabled: bool, spinner: bool) -> Self {
-        let enabled = enabled && io::stderr().is_terminal();
-        let bar = if enabled {
-            new_bar(spinner)
-        } else {
-            ProgressBar::hidden()
-        };
-        let renderer = Self {
-            bar,
+        Self {
+            bar: ProgressBar::hidden(),
             last_poll: Instant::now() - PROGRESS_POLL,
-            enabled,
+            started: Instant::now(),
+            enabled: enabled && io::stderr().is_terminal(),
             spinner,
-        };
-        if enabled && !spinner {
-            renderer.announce_cold_build();
+            shown: false,
         }
-        renderer
     }
 
     /// Redraw from the persisted daemon progress state.
     pub fn tick(&mut self, state_root: &Path) {
-        if !self.enabled || self.spinner || self.last_poll.elapsed() < PROGRESS_POLL {
+        if !self.enabled {
+            return;
+        }
+        if !self.shown {
+            if self.started.elapsed() < SHOW_AFTER {
+                return;
+            }
+            self.reveal();
+        }
+        if self.spinner || self.last_poll.elapsed() < PROGRESS_POLL {
             return;
         }
         self.last_poll = Instant::now();
@@ -353,9 +358,18 @@ impl BuildProgressRenderer {
         }
     }
 
+    /// Put a live bar on stderr once the wait has earned one
+    fn reveal(&mut self) {
+        self.bar = new_bar(self.spinner);
+        self.shown = true;
+        if !self.spinner {
+            self.announce_cold_build();
+        }
+    }
+
     /// Clear the terminal progress line.
     pub fn finish(self) {
-        if self.enabled {
+        if self.shown {
             self.bar.finish_and_clear();
         }
     }
@@ -440,7 +454,44 @@ fn phase_style() -> ProgressStyle {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildPhase, BuildProgress, read};
+    use std::time::{Duration, Instant};
+
+    use indicatif::ProgressBar;
+
+    use super::{
+        BuildPhase, BuildProgress, BuildProgressRenderer, PROGRESS_POLL, SHOW_AFTER, read,
+    };
+
+    fn renderer(waited: Duration) -> BuildProgressRenderer {
+        BuildProgressRenderer {
+            bar: ProgressBar::hidden(),
+            last_poll: Instant::now() - PROGRESS_POLL,
+            started: Instant::now() - waited,
+            enabled: true,
+            spinner: true,
+            shown: false,
+        }
+    }
+
+    #[test]
+    fn a_short_wait_paints_nothing() {
+        let root_guard = scratch("short");
+        let mut renderer = renderer(Duration::ZERO);
+
+        renderer.tick(root_guard.path());
+
+        assert!(!renderer.shown, "a wait under the threshold drew a bar");
+    }
+
+    #[test]
+    fn a_long_wait_earns_a_bar() {
+        let root_guard = scratch("long");
+        let mut renderer = renderer(SHOW_AFTER + Duration::from_millis(10));
+
+        renderer.tick(root_guard.path());
+
+        assert!(renderer.shown, "a wait over the threshold drew nothing");
+    }
 
     fn scratch(name: &str) -> tempfile::TempDir {
         tempfile::Builder::new()
