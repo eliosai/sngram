@@ -70,11 +70,11 @@ follows Google codesearch, rebuilt for sparse grams instead of trigrams.
 
 ## Measured endline
 
-On a 1.615GB Linux kernel checkout, 2026-07-25: the index builds in
-13,101 ms to 1,467,104,135 bytes (0.91x the corpus), and the 296-query
-suite runs 7.87x faster than scanning with 26.56% aggregate false
-positives and zero false negatives. Three other corpora hold the same
-shape: k8s 6.44x at 39.64% FP, hass-core 6.58x at 44.65%, django 3.64x
-at 26.58%, all with zero false negatives. The record of how it got there,
+On a 1.615GB Linux kernel checkout, 2026-07-26: the index builds in
+11,880 ms to 1,467,104,135 bytes (0.91x the corpus), and the 296-query
+suite runs 8.45x faster than scanning and 8.29x faster than ripgrep, with
+26.56% aggregate false positives and zero false negatives. Three other
+corpora hold the same shape: k8s 8.31x at 39.64% FP, hass-core 8.30x at
+44.65%, django 4.34x at 26.58%, all with zero false negatives. The record of how it got there,
 including every rejected design, is
 [fp-optimization-plan.md](fp-optimization-plan.md).

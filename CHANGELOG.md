@@ -97,10 +97,10 @@ Measured on isolated corpus copies, same weight table throughout.
 
 | corpus | index build | speedup vs scan | false positives |
 |---|---|---|---|
-| linux 1.6 GB | 88.5 s to 13.1 s | 6.83x to 7.87x | 27.75% to 26.56% |
-| kubernetes | 6.8 s to 2.6 s | 6.72x to 7.59x | 39.69% to 39.64% |
-| django | 1.6 s to 0.7 s | 3.83x to 4.21x | 28.04% to 26.58% |
-| home-assistant | 3.8 s to 1.6 s | 7.20x to 7.47x | 44.65% |
+| linux 1.6 GB | 88.5 s to 11.9 s | 6.83x to 8.45x | 27.75% to 26.56% |
+| kubernetes | 6.8 s to 2.7 s | 6.72x to 8.31x | 39.69% to 39.64% |
+| django | 1.6 s to 0.8 s | 3.83x to 4.34x | 28.04% to 26.58% |
+| home-assistant | 3.8 s to 1.7 s | 7.20x to 8.30x | 44.65% |
 
 - `sngram::scan` runs at about 208 MiB/s on code, up from 90.
 - Query plan construction drops from 65 ms to 4.4 ms on its worst pattern.
@@ -110,12 +110,23 @@ Measured on isolated corpus copies, same weight table throughout.
 
 ### Training
 
-- The corpus is The Stack v3, read directly from parquet with file content
-  inline. The separate object store fetch is gone.
-- Sampling takes whole repositories with their natural file mix. Vendored
-  files are counted.
-- A full pass over 15.9 TB of decoded source takes about 13 hours at roughly
-  340 MB/s, holding about 2.2 GB of memory.
+- Two corpora, chosen with `--corpus`. `blend` is the default and the one
+  the shipped table was minted from: nine families over 38 sources with
+  per-family and per-source byte ceilings summing to 15 TB, dispatched to
+  whichever family sits furthest below its target share. `stack-v3` is the
+  single-dataset path, kept and still runnable.
+- A Stack v3 table was measured against the shipped one and rejected. It
+  lost on all four corpora like-for-like, worst on kubernetes at +7.17pp
+  false positives, because taking whole repositories at their natural mix
+  puts no Go in the top eight languages and 11.9% HTML and XML in them.
+  The mint is kept under `train/runs/v3`.
+- Shards are read by declared layout and text field, so nested stack
+  files, flat parquet columns, and gzipped JSON lines all count.
+- A checkpoint is bound to its corpus name and roster fingerprint, so
+  resuming into a different corpus is refused rather than silently
+  trained. The checkpoint schema moved to 9; existing checkpoints do not
+  resume.
+- Sampling counts vendored files.
 - A stalled shard listing used to hang startup with no output. Each attempt is
   bounded and transport failures retry.
 

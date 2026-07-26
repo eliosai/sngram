@@ -46,11 +46,11 @@ query's indexed hits diverge from its scan hits, so zero false negatives
 is enforced, not observed.
 
 The summary line carries the headline numbers. From the linux corpus on
-2026-07-25:
+2026-07-26:
 
 ```
 summary regexes=296 ... false_positive_pct=26.56 false_negative_rows=0
-index_bytes=1467104424 ... index_ratio=0.91
+index_bytes=1467104135 ... index_ratio=0.91
 ```
 
 ## Corpora and recipes
@@ -66,14 +66,15 @@ just suite ~/repos/hass-core
 just suite ~/repos/django
 ```
 
-The four corpora as measured on 2026-07-25:
+The four corpora as measured on 2026-07-26, against ripgrep 15.2.0 and
+GNU grep 3.11:
 
-| Corpus | Index build | Suite vs scan | False positives | False negatives |
-|---|---:|---:|---:|---:|
-| linux (1.615 GB) | 13,101 ms | 7.87x | 26.56% | 0 |
-| k8s | 2,611 ms | 7.59x | 39.64% | 0 |
-| hass-core | 1,649 ms | 7.47x | 44.65% | 0 |
-| django | 678 ms | 4.21x | 26.58% | 0 |
+| Corpus | Index build | Suite vs scan | Suite vs rg | False positives | False negatives |
+|---|---:|---:|---:|---:|---:|
+| linux (1.615 GB) | 11,880 ms | 8.45x | 8.29x | 26.56% | 0 |
+| k8s (272 MB) | 2,659 ms | 8.31x | 7.98x | 39.64% | 0 |
+| hass-core (179 MB) | 1,697 ms | 8.30x | 8.05x | 44.65% | 0 |
+| django (38 MB) | 765 ms | 4.34x | 4.19x | 26.58% | 0 |
 
 Rules that keep numbers honest: benches get a quiet machine with no
 concurrent cargo builds, hot-path claims compare indexed `eg` against

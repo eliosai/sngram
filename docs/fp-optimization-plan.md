@@ -226,24 +226,25 @@ positions were rejected on size. That is the accepted floor of this
 format. The single-digit aggregate target was not reachable inside the
 size budget; 27.76% at 0.92x corpus is the frozen trade.
 
-## Restated gates (2026-07-25, schema 21)
+## Restated gates (2026-07-26, schema 21)
 
 The postings schema moved 16 to 21 and the numbers above were re-measured
 on isolated corpus copies. The gates the release table must meet:
 
-| corpus | index build | suite vs scan | FP | FN |
-|---|---:|---:|---:|---:|
-| linux (1.615GB) | 13,101 ms | 7.87x | 26.56% | 0 |
-| k8s | 2,611 ms | 7.59x | 39.64% | 0 |
-| hass-core | 1,649 ms | 7.47x | 44.65% | 0 |
-| django | 678 ms | 4.21x | 26.58% | 0 |
+| corpus | index build | suite vs scan | suite vs rg | FP | FN |
+|---|---:|---:|---:|---:|---:|
+| linux (1.615GB) | 11,880 ms | 8.45x | 8.29x | 26.56% | 0 |
+| k8s | 2,659 ms | 8.31x | 7.98x | 39.64% | 0 |
+| hass-core | 1,697 ms | 8.30x | 8.05x | 44.65% | 0 |
+| django | 765 ms | 4.34x | 4.19x | 26.58% | 0 |
 
 The linux index is 1,467,104,135 bytes, ratio 0.91, and the suite runs
-about 3,630 ms indexed against about 28,600 ms scanning. False positives
-fell on three of the four corpora against their previous measurements.
-The 2026-07-07 speedup row above compared against `rg`; these compare
-indexed `eg` against `eg --no-index` only, because the measuring machine
-had no ripgrep binary.
+about 3,312 ms indexed against about 27,991 ms scanning and 27,466 ms
+through ripgrep. False positives fell on three of the four corpora
+against their previous measurements. The build and speedup columns
+improved against the 2026-07-25 restatement because the correctness fixes
+that release shipped also removed a per-query stall; false positives and
+index bytes are unchanged.
 
 ## Original targets
 

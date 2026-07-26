@@ -52,26 +52,45 @@ eg 'max_\w+_size' ~/src/linux
 eg --no-index 'max_\w+_size' ~/src/linux   # plain scan for comparison
 ```
 
-The embedded 296-query suite runs every query twice, once through the
-index and once through `eg --no-index`, on the same tree with the same
-output mode. Measured 2026-07-25 on isolated corpus copies:
+On the Linux kernel tree, with a hot daemon-owned index and
+files-with-matches output, p50 of 9 runs. Every hit set is compared
+against ripgrep's before the pattern is timed, so these rows are the same
+answer at different speeds:
 
-| Corpus | Index build | Suite vs scan | False positives | False negatives |
-|---|---:|---:|---:|---:|
-| linux (1.615 GB) | 13,101 ms | 7.87x | 26.56% | 0 |
-| k8s | 2,611 ms | 7.59x | 39.64% | 0 |
-| hass-core | 1,649 ms | 7.47x | 44.65% | 0 |
-| django | 678 ms | 4.21x | 26.58% | 0 |
+| Pattern | Matched files | elgrep | ripgrep | grep | vs ripgrep |
+|---|---:|---:|---:|---:|---:|
+| `linus tor` | 0 | 5.9 ms | 84.0 ms | 821.2 ms | 14.2x |
+| `EXPORT_SYMBOL_GPL` | 3627 | 16.6 ms | 86.5 ms | 671.7 ms | 5.2x |
+| `copy_from_user` | 1221 | 7.0 ms | 82.9 ms | 677.9 ms | 11.9x |
+| `schedule_timeout` | 418 | 9.3 ms | 86.1 ms | 684.2 ms | 9.2x |
 
-On linux the suite finishes in about 3,630 ms indexed against about
-28,600 ms scanning, and the index is 1,467,104,135 bytes, 0.91x the
-corpus. A false positive is a file the index hands to the verifier that
-the regex then rejects, which costs time and never costs correctness.
-The suite fails the run if any indexed hit set diverges from its scan hit
-set, so zero false negatives is enforced rather than observed.
+A pattern with no matches is where the index earns most: it answers from
+posting lists without opening a file. A pattern matching 3,627 files
+gains least, because the verifier still reads all 3,627.
 
-These are elgrep against itself. Comparisons with ripgrep and grep need a
-ripgrep binary on PATH; `--bench` adds those legs when it finds one.
+Across the whole embedded query suite, every pattern run through all
+three tools from the shell. A pattern counts only when elgrep, ripgrep,
+and grep return the identical hit set, so each row is the same work three
+ways. Measured 2026-07-26 on isolated corpus copies against ripgrep
+15.2.0 and GNU grep 3.11:
+
+| Corpus | Index build | elgrep | ripgrep | grep | vs ripgrep | vs grep |
+|---|---:|---:|---:|---:|---:|---:|
+| linux (1.615 GB) | 11,880 ms | 6,521 ms | 22,507 ms | 506,745 ms | 3.45x | 77.7x |
+| k8s (272 MB) | 2,659 ms | 1,518 ms | 8,311 ms | 100,842 ms | 5.48x | 66.5x |
+| hass-core (179 MB) | 1,697 ms | 1,315 ms | 7,044 ms | 76,065 ms | 5.36x | 57.9x |
+| django (38 MB) | 765 ms | 1,083 ms | 3,283 ms | 21,625 ms | 3.03x | 20.0x |
+
+Those totals include process startup on every query, which is the cost a
+person actually pays at a shell and which weighs heaviest on the fastest
+tool. Measured in process, `eg --bench` puts the same suite at 8.45x a
+plain scan on linux. The index is 1,467,104,135 bytes, 0.91x the corpus.
+
+The index is a prefilter, so it may hand the verifier a file the regex
+then rejects; that costs time and never costs correctness. It may never
+lose a match, and the suite fails the run if any indexed hit set diverges
+from its scan hit set.
+
 [crates/eg/README.md](crates/eg/README.md) covers the CLI, the daemon,
 and the benchmark modes.
 
@@ -81,34 +100,20 @@ and the benchmark modes.
 cargo add sngram --features weights
 ```
 
-The `weights` feature embeds the trained production table. Everything
-the API needs is exported from the one crate.
+The `weights` feature embeds the trained production table. The whole API
+is two calls:
 
 ```rust
-use sngram::{query, scan, ScanEvent};
-use std::io::Cursor;
-
 let table = sngram::weights();
-let doc = b"fn max_file_size() -> u64 { 0 }";
 
-// index side: every gram arrives with its final 64-bit index key
-scan(&table, Cursor::new(doc), |event| {
-    if let ScanEvent::Gram(gram) = event {
-        let _key = gram.key; // store this in your inverted index
-    }
-})?;
-
-// query side: a regex becomes a boolean gram query
-let plan = query(&table, r"max_\w+_size")?;
+sngram::scan(&table, reader, emit)?;   // index side: text to grams
+sngram::query(&table, pattern)?;       // query side: regex to a plan
 ```
 
-`scan` reads one `BufRead` stream, allocates nothing per gram, and
-ends with a `ScanEvent::Finish` summary of document metadata mined in
-the same pass. It runs at about 208 MiB/s on code. `query` returns a
-`QueryPlan` whose needles carry the same keys `scan` emits; the worst
-plan in the bench set builds in 4.4 ms. Training from Rust lives behind
-the `learn` feature as `sngram::learn::BigramCounter`. The README in
-[crates/lib](crates/lib) covers the library in depth.
+`scan` streams a document and hands back the grams to store, keyed
+exactly as `query` will look them up. It runs at about 208 MiB/s on code.
+The README in [crates/lib](crates/lib) covers the plan structure, the
+tuning hook, and training behind the `learn` feature.
 
 ## The Python package
 
@@ -124,12 +129,7 @@ import sngram
 
 table = sngram.weights()
 result = sngram.scan(table, b"fn main() {}")
-result.grams                 # [(start, end, key), ...]
-result.summary.byte_len      # scan-derived document metadata
-
 plan = sngram.query(table, r"max_\w+_size")
-plan.op, plan.grams          # boolean query over index keys
-plan.needs[0].satisfied_by(result.summary)
 ```
 
 [crates/python/README.md](crates/python/README.md) documents the full
@@ -137,21 +137,21 @@ surface, including plan tuning and a worked inverted-index example.
 
 ## The trainer
 
-`train/` mints weight tables from The Stack v3
-(`HuggingFaceCode/stack-v3-train`, ODC-By 1.0, ungated): 15.9 TB of
-source text across 713 languages and 173M repositories, about 4.9
-trillion tokens, from the GitHub snapshot of 2025-08-07. It streams the
-8196 parquet shards straight from the Hugging Face Hub, reads file
-content inline from `files[].content`, counts byte pairs through the
-Rust core, checkpoints every minute, and mints one provenance-stamped
-table when the stream ends. One row is one repository and the trainer
-takes its whole file mix, so the trained distribution matches the source
-trees people search. A full pass takes about 13 hours.
+`train/` mints weight tables, streaming everything from the Hugging Face
+Hub. The production corpus is `blend`: nine families over 38 sources,
+15 TB of family ceilings across code, config and markup, technical text,
+English prose, and a twelve-language UTF-8 coverage slice. A planner
+feeds the counter from whichever family sits furthest below its target
+share, so a mint holds the intended mix instead of the raw dataset
+sizes. `--corpus stack-v3` selects the single-dataset path instead.
+
+The table shipped in the library is a blend mint: 11.96 TB counted,
+89.6% of it code, over about ten hours.
 
 ```sh
 cd train
 uv sync
-uv run sngram train --shards 10     # smoke run
+uv run sngram train --shards 2      # smoke run
 uv run sngram train --mint-dir ./runs/r1
 uv run sngram inspect runs/r1/final_weights.bin
 ```

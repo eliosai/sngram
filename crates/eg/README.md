@@ -36,6 +36,13 @@ much of the corpus that verifying candidates costs more than scanning.
 gets one line on stderr. Only real errors, an invalid regex or a missing
 path, still fail.
 
+A file carrying a NUL is searched up to that NUL rather than skipped
+whole, so `eg` reports matches in the text head of a compiled catalog or
+an archive where ripgrep reports nothing. On a django checkout that is
+1,353 extra files for `-l '.*'`, almost all of them `.mo` and `.png`.
+The indexed and `--no-index` paths agree; the difference is against
+ripgrep, and it only ever adds files.
+
 ## Upgrading to 0.7
 
 0.7 moves the postings schema from 16 to 21. The daemon rebuilds any
@@ -45,26 +52,39 @@ upgrade pays for one build. Nothing else about the CLI changes.
 
 ## Benchmarks
 
-The embedded 296-query suite runs every query through the index and again
-through `eg --no-index`, on the same tree with files-with-matches output.
-Measured 2026-07-25 on isolated corpus copies, each with a hot
-daemon-owned index:
+The embedded 296-query suite, run from the shell through all three tools
+with files-with-matches output. A pattern counts toward a row only when
+elgrep, ripgrep, and grep agree on the hit set. Measured 2026-07-26 on
+isolated corpus copies, each with a hot daemon-owned index, against
+ripgrep 15.2.0 and GNU grep 3.11:
 
-| Corpus | Index build | Suite vs scan | False positives | False negatives |
-|---|---:|---:|---:|---:|
-| linux (1.615 GB) | 13,101 ms | 7.87x | 26.56% | 0 |
-| k8s | 2,611 ms | 7.59x | 39.64% | 0 |
-| hass-core | 1,649 ms | 7.47x | 44.65% | 0 |
-| django | 678 ms | 4.21x | 26.58% | 0 |
+| Corpus | Index build | elgrep | ripgrep | grep | vs ripgrep | vs grep |
+|---|---:|---:|---:|---:|---:|---:|
+| linux (1.615 GB) | 11,880 ms | 6,521 ms | 22,507 ms | 506,745 ms | 3.45x | 77.7x |
+| k8s (272 MB) | 2,659 ms | 1,518 ms | 8,311 ms | 100,842 ms | 5.48x | 66.5x |
+| hass-core (179 MB) | 1,697 ms | 1,315 ms | 7,044 ms | 76,065 ms | 5.36x | 57.9x |
+| django (38 MB) | 765 ms | 1,083 ms | 3,283 ms | 21,625 ms | 3.03x | 20.0x |
 
-On linux the suite finishes in about 3,630 ms indexed against about
-28,600 ms scanning, and the index is 1,467,104,135 bytes, 0.91x the
-corpus text. The run fails if any indexed hit set diverges from its scan
-hit set, so the zero false-negative column is enforced, not observed.
+Every query there pays process startup, which is what a person pays at a
+shell and which costs the fastest tool proportionally most. In process,
+`eg --bench` puts the same suite at 8.45x a plain scan on linux, 3,312 ms
+against 27,991 ms, and the index is 1,467,104,135 bytes, 0.91x the corpus
+text. The run fails if any indexed hit set diverges from its scan hit
+set, so a lost match fails the build rather than reaching a user.
 
-Those columns compare elgrep against itself. `--bench` adds a ripgrep leg
-when it finds an `rg` binary on PATH, and the numbers above were taken on
-a machine without one.
+Per pattern on linux, p50 of 9 runs, each hit set checked against
+ripgrep's before it was timed:
+
+| Pattern | Matched files | elgrep | ripgrep | grep | vs ripgrep |
+|---|---:|---:|---:|---:|---:|
+| `linus tor` | 0 | 5.9 ms | 84.0 ms | 821.2 ms | 14.2x |
+| `EXPORT_SYMBOL_GPL` | 3627 | 16.6 ms | 86.5 ms | 671.7 ms | 5.2x |
+| `copy_from_user` | 1221 | 7.0 ms | 82.9 ms | 677.9 ms | 11.9x |
+| `schedule_timeout` | 418 | 9.3 ms | 86.1 ms | 684.2 ms | 9.2x |
+
+The spread is the index working as designed. A pattern that matches
+nothing is answered from posting lists alone; a pattern that matches
+3,627 files still costs the verifier 3,627 file reads.
 
 ```sh
 eg --bench 'max_\w+_size' ~/src/linux   # one indexed query, JSON report
@@ -74,9 +94,10 @@ cd ~/src/linux && eg --bench            # the whole suite
 The hand comparison, run from inside the corpus:
 
 ```sh
-eg --files-with-matches --color never --no-heading -e PATTERN ./
-eg --no-index --files-with-matches --color never --no-heading -e PATTERN ./
-grep -rIl --exclude-dir=.git --exclude-dir=.eg -e PATTERN ./
+eg -l -e PATTERN ./
+eg --no-index -l -e PATTERN ./
+rg -l -e PATTERN ./
+grep -rl --binary-files=without-match --exclude-dir=.git -e PATTERN ./
 ```
 
 ## License
