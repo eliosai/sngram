@@ -115,6 +115,7 @@ pub fn ensure_index_ready(
         }
         return Ok(Some(ScanReason::DaemonUnavailable));
     }
+    let _hold = runtime::LeaseHold::acquire(generation.state_root());
     wait_for_daemon_proof(generation, policy)
 }
 

@@ -47,6 +47,13 @@ Also:
 - The daemon releases watches for trees without a live lease, and reclaims
   staging from an interrupted build, generations a schema change retired, and
   the state shell of a corpus that is gone.
+- A tree that does not fit the watch budget takes the watches of the least
+  recently queried tree instead of being refused until capacity frees. Query
+  recency comes from the request a foreground query rewrites, so a build
+  directory nobody searches does not count as used. A tree whose lease a
+  query holds is never evicted, a tree keeps its watches for at least 30
+  seconds, and an evicted tree loses its freshness proof before it loses its
+  watches, so the next query on it rebuilds or scans.
 - A tree under continuous writes waits for quiet instead of rebuilding once
   per event.
 
@@ -97,5 +104,7 @@ the code copied from it. See `LICENSE-RIPGREP-MIT`.
   trust a slightly old generation. Closing it means ordering the walk against
   the watcher event stream.
 - With about 6,000 watches per large repository and a third of a 65,536 limit,
-  roughly four large trees can be watched at once. The fifth is refused until
-  capacity frees rather than evicting the least recently used tree.
+  roughly four large trees can be watched at once. A fifth takes the watches
+  of the least recently queried tree, so the trees in use are the watched
+  ones, but a working set larger than the budget still costs one exact scan
+  per tree that lost its watches.

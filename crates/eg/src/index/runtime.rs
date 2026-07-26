@@ -28,6 +28,8 @@ const DISABLE_DAEMON_AUTOSPAWN_ENV: &str = "EG_INDEXD_DISABLE_AUTOSPAWN";
 const LEASE_TTL_ENV: &str = "EG_INDEXD_LEASE_TTL_SECS";
 const RUNTIME_ROOT_ENV: &str = "EG_INDEXD_RUNTIME_ROOT";
 const DEFAULT_LEASE_TTL: Duration = Duration::from_hours(24);
+/// How often a query rewrites its request so the daemon can rank trees by use
+const REGISTRATION_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_STARTUP_WAIT: Duration = Duration::from_secs(5);
 const INDEX_READY_POLL: Duration = Duration::from_millis(50);
 static GLOBAL_RUNTIME_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -49,15 +51,39 @@ impl<'a> Lease<'a> {
         request_refresh(self.index_root, self.state_root)
     }
 
-    /// Renew the lease off the hot path; a lapse only means the next query
-    /// falls back to the blocking cold registration
+    /// Renew the lease and the request stamp off the hot path
     pub fn keep_alive_detached(&self) {
-        if lease_is_fresh(self.state_root) {
+        if lease_is_fresh(self.state_root)
+            && registration_is_recent(self.index_root, self.state_root)
+        {
             return;
         }
         let index_root = self.index_root.to_path_buf();
         let state_root = self.state_root.to_path_buf();
         std::thread::spawn(move || keep_alive_best_effort(&index_root, &state_root));
+    }
+}
+
+/// Shared claim on one tree's lease, held while a query waits on its index
+pub struct LeaseHold {
+    file: std::fs::File,
+}
+
+impl LeaseHold {
+    /// A hold, which an unreadable or already exclusive lease cannot grant
+    pub fn acquire(state_root: &Path) -> Option<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .open(runtime_dir(state_root).join(LEASE_FILE_NAME))
+            .ok()?;
+        file.try_lock_shared().ok()?;
+        Some(Self { file })
+    }
+}
+
+impl Drop for LeaseHold {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 
@@ -326,7 +352,7 @@ fn register(
     let requests = global_runtime_root().join(REQUESTS_DIR_NAME);
     fs::create_dir_all(&requests)?;
     let key = hash_paths(index_root, state_root);
-    let request = requests.join(format!("{key:016x}.request"));
+    let request = request_path(index_root, state_root);
     let tmp = requests.join(format!("{key:016x}.{}.tmp", std::process::id()));
     let mut file = OpenOptions::new()
         .create(true)
@@ -445,6 +471,25 @@ fn touch_lease(state_root: &Path) -> io::Result<()> {
     write_marker(&runtime.join(LEASE_FILE_NAME))
 }
 
+/// Daemon request one index root and state root pair registers under
+fn request_path(index_root: &Path, state_root: &Path) -> PathBuf {
+    let key = hash_paths(index_root, state_root);
+    global_runtime_root()
+        .join(REQUESTS_DIR_NAME)
+        .join(format!("{key:016x}.request"))
+}
+
+/// True while the daemon still reads this query as a recent use of the tree
+fn registration_is_recent(index_root: &Path, state_root: &Path) -> bool {
+    fs::metadata(request_path(index_root, state_root))
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|modified| {
+            SystemTime::now()
+                .duration_since(modified)
+                .is_ok_and(|age| age <= REGISTRATION_INTERVAL)
+        })
+}
+
 fn lease_is_fresh(state_root: &Path) -> bool {
     let Ok(metadata) = fs::metadata(runtime_dir(state_root).join(LEASE_FILE_NAME)) else {
         return false;
@@ -517,7 +562,7 @@ fn hash_paths(index_root: &Path, state_root: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_LEASE_TTL, LEASE_FILE_NAME, LOCK_FILE_NAME, OWNER_FILE_NAME,
+        DEFAULT_LEASE_TTL, LEASE_FILE_NAME, LOCK_FILE_NAME, LeaseHold, OWNER_FILE_NAME,
         STARTUP_READY_FILE_NAME, WAKE_FILE_NAME, daemon_freshness_proof_in, install_daemon_binary,
         keep_alive_best_effort, lease_is_fresh, lease_ttl_from, request_refresh,
         runtime_root_is_writable,
@@ -718,5 +763,47 @@ mod tests {
             "daemon v2 with more bytes",
             fs::read_to_string(installed).expect("read")
         );
+    }
+
+    #[test]
+    fn a_missing_lease_grants_no_hold() {
+        let root_guard = scratch("hold-missing");
+        let root = root_guard.path().to_path_buf();
+
+        assert!(LeaseHold::acquire(&root).is_none());
+    }
+
+    #[test]
+    fn a_held_lease_blocks_the_exclusive_claim_the_daemon_tests_with() {
+        let root_guard = scratch("hold-lease");
+        let root = root_guard.path().to_path_buf();
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&runtime).expect("runtime");
+        let lease = runtime.join(LEASE_FILE_NAME);
+        fs::write(&lease, "lease").expect("lease");
+
+        let hold = LeaseHold::acquire(&root).expect("hold");
+        let probe = fs::File::open(&lease).expect("probe");
+        assert!(probe.try_lock().is_err());
+
+        drop(hold);
+
+        let probe = fs::File::open(&lease).expect("probe");
+        assert!(probe.try_lock().is_ok());
+    }
+
+    #[test]
+    fn two_queries_hold_one_lease_together() {
+        let root_guard = scratch("hold-shared");
+        let root = root_guard.path().to_path_buf();
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&runtime).expect("runtime");
+        fs::write(runtime.join(LEASE_FILE_NAME), "lease").expect("lease");
+
+        let first = LeaseHold::acquire(&root).expect("first hold");
+        let second = LeaseHold::acquire(&root);
+
+        assert!(second.is_some());
+        drop(first);
     }
 }

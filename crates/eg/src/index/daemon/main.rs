@@ -2,6 +2,7 @@
 
 mod budget;
 mod churn;
+mod eviction;
 mod generations;
 mod reclaim;
 mod watch;
@@ -21,6 +22,7 @@ use std::{
 use anyhow::Context;
 
 use budget::WatchBudget;
+use eviction::{Claimant, QueryTouch, WatchTenure};
 use watch::WatchOutcome;
 
 const REQUESTS_DIR_NAME: &str = "requests";
@@ -45,6 +47,9 @@ const DEFAULT_LEASE_TTL: Duration = Duration::from_hours(24);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const STARTUP_IDLE_GRACE: Duration = Duration::from_mins(1);
 const RECLAIM_INTERVAL: Duration = Duration::from_mins(5);
+/// Refusal a tree earns when a more recently queried tree takes its watches
+const EVICTED_REASON: &str =
+    "eg-indexd gave this tree's filesystem watches to a tree queried more recently";
 
 fn main() {
     if let Err(err) = run() {
@@ -68,6 +73,7 @@ struct Daemon {
     watcher: watch::Watcher,
     watch_stamps: HashMap<PathBuf, SystemTime>,
     refused: HashMap<PathBuf, usize>,
+    tenure: WatchTenure,
     churn: churn::Churn,
     last_reclaim: Instant,
 }
@@ -88,6 +94,7 @@ impl Daemon {
             watcher: watch::Watcher::with_budget(budget)?,
             watch_stamps: HashMap::new(),
             refused: HashMap::new(),
+            tenure: WatchTenure::from_env(),
             churn: churn::Churn::default(),
             last_reclaim: Instant::now(),
         })
@@ -163,6 +170,9 @@ impl Daemon {
             if !request.has_live_lease() {
                 continue;
             }
+            if let Some(touch) = QueryTouch::of_request(&request.path) {
+                self.tenure.observe(&request.state_root, touch);
+            }
             let _ = self.serve_request(request);
         }
     }
@@ -175,10 +185,11 @@ impl Daemon {
     }
 
     fn watch_request(&mut self, request: &Request) -> anyhow::Result<WatchOutcome> {
-        let outcome = self.sync_watches(request)?;
+        let outcome = self.sync_watches_until_it_fits(request)?;
         match outcome {
             WatchOutcome::Watching => {
                 self.refused.remove(&request.state_root);
+                self.tenure.watching(&request.state_root);
                 clear_watch_refusal(&request.state_root);
                 mark_watcher_ready(&request.state_root)?;
             },
@@ -189,6 +200,45 @@ impl Daemon {
         Ok(outcome)
     }
 
+    /// Watch this tree, evicting least recently queried trees until it fits
+    fn sync_watches_until_it_fits(&mut self, request: &Request) -> anyhow::Result<WatchOutcome> {
+        let mut outcome = self.sync_watches(request)?;
+        while outcome == WatchOutcome::Exhausted {
+            let Some(claimant) = Claimant::new(&request.state_root, &request.path) else {
+                break;
+            };
+            let evictable = self.evictable_trees();
+            let Some(victim) = self.tenure.victim(&claimant, &evictable) else {
+                break;
+            };
+            self.evict(&victim);
+            outcome = self.sync_watches(request)?;
+        }
+        Ok(outcome)
+    }
+
+    /// Watched trees no foreground query is holding open right now
+    fn evictable_trees(&self) -> Vec<PathBuf> {
+        self.watcher
+            .watched_trees()
+            .into_iter()
+            .filter(|state_root| !eviction::lease_is_held(&lease_path(state_root)))
+            .collect()
+    }
+
+    /// Withdraw a tree's freshness proof, then return its watches to the budget
+    fn evict(&mut self, state_root: &Path) {
+        let _ = remove_file_if_exists(&watcher_ready_path(state_root));
+        let _ = mark_watch_refused(state_root, EVICTED_REASON);
+        self.watcher.release_tree(state_root);
+        self.watch_stamps.remove(state_root);
+        self.tenure.released(state_root);
+        log::debug!(
+            "eg-indexd: evicted the watches for {}",
+            state_root.display()
+        );
+    }
+
     /// Withdraw the freshness proof for a tree the budget cannot cover
     fn refuse_watch(&mut self, request: &Request) {
         let spare = self.watcher.spare();
@@ -196,12 +246,7 @@ impl Daemon {
             return;
         }
         self.watch_stamps.remove(&request.state_root);
-        let _ = remove_file_if_exists(
-            &request
-                .state_root
-                .join(RUNTIME_DIR_NAME)
-                .join(WATCHER_READY_FILE_NAME),
-        );
+        let _ = remove_file_if_exists(&watcher_ready_path(&request.state_root));
         let reason = format!(
             "eg-indexd holds {} of its {} allowed filesystem watches, which is not enough to watch {} for changes",
             self.watcher.held(),
@@ -257,17 +302,14 @@ impl Daemon {
             .collect();
         self.refused
             .retain(|state_root, _| live.contains(state_root.as_path()));
+        self.tenure.retain_live(&live);
         for state_root in self.watcher.watched_trees() {
             if live.contains(state_root.as_path()) {
                 continue;
             }
             self.watcher.release_tree(&state_root);
             self.watch_stamps.remove(&state_root);
-            let _ = remove_file_if_exists(
-                &state_root
-                    .join(RUNTIME_DIR_NAME)
-                    .join(WATCHER_READY_FILE_NAME),
-            );
+            let _ = remove_file_if_exists(&watcher_ready_path(&state_root));
         }
     }
 
@@ -406,9 +448,7 @@ impl Request {
     }
 
     fn has_live_lease(&self) -> bool {
-        let Ok(metadata) =
-            fs::metadata(self.state_root.join(RUNTIME_DIR_NAME).join(LEASE_FILE_NAME))
-        else {
+        let Ok(metadata) = fs::metadata(lease_path(&self.state_root)) else {
             return false;
         };
         let Ok(modified) = metadata.modified() else {
@@ -620,6 +660,16 @@ fn mark_owner(state_root: &Path, owner: &str) -> std::io::Result<()> {
     file.sync_all()
 }
 
+fn lease_path(state_root: &Path) -> PathBuf {
+    state_root.join(RUNTIME_DIR_NAME).join(LEASE_FILE_NAME)
+}
+
+fn watcher_ready_path(state_root: &Path) -> PathBuf {
+    state_root
+        .join(RUNTIME_DIR_NAME)
+        .join(WATCHER_READY_FILE_NAME)
+}
+
 fn mark_lease_live(state_root: &Path) -> std::io::Result<()> {
     let runtime = state_root.join(RUNTIME_DIR_NAME);
     fs::create_dir_all(&runtime)?;
@@ -790,10 +840,12 @@ fn hex_nibble(byte: u8) -> anyhow::Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_LEASE_TTL, Daemon, JOURNAL_CLEAN_FILE_NAME, LEASE_FILE_NAME, RUNTIME_DIR_NAME,
-        Request, StartupDisposition, WATCH_REFUSED_FILE_NAME, WATCHER_READY_FILE_NAME, WatchBudget,
-        WatchOutcome, adopt_request, consolidate_children, discard_request, discard_state,
+        DEFAULT_LEASE_TTL, Daemon, File, JOURNAL_CLEAN_FILE_NAME, LEASE_FILE_NAME, QueryTouch,
+        RUNTIME_DIR_NAME, Request, StartupDisposition, WATCH_DIRS_FILE_NAME,
+        WATCH_REFUSED_FILE_NAME, WATCHER_READY_FILE_NAME, WatchBudget, WatchOutcome, WatchTenure,
+        adopt_request, consolidate_children, discard_request, discard_state, lease_path,
         lease_ttl_from, mark_lease_live, read_request, read_requests, startup_disposition,
+        watcher_ready_path,
     };
     use std::{
         ffi::OsString,
@@ -1299,5 +1351,133 @@ arg=6e6565646c65
         assert!(daemon.watcher.watches_tree(&kept.state_root));
         assert!(!daemon.watcher.watches_tree(&lapsed.state_root));
         assert!(!lapsed_runtime.join(WATCHER_READY_FILE_NAME).exists());
+    }
+
+    /// Leased corpus whose daemon request carries a query touch of now
+    fn queried_corpus(root: &Path, depth: usize) -> Request {
+        let request = leased_corpus(root, depth);
+        fs::write(&request.path, "request").expect("request");
+        std::thread::sleep(Duration::from_millis(10));
+        request
+    }
+
+    fn evicting_daemon(runtime_root: &Path, ceiling: usize) -> Daemon {
+        let mut daemon = budgeted_daemon(runtime_root, ceiling);
+        daemon.tenure = WatchTenure::with_min_hold(Duration::ZERO);
+        daemon
+    }
+
+    /// Serve one request the way a poll does, reading its query touch first
+    fn watch_query(daemon: &mut Daemon, request: &Request) -> WatchOutcome {
+        let touch = QueryTouch::of_request(&request.path).expect("query touch");
+        daemon.tenure.observe(&request.state_root, touch);
+        daemon.watch_request(request).expect("watch request")
+    }
+
+    /// Publish the walked directory list the daemon scopes its watches by
+    fn publish_watch_dirs(request: &Request, dirs: &[&str]) {
+        let runtime = request.state_root.join(RUNTIME_DIR_NAME);
+        fs::create_dir_all(&runtime).expect("runtime");
+        let lines: Vec<String> = dirs.iter().map(|dir| hex_bytes(dir.as_bytes())).collect();
+        fs::write(runtime.join(WATCH_DIRS_FILE_NAME), lines.join("\n")).expect("watch dirs");
+    }
+
+    #[test]
+    fn a_more_recently_queried_tree_takes_the_least_recently_used_watches() {
+        let root_guard = scratch("evict-lru");
+        let root = root_guard.path().to_path_buf();
+        let idle = queried_corpus(&root.join("idle"), 1);
+        let busy = queried_corpus(&root.join("busy"), 1);
+        let wanting = queried_corpus(&root.join("wanting"), 1);
+        let mut daemon = evicting_daemon(&root, 5);
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &idle));
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &busy));
+
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &wanting));
+
+        assert!(!daemon.watcher.watches_tree(&idle.state_root));
+        assert!(daemon.watcher.watches_tree(&busy.state_root));
+        assert!(daemon.watcher.watches_tree(&wanting.state_root));
+        let refusal = fs::read_to_string(
+            idle.state_root
+                .join(RUNTIME_DIR_NAME)
+                .join(WATCH_REFUSED_FILE_NAME),
+        )
+        .expect("refusal");
+        assert!(refusal.contains("queried more recently"), "{refusal}");
+    }
+
+    #[test]
+    fn an_evicted_tree_never_proves_freshness_without_its_watches_back() {
+        let root_guard = scratch("evict-proof");
+        let root = root_guard.path().to_path_buf();
+        let idle = queried_corpus(&root.join("idle"), 1);
+        let wanting = queried_corpus(&root.join("wanting"), 1);
+        publish_watch_dirs(&idle, &["level0"]);
+        let mut daemon = evicting_daemon(&root, 3);
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &idle));
+        assert!(watcher_ready_path(&idle.state_root).exists());
+
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &wanting));
+
+        assert!(!watcher_ready_path(&idle.state_root).exists());
+        assert!(!daemon.watcher.watches_tree(&idle.state_root));
+        // the directory list is unchanged, so only real watches restore the proof
+        assert_eq!(WatchOutcome::Exhausted, watch_query(&mut daemon, &idle));
+        assert!(!watcher_ready_path(&idle.state_root).exists());
+        assert!(!daemon.watcher.watches_tree(&idle.state_root));
+    }
+
+    #[test]
+    fn a_tree_whose_lease_a_query_holds_is_never_evicted() {
+        let root_guard = scratch("evict-leased");
+        let root = root_guard.path().to_path_buf();
+        let idle = queried_corpus(&root.join("idle"), 1);
+        let wanting = queried_corpus(&root.join("wanting"), 1);
+        let mut daemon = evicting_daemon(&root, 3);
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &idle));
+        let hold = File::open(lease_path(&idle.state_root)).expect("lease");
+        hold.try_lock_shared().expect("hold the lease");
+
+        assert_eq!(WatchOutcome::Exhausted, watch_query(&mut daemon, &wanting));
+
+        assert!(daemon.watcher.watches_tree(&idle.state_root));
+        assert!(watcher_ready_path(&idle.state_root).exists());
+        assert!(!daemon.watcher.watches_tree(&wanting.state_root));
+
+        drop(hold);
+
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &wanting));
+        assert!(!daemon.watcher.watches_tree(&idle.state_root));
+    }
+
+    #[test]
+    fn a_tree_queried_before_every_holder_is_refused_rather_than_served() {
+        let root_guard = scratch("evict-order");
+        let root = root_guard.path().to_path_buf();
+        let wanting = queried_corpus(&root.join("wanting"), 1);
+        let busy = queried_corpus(&root.join("busy"), 1);
+        let mut daemon = evicting_daemon(&root, 3);
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &busy));
+
+        assert_eq!(WatchOutcome::Exhausted, watch_query(&mut daemon, &wanting));
+
+        assert!(daemon.watcher.watches_tree(&busy.state_root));
+        assert!(!daemon.watcher.watches_tree(&wanting.state_root));
+    }
+
+    #[test]
+    fn a_freshly_watched_tree_keeps_its_watches_through_the_minimum_hold() {
+        let root_guard = scratch("evict-hold");
+        let root = root_guard.path().to_path_buf();
+        let idle = queried_corpus(&root.join("idle"), 1);
+        let wanting = queried_corpus(&root.join("wanting"), 1);
+        let mut daemon = budgeted_daemon(&root, 3);
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &idle));
+
+        assert_eq!(WatchOutcome::Exhausted, watch_query(&mut daemon, &wanting));
+
+        assert!(daemon.watcher.watches_tree(&idle.state_root));
+        assert!(!daemon.watcher.watches_tree(&wanting.state_root));
     }
 }

@@ -129,12 +129,23 @@ impl ChildGuard {
 
     /// Daemon allowed only `budget` filesystem watches in total
     fn spawn_daemon_with_watch_budget(runtime_root: &Path, budget: usize) -> Self {
+        Self::spawn_daemon_with_watch_env(runtime_root, budget, &[])
+    }
+
+    /// Daemon bounded to `budget` watches, with extra watch policy overrides
+    fn spawn_daemon_with_watch_env(
+        runtime_root: &Path,
+        budget: usize,
+        extra: &[(&str, &str)],
+    ) -> Self {
         let binary = Path::new(env!("CARGO_BIN_EXE_eg-indexd"));
-        let child = spawn_daemon_process_with_env(
-            binary,
-            runtime_root,
-            &[("EG_INDEXD_WATCH_BUDGET", &budget.to_string())],
-        );
+        let mut envs = vec![("EG_INDEXD_WATCH_BUDGET", budget.to_string())];
+        envs.extend(extra.iter().map(|&(key, value)| (key, value.to_owned())));
+        let borrowed: Vec<(&str, &str)> = envs
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        let child = spawn_daemon_process_with_env(binary, runtime_root, &borrowed);
         wait_until(DAEMON_CYCLE_WAIT, || {
             runtime_root.join("startup-ready").exists().then_some(())
         });
@@ -2984,4 +2995,91 @@ fn a_tree_inside_the_watch_budget_still_serves_fresh_results() {
     });
 
     assert!(after.contains("hit.txt"), "{after}");
+}
+
+/// Corpus root holding `dirs` subdirectories, each with one file of `needle`
+fn corpus_of_width(fixture: &Fixture, dirs: usize, needle: &str) -> String {
+    for dir in 0..dirs {
+        let path = fixture.path(format!("d{dir}"));
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("hit.txt"), format!("{needle}\n")).unwrap();
+    }
+    fixture.root.to_str().unwrap().to_owned()
+}
+
+#[test]
+fn a_more_recently_queried_tree_evicts_the_least_recently_used_one() {
+    let idle = Fixture::new();
+    let busy = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    let idle_root = corpus_of_width(&idle, 2, "idle tree needle");
+    let busy_root = corpus_of_width(&busy, 4, "busy tree needle");
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_root = runtime_parent.join("eg");
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent.to_str().unwrap()),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+    let _daemon = ChildGuard::spawn_daemon_with_watch_env(
+        &runtime_root,
+        6,
+        &[("EG_INDEXD_WATCH_MIN_HOLD_MS", "0")],
+    );
+
+    let first = eg_with_env_vars(&["--bench", "idle tree needle", &idle_root], &envs);
+    let report: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(first.stdout).unwrap()).unwrap();
+    assert_eq!(Some("daemon"), report["freshness_proof"].as_str());
+
+    // the budget is spent, so the busy tree is served only by taking watches
+    let second = eg_with_env_vars(&["--bench", "busy tree needle", &busy_root], &envs);
+    let stderr = String::from_utf8(second.stderr).unwrap();
+    assert!(second.status.success(), "{stderr}");
+    let report: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(second.stdout).unwrap()).unwrap();
+    assert_eq!(Some("daemon"), report["freshness_proof"].as_str());
+    assert_eq!(Some(true), report["matched"].as_bool());
+
+    assert!(idle.path(".eg/runtime/watch-refused").exists());
+    assert!(!idle.path(".eg/runtime/watcher-ready").exists());
+    assert!(busy.path(".eg/runtime/watcher-ready").exists());
+}
+
+#[test]
+fn an_evicted_tree_never_answers_from_an_index_that_missed_a_change() {
+    let idle = Fixture::new();
+    let busy = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    let idle_root = corpus_of_width(&idle, 2, "evicted tree needle");
+    let busy_root = corpus_of_width(&busy, 4, "taking tree needle");
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_root = runtime_parent.join("eg");
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent.to_str().unwrap()),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+    let _daemon = ChildGuard::spawn_daemon_with_watch_env(
+        &runtime_root,
+        6,
+        &[("EG_INDEXD_WATCH_MIN_HOLD_MS", "0")],
+    );
+    eg_with_env_vars(&["evicted tree needle", &idle_root], &envs);
+    let taken = eg_with_env_vars(&["--bench", "taking tree needle", &busy_root], &envs);
+    assert!(
+        taken.status.success(),
+        "{}",
+        String::from_utf8(taken.stderr).unwrap()
+    );
+    // the proof goes the moment the watches do, not a poll later
+    assert!(!idle.path(".eg/runtime/watcher-ready").exists());
+
+    // nothing watches this tree, so the file can never reach its index
+    fs::write(idle.path("d0/added.txt"), "evicted tree needle\n").unwrap();
+    let after = eg_with_env_vars(&["evicted tree needle", &idle_root], &envs);
+    let stdout = String::from_utf8(after.stdout).unwrap();
+
+    assert!(after.status.success());
+    assert!(stdout.contains("added.txt"), "{stdout}");
+    assert!(stdout.contains("d0/hit.txt"), "{stdout}");
+    assert!(stdout.contains("d1/hit.txt"), "{stdout}");
 }
