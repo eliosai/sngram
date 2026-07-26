@@ -7,7 +7,7 @@ schema moved from 16 to 21.
 
 ### Correctness
 
-Five ways an indexed search could return fewer matches than a plain scan:
+Six ways an indexed search could return fewer matches than a plain scan:
 
 - A tree being written to could be served from a generation built before the
   last writes. Roughly one query in eight returned in milliseconds having
@@ -23,6 +23,11 @@ Five ways an indexed search could return fewer matches than a plain scan:
 - `\A` and `\z` were planned as file edges, but search hands the matcher one
   line at a time. `os\z` on django returned nothing where a scan returned 202
   files.
+- A query reaching a generation the daemon had just republished failed with
+  "daemon-owned index is not ready" and returned nothing, in 11 of 24 first
+  queries against a fresh index. An index a query cannot read now falls back
+  to the exact scan. A `--bench` run still fails, because it exists to measure
+  the indexed path.
 
 Also:
 
@@ -34,6 +39,10 @@ Also:
 - Anchored patterns carry line-start and line-end requirements into the plan.
 - Tiny binary prefixes are decided from bytes held in the index rather than
   forced into every candidate set.
+- A sorted indexed search doubled every block separator: `--` between context
+  blocks, a blank line between `--heading` blocks. Sorting runs single
+  threaded, where the standard printer owns the separator, but the indexed
+  path also handed one to the buffer writer.
 
 ### Behaviour
 
@@ -56,6 +65,9 @@ Also:
   watches, so the next query on it rebuilds or scans.
 - A tree under continuous writes waits for quiet instead of rebuilding once
   per event.
+- A query waiting on the daemon drew a progress bar the moment it started, so
+  every indexed query flashed "indexing changes (0s)". The bar now appears
+  only once a wait passes 150ms. Cold builds report progress as before.
 
 ### Performance
 
@@ -94,12 +106,9 @@ the code copied from it. See `LICENSE-RIPGREP-MIT`.
 
 ## Known issues
 
-- `--heading` output from an indexed search separates file blocks with two
-  blank lines where a scan uses one, and `-A`/`-B` repeat the `--` marker the
-  same way. Each candidate file is printed into its own buffer while the
-  printer keeps its separator state, so both the trailing and the leading
-  separator are written. No match is added or lost, and every other output
-  mode is byte identical between the two paths.
+- `--stats` reports fewer files and bytes searched than the same query under
+  `--no-index`, because the index proves most files cannot match and never
+  opens them. Match, line, and file-with-match counts agree.
 - A query landing in the window right after a rebuild publishes can still
   trust a slightly old generation. Closing it means ordering the walk against
   the watcher event stream.
