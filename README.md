@@ -53,9 +53,10 @@ eg --no-index 'max_\w+_size' ~/src/linux   # plain scan for comparison
 ```
 
 On the Linux kernel tree, with a hot daemon-owned index and
-files-with-matches output, p50 of 9 runs. Every hit set is compared
-against ripgrep's before the pattern is timed, so these rows are the same
-answer at different speeds:
+files-with-matches output, p50 of 9 runs, measured 2026-07-26 against
+ripgrep 15.2.0 and GNU grep 3.11. Every hit set is compared against
+ripgrep's before the pattern is timed, so these rows are the same answer
+at different speeds:
 
 | Pattern | Matched files | elgrep | ripgrep | grep | vs ripgrep |
 |---|---:|---:|---:|---:|---:|
@@ -68,28 +69,11 @@ A pattern with no matches is where the index earns most: it answers from
 posting lists without opening a file. A pattern matching 3,627 files
 gains least, because the verifier still reads all 3,627.
 
-Across the whole embedded query suite, every pattern run through all
-three tools from the shell. A pattern counts only when elgrep, ripgrep,
-and grep return the identical hit set, so each row is the same work three
-ways. Measured 2026-07-26 on isolated corpus copies against ripgrep
-15.2.0 and GNU grep 3.11:
-
-| Corpus | Index build | elgrep | ripgrep | grep | vs ripgrep | vs grep |
-|---|---:|---:|---:|---:|---:|---:|
-| linux (1.615 GB) | 11,880 ms | 6,521 ms | 22,507 ms | 506,745 ms | 3.45x | 77.7x |
-| k8s (272 MB) | 2,659 ms | 1,518 ms | 8,311 ms | 100,842 ms | 5.48x | 66.5x |
-| hass-core (179 MB) | 1,697 ms | 1,315 ms | 7,044 ms | 76,065 ms | 5.36x | 57.9x |
-| django (38 MB) | 765 ms | 1,083 ms | 3,283 ms | 21,625 ms | 3.03x | 20.0x |
-
-Those totals include process startup on every query, which is the cost a
-person actually pays at a shell and which weighs heaviest on the fastest
-tool. Measured in process, `eg --bench` puts the same suite at 8.45x a
-plain scan on linux. The index is 1,467,104,135 bytes, 0.91x the corpus.
-
 The index is a prefilter, so it may hand the verifier a file the regex
 then rejects; that costs time and never costs correctness. It may never
-lose a match, and the suite fails the run if any indexed hit set diverges
-from its scan hit set.
+lose a match, and the embedded 296-query suite fails the run if any
+indexed hit set diverges from its scan hit set. On linux the index is
+1,467,104,135 bytes, 0.91x the corpus, built in 11,880 ms.
 
 [crates/eg/README.md](crates/eg/README.md) covers the CLI, the daemon,
 and the benchmark modes.
