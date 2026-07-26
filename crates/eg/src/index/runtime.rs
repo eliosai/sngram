@@ -16,6 +16,7 @@ const LEASE_FILE_NAME: &str = "lease";
 const WAKE_FILE_NAME: &str = "wake";
 const WATCH_DIRS_FILE_NAME: &str = "watch-dirs";
 const WATCHER_READY_FILE_NAME: &str = "watcher-ready";
+const WATCH_REFUSED_FILE_NAME: &str = "watch-refused";
 const JOURNAL_CLEAN_FILE_NAME: &str = "journal-clean";
 const OWNER_FILE_NAME: &str = "daemon-owner";
 const REQUESTS_DIR_NAME: &str = "requests";
@@ -162,6 +163,21 @@ fn daemon_freshness_proof_in(state_root: &Path, global_runtime: &Path) -> bool {
     SystemTime::now()
         .duration_since(modified)
         .is_ok_and(|age| age <= lease_ttl())
+}
+
+/// Reason the owning daemon gave for refusing to watch this tree
+pub fn watch_refusal(state_root: &Path) -> Option<String> {
+    let runtime = runtime_dir(state_root);
+    if !owned_by_ready_daemon(&runtime, &global_runtime_root()) {
+        return None;
+    }
+    read_watch_refusal(&runtime)
+}
+
+fn read_watch_refusal(runtime: &Path) -> Option<String> {
+    let text = fs::read_to_string(runtime.join(WATCH_REFUSED_FILE_NAME)).ok()?;
+    let reason = text.trim();
+    (!reason.is_empty()).then(|| reason.to_owned())
 }
 
 /// Modification time of this state root's wake marker

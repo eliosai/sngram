@@ -268,6 +268,7 @@ fn ensure_daemon_index_ready(generation: &Generation, show_progress: bool) -> an
     loop {
         progress.tick(generation.state_root());
         check_daemon_available(&mut daemon_gone_since)?;
+        check_tree_is_watchable(generation)?;
         if catching_up
             && let Some(floor) = wake_floor
             && runtime::daemon_caught_up_since(generation.state_root(), floor)
@@ -280,6 +281,17 @@ fn ensure_daemon_index_ready(generation: &Generation, show_progress: bool) -> an
             return Ok(());
         }
     }
+}
+
+/// Fail fast when the daemon cannot watch this tree for changes
+fn check_tree_is_watchable(generation: &Generation) -> anyhow::Result<()> {
+    let Some(reason) = runtime::watch_refusal(generation.state_root()) else {
+        return Ok(());
+    };
+    bail!(
+        "indexed search cannot watch {} for changes.\n\nwhy: {reason}.\nwhat works: raise `fs.inotify.max_user_watches`, raise `EG_INDEXD_WATCH_BUDGET`, search a narrower path, or pass `--no-index` for an exact unindexed scan.",
+        generation.index_root().display()
+    )
 }
 
 /// Tolerate a daemon-liveness misread briefly before failing the query

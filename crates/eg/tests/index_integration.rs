@@ -121,6 +121,20 @@ impl ChildGuard {
         Self::spawn_daemon_binary(Path::new(env!("CARGO_BIN_EXE_eg-indexd")), runtime_root)
     }
 
+    /// Daemon allowed only `budget` filesystem watches in total
+    fn spawn_daemon_with_watch_budget(runtime_root: &Path, budget: usize) -> Self {
+        let binary = Path::new(env!("CARGO_BIN_EXE_eg-indexd"));
+        let child = spawn_daemon_process_with_env(
+            binary,
+            runtime_root,
+            &[("EG_INDEXD_WATCH_BUDGET", &budget.to_string())],
+        );
+        wait_until(DAEMON_CYCLE_WAIT, || {
+            runtime_root.join("startup-ready").exists().then_some(())
+        });
+        Self { child: Some(child) }
+    }
+
     fn spawn_daemon_binary(binary: &Path, runtime_root: &Path) -> Self {
         let child = spawn_daemon_process(binary, runtime_root);
         wait_until(DAEMON_CYCLE_WAIT, || {
@@ -155,12 +169,21 @@ impl ChildGuard {
 }
 
 fn spawn_daemon_process(binary: &Path, runtime_root: &Path) -> Child {
+    spawn_daemon_process_with_env(binary, runtime_root, &[])
+}
+
+fn spawn_daemon_process_with_env(
+    binary: &Path,
+    runtime_root: &Path,
+    envs: &[(&str, &str)],
+) -> Child {
     wait_until(Duration::from_secs(2), || {
-        match Command::new(binary)
-            .arg("--runtime-root")
-            .arg(runtime_root)
-            .spawn()
-        {
+        let mut command = Command::new(binary);
+        command.arg("--runtime-root").arg(runtime_root);
+        for &(key, value) in envs {
+            command.env(key, value);
+        }
+        match command.spawn() {
             Ok(child) => Some(Ok(child)),
             Err(err) if err.raw_os_error() == Some(26) => None,
             Err(err) => Some(Err(err)),
@@ -2747,4 +2770,67 @@ fn word_boundary_queries_prune_midword_candidates() {
 
     assert_eq!(Some(2), report["counts"]["candidate_files"].as_u64());
     assert_eq!(Some(2), report["counts"]["matched_files"].as_u64());
+}
+
+#[test]
+fn a_tree_over_the_watch_budget_is_reported_instead_of_served() {
+    let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("a/b/c/d/e")).unwrap();
+    fs::write(fixture.path("a/b/c/d/e/hit.txt"), "watch budget needle\n").unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_root = runtime_parent.join("eg");
+    let root_str = fixture.root.to_str().unwrap();
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent.to_str().unwrap()),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+    let _daemon = ChildGuard::spawn_daemon_with_watch_budget(&runtime_root, 2);
+
+    let refused = eg_with_env_vars(&["watch budget needle", root_str], &envs);
+    let stderr = String::from_utf8(refused.stderr).unwrap();
+
+    assert!(!refused.status.success());
+    assert!(stderr.contains("cannot watch"), "{stderr}");
+    assert!(stderr.contains("max_user_watches"), "{stderr}");
+    assert!(stderr.contains("--no-index"), "{stderr}");
+    assert!(!fixture.path(".eg/runtime/watcher-ready").exists());
+
+    let scanned = eg_with_env_vars(&["--no-index", "watch budget needle", root_str], &envs);
+    let stdout = String::from_utf8(scanned.stdout).unwrap();
+
+    assert!(scanned.status.success());
+    assert!(stdout.contains("watch budget needle"), "{stdout}");
+}
+
+#[test]
+fn a_tree_inside_the_watch_budget_still_serves_fresh_results() {
+    let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("src")).unwrap();
+    fs::write(fixture.path("src/hit.txt"), "budgeted needle here\n").unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_root = runtime_parent.join("eg");
+    let root_str = fixture.root.to_str().unwrap();
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent.to_str().unwrap()),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+    let _daemon = ChildGuard::spawn_daemon_with_watch_budget(&runtime_root, 64);
+
+    let build = eg_with_env_vars(&["--bench", "budgeted needle here", root_str], &envs);
+    let stdout = String::from_utf8(build.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(Some("daemon"), report["freshness_proof"].as_str());
+    assert_eq!(Some(true), report["matched"].as_bool());
+
+    fs::write(fixture.path("src/late.txt"), "budgeted needle here too\n").unwrap();
+    let after = wait_until(DAEMON_CYCLE_WAIT, || {
+        let output = eg_with_env_vars(&["budgeted needle here", root_str], &envs);
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        stdout.contains("late.txt").then_some(stdout)
+    });
+
+    assert!(after.contains("hit.txt"), "{after}");
 }

@@ -1,9 +1,10 @@
 //! File-based daemon for eg indexes.
 
+mod budget;
 mod watch;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     ffi::OsString,
     fs,
@@ -16,9 +17,13 @@ use std::{
 
 use anyhow::Context;
 
+use budget::WatchBudget;
+use watch::WatchOutcome;
+
 const REQUESTS_DIR_NAME: &str = "requests";
 const RUNTIME_DIR_NAME: &str = "runtime";
 const WATCHER_READY_FILE_NAME: &str = "watcher-ready";
+const WATCH_REFUSED_FILE_NAME: &str = "watch-refused";
 const JOURNAL_CLEAN_FILE_NAME: &str = "journal-clean";
 const OWNER_FILE_NAME: &str = "daemon-owner";
 const LEASE_FILE_NAME: &str = "lease";
@@ -59,15 +64,25 @@ struct Daemon {
     owner: String,
     watcher: watch::Watcher,
     watch_stamps: HashMap<PathBuf, SystemTime>,
+    refused: HashMap<PathBuf, usize>,
 }
 
 impl Daemon {
     fn new(runtime_root: PathBuf, owner: String) -> anyhow::Result<Self> {
+        Self::with_budget(runtime_root, owner, WatchBudget::from_env())
+    }
+
+    fn with_budget(
+        runtime_root: PathBuf,
+        owner: String,
+        budget: WatchBudget,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             runtime_root,
             owner,
-            watcher: watch::Watcher::new()?,
+            watcher: watch::Watcher::with_budget(budget)?,
             watch_stamps: HashMap::new(),
+            refused: HashMap::new(),
         })
     }
 
@@ -80,6 +95,7 @@ impl Daemon {
         loop {
             let requests = read_requests(&self.runtime_root)?;
             self.clear_dirty()?;
+            self.release_unleased(&requests);
             self.refresh_requests(&requests);
             consolidate_children(&requests);
             if requests.iter().any(Request::has_live_lease) {
@@ -121,20 +137,62 @@ impl Daemon {
     }
 
     fn serve_request(&mut self, request: &Request) -> anyhow::Result<()> {
-        self.watch_request(request)?;
+        if self.watch_request(request)? == WatchOutcome::Exhausted {
+            return Ok(());
+        }
         self.refresh_if_needed(request)
     }
 
-    fn watch_request(&mut self, request: &Request) -> anyhow::Result<()> {
-        if self.sync_watches(request)? {
-            mark_watcher_ready(&request.state_root)?;
+    fn watch_request(&mut self, request: &Request) -> anyhow::Result<WatchOutcome> {
+        let outcome = self.sync_watches(request)?;
+        match outcome {
+            WatchOutcome::Watching => {
+                self.refused.remove(&request.state_root);
+                clear_watch_refusal(&request.state_root);
+                mark_watcher_ready(&request.state_root)?;
+            },
+            WatchOutcome::Unwatchable => {},
+            WatchOutcome::Exhausted => self.refuse_watch(request),
         }
         mark_owner(&request.state_root, &self.owner)?;
-        Ok(())
+        Ok(outcome)
+    }
+
+    /// Withdraw the freshness proof for a tree the budget cannot cover
+    fn refuse_watch(&mut self, request: &Request) {
+        let spare = self.watcher.spare();
+        if self.refused.insert(request.state_root.clone(), spare) == Some(spare) {
+            return;
+        }
+        self.watch_stamps.remove(&request.state_root);
+        let _ = remove_file_if_exists(
+            &request
+                .state_root
+                .join(RUNTIME_DIR_NAME)
+                .join(WATCHER_READY_FILE_NAME),
+        );
+        let reason = format!(
+            "eg-indexd holds {} of its {} allowed filesystem watches, which is not enough to watch {} for changes",
+            self.watcher.held(),
+            self.watcher.ceiling(),
+            request.index_root.display()
+        );
+        let _ = mark_watch_refused(&request.state_root, &reason);
+        log::debug!("eg-indexd: {reason}");
+    }
+
+    /// True until other trees free watches for a refused tree to retry with
+    fn is_backed_off(&self, state_root: &Path) -> bool {
+        self.refused
+            .get(state_root)
+            .is_some_and(|spare| self.watcher.spare() <= *spare)
     }
 
     /// Watch the walked directory set, or the whole tree before a first build
-    fn sync_watches(&mut self, request: &Request) -> anyhow::Result<bool> {
+    fn sync_watches(&mut self, request: &Request) -> anyhow::Result<WatchOutcome> {
+        if self.is_backed_off(&request.state_root) {
+            return Ok(WatchOutcome::Exhausted);
+        }
         let path = request
             .state_root
             .join(RUNTIME_DIR_NAME)
@@ -144,17 +202,42 @@ impl Daemon {
                 .watcher
                 .watch_tree(&request.index_root, &request.state_root);
         };
-        if self.watch_stamps.get(&request.state_root) == Some(&stamp) {
-            return Ok(true);
+        if self.watch_stamps.get(&request.state_root) == Some(&stamp)
+            && self.watcher.watches_tree(&request.state_root)
+        {
+            return Ok(WatchOutcome::Watching);
         }
         let dirs = read_watch_dirs(&path, &request.index_root)?;
-        let watched = self
+        let outcome = self
             .watcher
             .watch_dirs(&request.index_root, &dirs, &request.state_root)?;
-        if watched {
+        if outcome == WatchOutcome::Watching {
             self.watch_stamps.insert(request.state_root.clone(), stamp);
         }
-        Ok(watched)
+        Ok(outcome)
+    }
+
+    /// Return the watch budget held for trees whose lease has lapsed
+    fn release_unleased(&mut self, requests: &[Request]) {
+        let live: HashSet<&Path> = requests
+            .iter()
+            .filter(|request| request.has_live_lease())
+            .map(|request| request.state_root.as_path())
+            .collect();
+        self.refused
+            .retain(|state_root, _| live.contains(state_root.as_path()));
+        for state_root in self.watcher.watched_trees() {
+            if live.contains(state_root.as_path()) {
+                continue;
+            }
+            self.watcher.release_tree(&state_root);
+            self.watch_stamps.remove(&state_root);
+            let _ = remove_file_if_exists(
+                &state_root
+                    .join(RUNTIME_DIR_NAME)
+                    .join(WATCHER_READY_FILE_NAME),
+            );
+        }
     }
 
     fn refresh_if_needed(&mut self, request: &Request) -> anyhow::Result<()> {
@@ -451,6 +534,27 @@ fn mark_watcher_ready(state_root: &Path) -> std::io::Result<()> {
     file.sync_all()
 }
 
+/// Record why this tree cannot be watched so queries fail fast
+fn mark_watch_refused(state_root: &Path, reason: &str) -> std::io::Result<()> {
+    let runtime = state_root.join(RUNTIME_DIR_NAME);
+    fs::create_dir_all(&runtime)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(runtime.join(WATCH_REFUSED_FILE_NAME))?;
+    writeln!(file, "{reason}")?;
+    file.sync_all()
+}
+
+fn clear_watch_refusal(state_root: &Path) {
+    let _ = fs::remove_file(
+        state_root
+            .join(RUNTIME_DIR_NAME)
+            .join(WATCH_REFUSED_FILE_NAME),
+    );
+}
+
 fn mark_owner(state_root: &Path, owner: &str) -> std::io::Result<()> {
     let runtime = state_root.join(RUNTIME_DIR_NAME);
     fs::create_dir_all(&runtime)?;
@@ -518,6 +622,7 @@ fn cleanup_state_root(state_root: &Path) -> anyhow::Result<()> {
     for marker in [
         JOURNAL_CLEAN_FILE_NAME,
         WATCHER_READY_FILE_NAME,
+        WATCH_REFUSED_FILE_NAME,
         OWNER_FILE_NAME,
     ] {
         let path = runtime.join(marker);
@@ -559,6 +664,7 @@ fn startup_disposition(request: &Request) -> StartupDisposition {
 
 fn adopt_request(request: &Request) {
     clear_journal_clean(&request.state_root);
+    clear_watch_refusal(&request.state_root);
 }
 
 fn discard_state(request: &Request) {
@@ -632,9 +738,9 @@ fn hex_nibble(byte: u8) -> anyhow::Result<u8> {
 mod tests {
     use super::{
         DEFAULT_LEASE_TTL, Daemon, JOURNAL_CLEAN_FILE_NAME, LEASE_FILE_NAME, RUNTIME_DIR_NAME,
-        Request, StartupDisposition, adopt_request, consolidate_children, discard_request,
-        discard_state, lease_ttl_from, mark_lease_live, read_request, read_requests,
-        startup_disposition,
+        Request, StartupDisposition, WATCH_REFUSED_FILE_NAME, WATCHER_READY_FILE_NAME, WatchBudget,
+        WatchOutcome, adopt_request, consolidate_children, discard_request, discard_state,
+        lease_ttl_from, mark_lease_live, read_request, read_requests, startup_disposition,
     };
     use std::{
         ffi::OsString,
@@ -1035,5 +1141,110 @@ arg=6e6565646c65
         consolidate_children(&[parent, child]);
 
         assert!(child_state.join("index").exists());
+    }
+
+    /// Corpus root holding `depth` nested subdirectories and a live lease
+    fn leased_corpus(root: &Path, depth: usize) -> Request {
+        let mut nested = root.to_path_buf();
+        for level in 0..depth {
+            nested = nested.join(format!("level{level}"));
+        }
+        fs::create_dir_all(&nested).expect("nested");
+        let state = root.join(".eg");
+        let runtime = state.join(RUNTIME_DIR_NAME);
+        fs::create_dir_all(&runtime).expect("runtime");
+        fs::write(runtime.join(LEASE_FILE_NAME), "lease").expect("lease");
+        Request {
+            path: root.join("entry.request"),
+            index_root: root.to_path_buf(),
+            state_root: state,
+            cwd: root.to_path_buf(),
+            eg_binary: None,
+            args: Vec::new(),
+        }
+    }
+
+    fn budgeted_daemon(runtime_root: &Path, ceiling: usize) -> Daemon {
+        Daemon::with_budget(
+            runtime_root.to_path_buf(),
+            "owner".to_owned(),
+            WatchBudget::with_ceiling(ceiling),
+        )
+        .expect("daemon")
+    }
+
+    #[test]
+    fn a_tree_over_the_watch_budget_loses_its_freshness_proof() {
+        let root_guard = scratch("watch-budget");
+        let root = root_guard.path().to_path_buf();
+        let request = leased_corpus(&root.join("corpus"), 6);
+        let runtime = request.state_root.join(RUNTIME_DIR_NAME);
+        fs::write(runtime.join(WATCHER_READY_FILE_NAME), "stale").expect("stale ready");
+        let mut daemon = budgeted_daemon(&root, 3);
+
+        let outcome = daemon.watch_request(&request).expect("watch request");
+
+        assert_eq!(WatchOutcome::Exhausted, outcome);
+        assert!(!runtime.join(WATCHER_READY_FILE_NAME).exists());
+        let reason = fs::read_to_string(runtime.join(WATCH_REFUSED_FILE_NAME)).expect("refusal");
+        assert!(reason.contains("filesystem watches"), "{reason}");
+        assert_eq!(0, daemon.watcher.held());
+    }
+
+    #[test]
+    fn a_watched_tree_clears_an_earlier_refusal() {
+        let root_guard = scratch("watch-recover");
+        let root = root_guard.path().to_path_buf();
+        let request = leased_corpus(&root.join("corpus"), 2);
+        let runtime = request.state_root.join(RUNTIME_DIR_NAME);
+        fs::write(runtime.join(WATCH_REFUSED_FILE_NAME), "stale refusal").expect("refusal");
+        let mut daemon = budgeted_daemon(&root, 64);
+
+        let outcome = daemon.watch_request(&request).expect("watch request");
+
+        assert_eq!(WatchOutcome::Watching, outcome);
+        assert!(runtime.join(WATCHER_READY_FILE_NAME).exists());
+        assert!(!runtime.join(WATCH_REFUSED_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn a_refused_tree_is_retried_only_after_watches_come_back() {
+        let root_guard = scratch("watch-backoff");
+        let root = root_guard.path().to_path_buf();
+        let holder = leased_corpus(&root.join("holder"), 2);
+        let refused = leased_corpus(&root.join("refused"), 4);
+        let mut daemon = budgeted_daemon(&root, 4);
+        daemon.watch_request(&holder).expect("holder");
+
+        assert_eq!(
+            WatchOutcome::Exhausted,
+            daemon.watch_request(&refused).expect("refused")
+        );
+        assert!(daemon.is_backed_off(&refused.state_root));
+
+        daemon.watcher.release_tree(&holder.state_root);
+
+        assert!(!daemon.is_backed_off(&refused.state_root));
+    }
+
+    #[test]
+    fn a_lapsed_lease_returns_its_watches() {
+        let root_guard = scratch("watch-lapse");
+        let root = root_guard.path().to_path_buf();
+        let kept = leased_corpus(&root.join("kept"), 2);
+        let lapsed = leased_corpus(&root.join("lapsed"), 2);
+        let mut daemon = budgeted_daemon(&root, 64);
+        daemon.watch_request(&kept).expect("kept");
+        daemon.watch_request(&lapsed).expect("lapsed");
+        let held_with_both = daemon.watcher.held();
+        let lapsed_runtime = lapsed.state_root.join(RUNTIME_DIR_NAME);
+        fs::remove_file(lapsed_runtime.join(LEASE_FILE_NAME)).expect("expire lease");
+
+        daemon.release_unleased(&[kept.clone(), lapsed.clone()]);
+
+        assert!(daemon.watcher.held() < held_with_both);
+        assert!(daemon.watcher.watches_tree(&kept.state_root));
+        assert!(!daemon.watcher.watches_tree(&lapsed.state_root));
+        assert!(!lapsed_runtime.join(WATCHER_READY_FILE_NAME).exists());
     }
 }
