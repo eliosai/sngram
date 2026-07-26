@@ -72,3 +72,10 @@ eg --files-with-matches --color never --no-heading -e PATTERN ./
 eg --no-index --files-with-matches --color never --no-heading -e PATTERN ./
 grep -rIl --exclude-dir=.git --exclude-dir=.eg -e PATTERN ./
 ```
+
+## License
+
+MIT. The command line facade and the search path it drives are copied from
+[ripgrep](https://github.com/BurntSushi/ripgrep) by Andrew Gallant, at the
+revision `eg --version` reports, and are used under ripgrep's MIT license.
+See `LICENSE-RIPGREP-MIT`.
