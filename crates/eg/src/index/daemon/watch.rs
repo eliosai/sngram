@@ -16,6 +16,11 @@ mod registry;
 #[cfg(target_os = "linux")]
 pub use linux::Watcher;
 
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+
 /// What a watch attempt achieved for one indexed tree
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WatchOutcome {
@@ -25,6 +30,54 @@ pub enum WatchOutcome {
     Unwatchable,
     /// The watch budget cannot cover the tree, so none of it is watched
     Exhausted,
+}
+
+/// Paths one tree changed since the last drain
+#[derive(Default)]
+pub struct TreeChanges {
+    paths: Vec<PathBuf>,
+    coarse: bool,
+}
+
+impl TreeChanges {
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    /// True when the change set is wider than the paths named here
+    pub const fn is_coarse(&self) -> bool {
+        self.coarse
+    }
+}
+
+/// One drain of the watcher, grouped by the tree each path belongs to
+#[derive(Default)]
+pub struct DirtyEvents {
+    trees: HashMap<PathBuf, TreeChanges>,
+}
+
+impl DirtyEvents {
+    /// Record one changed path, widening the tree when the change is coarse
+    pub fn record(&mut self, state_root: &Path, path: PathBuf, coarse: bool) {
+        let changes = self.tree(state_root);
+        changes.paths.push(path);
+        changes.coarse |= coarse;
+    }
+
+    /// Widen every named tree, for events that name no path of their own
+    pub fn widen(&mut self, state_roots: &[PathBuf]) {
+        for state_root in state_roots {
+            self.tree(state_root).coarse = true;
+        }
+    }
+
+    pub fn into_trees(self) -> impl Iterator<Item = (PathBuf, TreeChanges)> {
+        self.trees.into_iter()
+    }
+
+    fn tree(&mut self, state_root: &Path) -> &mut TreeChanges {
+        self.trees.entry(state_root.to_path_buf()).or_default()
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -79,15 +132,12 @@ impl Watcher {
 
     pub const fn release_tree(&mut self, _state_root: &std::path::Path) {}
 
-    pub fn drain_dirty(&mut self) -> anyhow::Result<Vec<std::path::PathBuf>> {
-        Ok(Vec::new())
+    pub fn drain_dirty(&mut self) -> anyhow::Result<DirtyEvents> {
+        Ok(DirtyEvents::default())
     }
 
-    pub fn wait_dirty(
-        &mut self,
-        timeout: std::time::Duration,
-    ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    pub fn wait_dirty(&mut self, timeout: std::time::Duration) -> anyhow::Result<DirtyEvents> {
         std::thread::sleep(timeout);
-        Ok(Vec::new())
+        Ok(DirtyEvents::default())
     }
 }

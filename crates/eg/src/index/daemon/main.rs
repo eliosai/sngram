@@ -2,8 +2,11 @@
 
 mod budget;
 mod churn;
+mod dirty;
 mod eviction;
 mod generations;
+mod markers;
+mod rebuild;
 mod reclaim;
 mod watch;
 
@@ -15,7 +18,6 @@ use std::{
     fs::{File, OpenOptions, TryLockError},
     io::{BufRead, BufReader, ErrorKind, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -23,15 +25,13 @@ use anyhow::Context;
 
 use budget::WatchBudget;
 use eviction::{Claimant, QueryTouch, WatchTenure};
+use markers::{
+    JOURNAL_CLEAN_FILE_NAME, OWNER_FILE_NAME, WATCH_REFUSED_FILE_NAME, WATCHER_READY_FILE_NAME,
+};
 use watch::WatchOutcome;
 
 const REQUESTS_DIR_NAME: &str = "requests";
 const RUNTIME_DIR_NAME: &str = "runtime";
-const WATCHER_READY_FILE_NAME: &str = "watcher-ready";
-const WATCH_REFUSED_FILE_NAME: &str = "watch-refused";
-const JOURNAL_CLEAN_FILE_NAME: &str = "journal-clean";
-const OWNER_FILE_NAME: &str = "daemon-owner";
-const LEASE_FILE_NAME: &str = "lease";
 const WAKE_FILE_NAME: &str = "wake";
 const WATCH_DIRS_FILE_NAME: &str = "watch-dirs";
 const INDEX_DIR_NAME: &str = "index";
@@ -39,9 +39,6 @@ const BINARY_MANIFEST_NAME: &str = "manifest.bin";
 const JSON_MANIFEST_NAME: &str = "manifest.json";
 const LOCK_FILE_NAME: &str = "daemon.lock";
 const STARTUP_READY_FILE_NAME: &str = "startup-ready";
-const EG_BINARY_NAME: &str = "eg";
-const DAEMON_REFRESH_ENV: &str = "EG_INDEX_DAEMON_REFRESH";
-const RUNTIME_ROOT_ENV: &str = "EG_INDEXD_RUNTIME_ROOT";
 const LEASE_TTL_ENV: &str = "EG_INDEXD_LEASE_TTL_SECS";
 const DEFAULT_LEASE_TTL: Duration = Duration::from_hours(24);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -50,6 +47,8 @@ const RECLAIM_INTERVAL: Duration = Duration::from_mins(5);
 /// Refusal a tree earns when a more recently queried tree takes its watches
 const EVICTED_REASON: &str =
     "eg-indexd gave this tree's filesystem watches to a tree queried more recently";
+/// How often a running rebuild pauses to drain the watcher and republish
+const REFRESH_POLL: Duration = Duration::from_millis(5);
 
 fn main() {
     if let Err(err) = run() {
@@ -75,6 +74,8 @@ struct Daemon {
     refused: HashMap<PathBuf, usize>,
     tenure: WatchTenure,
     churn: churn::Churn,
+    dirt: dirty::Dirt,
+    drained_at: SystemTime,
     last_reclaim: Instant,
 }
 
@@ -96,6 +97,8 @@ impl Daemon {
             refused: HashMap::new(),
             tenure: WatchTenure::from_env(),
             churn: churn::Churn::default(),
+            dirt: dirty::Dirt::default(),
+            drained_at: SystemTime::UNIX_EPOCH,
             last_reclaim: Instant::now(),
         })
     }
@@ -109,6 +112,7 @@ impl Daemon {
         loop {
             let requests = read_requests(&self.runtime_root)?;
             self.clear_dirty()?;
+            self.publish_dirt(&requests);
             self.release_unleased(&requests);
             self.refresh_requests(&requests);
             consolidate_children(&requests);
@@ -190,13 +194,13 @@ impl Daemon {
             WatchOutcome::Watching => {
                 self.refused.remove(&request.state_root);
                 self.tenure.watching(&request.state_root);
-                clear_watch_refusal(&request.state_root);
-                mark_watcher_ready(&request.state_root)?;
+                markers::clear_watch_refusal(&request.state_root);
+                markers::mark_watcher_ready(&request.state_root)?;
             },
             WatchOutcome::Unwatchable => {},
             WatchOutcome::Exhausted => self.refuse_watch(request),
         }
-        mark_owner(&request.state_root, &self.owner)?;
+        markers::mark_owner(&request.state_root, &self.owner)?;
         Ok(outcome)
     }
 
@@ -222,14 +226,16 @@ impl Daemon {
         self.watcher
             .watched_trees()
             .into_iter()
-            .filter(|state_root| !eviction::lease_is_held(&lease_path(state_root)))
+            .filter(|state_root| !eviction::lease_is_held(&markers::lease_path(state_root)))
             .collect()
     }
 
     /// Withdraw a tree's freshness proof, then return its watches to the budget
     fn evict(&mut self, state_root: &Path) {
-        let _ = remove_file_if_exists(&watcher_ready_path(state_root));
-        let _ = mark_watch_refused(state_root, EVICTED_REASON);
+        markers::clear_journal_clean(state_root);
+        markers::clear_watcher_ready(state_root);
+        let _ = markers::mark_watch_refused(state_root, EVICTED_REASON);
+        self.dirt.forget(state_root);
         self.watcher.release_tree(state_root);
         self.watch_stamps.remove(state_root);
         self.tenure.released(state_root);
@@ -246,14 +252,14 @@ impl Daemon {
             return;
         }
         self.watch_stamps.remove(&request.state_root);
-        let _ = remove_file_if_exists(&watcher_ready_path(&request.state_root));
+        markers::clear_watcher_ready(&request.state_root);
         let reason = format!(
             "eg-indexd holds {} of its {} allowed filesystem watches, which is not enough to watch {} for changes",
             self.watcher.held(),
             self.watcher.ceiling(),
             request.index_root.display()
         );
-        let _ = mark_watch_refused(&request.state_root, &reason);
+        let _ = markers::mark_watch_refused(&request.state_root, &reason);
         log::debug!("eg-indexd: {reason}");
     }
 
@@ -309,10 +315,12 @@ impl Daemon {
             }
             self.watcher.release_tree(&state_root);
             self.watch_stamps.remove(&state_root);
-            let _ = remove_file_if_exists(&watcher_ready_path(&state_root));
+            self.dirt.forget(&state_root);
+            markers::clear_watcher_ready(&state_root);
         }
     }
 
+    /// Rebuild, then prove the walk beat every change it raced before publishing
     fn refresh_if_needed(&mut self, request: &Request) -> anyhow::Result<()> {
         if !request.has_live_lease() || !request.needs_refresh() {
             return Ok(());
@@ -320,27 +328,75 @@ impl Daemon {
         if self.churn.defers(&request.state_root, request.has_index()) {
             return Ok(());
         }
-        if refresh_request(request, &self.runtime_root).is_ok() {
-            mark_lease_live(&request.state_root)?;
+        self.dirt.begin_build(&request.state_root);
+        let built = self.run_refresh(request)?;
+        if built {
+            markers::mark_lease_live(&request.state_root)?;
             self.churn.settle(&request.state_root);
         }
-        self.clear_dirty()
+        self.clear_dirty()?;
+        if built {
+            self.publish_generation(request)?;
+        }
+        self.publish_dirt(std::slice::from_ref(request));
+        Ok(())
+    }
+
+    /// Rebuild while still draining the watcher and republishing the change set
+    fn run_refresh(&mut self, request: &Request) -> anyhow::Result<bool> {
+        let rebuild = request.rebuild();
+        let Some(mut child) = rebuild.spawn(&self.runtime_root)? else {
+            return Ok(false);
+        };
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(rebuild.published(status));
+            }
+            self.clear_dirty()?;
+            self.publish_dirt(std::slice::from_ref(request));
+            std::thread::sleep(REFRESH_POLL);
+        }
+    }
+
+    /// Stand the freshness proof up only for a generation nothing outran
+    fn publish_generation(&mut self, request: &Request) -> anyhow::Result<()> {
+        let uncontended = self.dirt.build_was_uncontended(&request.state_root);
+        self.dirt.commit_build(&request.state_root);
+        if uncontended && request.has_index() {
+            markers::mark_journal_clean(&request.state_root)?;
+        }
+        Ok(())
+    }
+
+    /// Republish every watched tree's change set with the drain that produced it
+    fn publish_dirt(&mut self, requests: &[Request]) {
+        let drained_at = self.drained_at;
+        for request in requests.iter().filter(|request| request.has_live_lease()) {
+            let _ = self
+                .dirt
+                .publish(&request.state_root, &request.index_root, drained_at);
+        }
     }
 
     fn clear_dirty(&mut self) -> anyhow::Result<()> {
-        for state_root in self.watcher.drain_dirty()? {
-            self.churn.mark(&state_root);
-            clear_journal_clean(&state_root);
-        }
+        self.drained_at = SystemTime::now();
+        let events = self.watcher.drain_dirty()?;
+        self.absorb(events);
         Ok(())
     }
 
     fn wait_for_changes(&mut self, timeout: Duration) -> anyhow::Result<()> {
-        for state_root in self.watcher.wait_dirty(timeout)? {
-            self.churn.mark(&state_root);
-            clear_journal_clean(&state_root);
-        }
+        let events = self.watcher.wait_dirty(timeout)?;
+        self.absorb(events);
         Ok(())
+    }
+
+    fn absorb(&mut self, events: watch::DirtyEvents) {
+        for (state_root, changes) in events.into_trees() {
+            self.churn.mark(&state_root);
+            self.dirt.record(&state_root, &changes);
+            markers::clear_journal_clean(&state_root);
+        }
     }
 
     fn cleanup_requests(&self, requests: &[Request]) -> anyhow::Result<()> {
@@ -440,15 +496,18 @@ struct Request {
 }
 
 impl Request {
-    fn configured_eg_binary(&self) -> Option<PathBuf> {
-        self.eg_binary
-            .as_ref()
-            .filter(|binary| binary.exists())
-            .cloned()
+    /// The rebuild this request runs when its index falls behind
+    fn rebuild(&self) -> rebuild::Rebuild<'_> {
+        rebuild::Rebuild::new(
+            &self.cwd,
+            &self.args,
+            &self.state_root,
+            self.eg_binary.as_deref(),
+        )
     }
 
     fn has_live_lease(&self) -> bool {
-        let Ok(metadata) = fs::metadata(lease_path(&self.state_root)) else {
+        let Ok(metadata) = fs::metadata(markers::lease_path(&self.state_root)) else {
             return false;
         };
         let Ok(modified) = metadata.modified() else {
@@ -615,108 +674,6 @@ fn quarantine_request(path: &Path) {
     let _ = fs::rename(path, quarantine);
 }
 
-fn mark_watcher_ready(state_root: &Path) -> std::io::Result<()> {
-    let runtime = state_root.join(RUNTIME_DIR_NAME);
-    fs::create_dir_all(&runtime)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(runtime.join(WATCHER_READY_FILE_NAME))?;
-    writeln!(file, "{}", std::process::id())?;
-    file.sync_all()
-}
-
-/// Record why this tree cannot be watched so queries fail fast
-fn mark_watch_refused(state_root: &Path, reason: &str) -> std::io::Result<()> {
-    let runtime = state_root.join(RUNTIME_DIR_NAME);
-    fs::create_dir_all(&runtime)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(runtime.join(WATCH_REFUSED_FILE_NAME))?;
-    writeln!(file, "{reason}")?;
-    file.sync_all()
-}
-
-fn clear_watch_refusal(state_root: &Path) {
-    let _ = fs::remove_file(
-        state_root
-            .join(RUNTIME_DIR_NAME)
-            .join(WATCH_REFUSED_FILE_NAME),
-    );
-}
-
-fn mark_owner(state_root: &Path, owner: &str) -> std::io::Result<()> {
-    let runtime = state_root.join(RUNTIME_DIR_NAME);
-    fs::create_dir_all(&runtime)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(runtime.join(OWNER_FILE_NAME))?;
-    writeln!(file, "{owner}")?;
-    file.sync_all()
-}
-
-fn lease_path(state_root: &Path) -> PathBuf {
-    state_root.join(RUNTIME_DIR_NAME).join(LEASE_FILE_NAME)
-}
-
-fn watcher_ready_path(state_root: &Path) -> PathBuf {
-    state_root
-        .join(RUNTIME_DIR_NAME)
-        .join(WATCHER_READY_FILE_NAME)
-}
-
-fn mark_lease_live(state_root: &Path) -> std::io::Result<()> {
-    let runtime = state_root.join(RUNTIME_DIR_NAME);
-    fs::create_dir_all(&runtime)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(runtime.join(LEASE_FILE_NAME))?;
-    writeln!(file, "{}", std::process::id())?;
-    file.sync_all()
-}
-
-fn refresh_request(request: &Request, runtime_root: &Path) -> anyhow::Result<()> {
-    clear_journal_clean(&request.state_root);
-    let Some(binary) = request.configured_eg_binary().or_else(sibling_eg_binary) else {
-        return Ok(());
-    };
-    let status = Command::new(binary)
-        .args(&request.args)
-        .current_dir(&request.cwd)
-        .env(DAEMON_REFRESH_ENV, "1")
-        .env(RUNTIME_ROOT_ENV, runtime_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if !status.success() {
-        clear_journal_clean(&request.state_root);
-    }
-    Ok(())
-}
-
-fn sibling_eg_binary() -> Option<PathBuf> {
-    let current = env::current_exe().ok()?;
-    let dir = current.parent()?;
-    let binary = dir.join(EG_BINARY_NAME);
-    binary.exists().then_some(binary)
-}
-
-fn clear_journal_clean(state_root: &Path) {
-    let _ = fs::remove_file(
-        state_root
-            .join(RUNTIME_DIR_NAME)
-            .join(JOURNAL_CLEAN_FILE_NAME),
-    );
-}
-
 fn cleanup_state_root(state_root: &Path) -> anyhow::Result<()> {
     let runtime = state_root.join(RUNTIME_DIR_NAME);
     let index = state_root.join(INDEX_DIR_NAME);
@@ -727,6 +684,7 @@ fn cleanup_state_root(state_root: &Path) -> anyhow::Result<()> {
         WATCHER_READY_FILE_NAME,
         WATCH_REFUSED_FILE_NAME,
         OWNER_FILE_NAME,
+        dirty::DIRTY_FILE_NAME,
     ] {
         let path = runtime.join(marker);
         remove_file_if_exists(&path)
@@ -766,8 +724,8 @@ fn startup_disposition(request: &Request) -> StartupDisposition {
 }
 
 fn adopt_request(request: &Request) {
-    clear_journal_clean(&request.state_root);
-    clear_watch_refusal(&request.state_root);
+    markers::clear_journal_clean(&request.state_root);
+    markers::clear_watch_refusal(&request.state_root);
 }
 
 fn discard_state(request: &Request) {
@@ -839,14 +797,15 @@ fn hex_nibble(byte: u8) -> anyhow::Result<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::markers::{LEASE_FILE_NAME, lease_path, mark_lease_live, watcher_ready_path};
     use super::{
-        DEFAULT_LEASE_TTL, Daemon, File, JOURNAL_CLEAN_FILE_NAME, LEASE_FILE_NAME, QueryTouch,
-        RUNTIME_DIR_NAME, Request, StartupDisposition, WATCH_DIRS_FILE_NAME,
-        WATCH_REFUSED_FILE_NAME, WATCHER_READY_FILE_NAME, WatchBudget, WatchOutcome, WatchTenure,
-        adopt_request, consolidate_children, discard_request, discard_state, lease_path,
-        lease_ttl_from, mark_lease_live, read_request, read_requests, startup_disposition,
-        watcher_ready_path,
+        DEFAULT_LEASE_TTL, Daemon, File, JOURNAL_CLEAN_FILE_NAME, QueryTouch, RUNTIME_DIR_NAME,
+        Request, StartupDisposition, WATCH_DIRS_FILE_NAME, WATCH_REFUSED_FILE_NAME,
+        WATCHER_READY_FILE_NAME, WatchBudget, WatchOutcome, WatchTenure, adopt_request,
+        consolidate_children, discard_request, discard_state, lease_ttl_from, read_request,
+        read_requests, startup_disposition,
     };
+    use super::{dirty, markers};
     use std::{
         ffi::OsString,
         fs,
@@ -952,20 +911,6 @@ arg=6e6565646c65
         mark_lease_live(&root).expect("mark lease");
 
         assert!(lease.exists());
-    }
-
-    #[test]
-    fn configured_eg_binary_must_exist() {
-        let root_guard = scratch("configured-eg");
-        let root = root_guard.path().to_path_buf();
-        let binary = root.join("eg");
-        let mut request = request_for(&root);
-        request.eg_binary = Some(binary.clone());
-
-        assert_eq!(None, request.configured_eg_binary());
-
-        fs::write(&binary, "eg").expect("binary");
-        assert_eq!(Some(binary), request.configured_eg_binary());
     }
 
     #[test]
@@ -1426,6 +1371,60 @@ arg=6e6565646c65
         assert_eq!(WatchOutcome::Exhausted, watch_query(&mut daemon, &idle));
         assert!(!watcher_ready_path(&idle.state_root).exists());
         assert!(!daemon.watcher.watches_tree(&idle.state_root));
+    }
+
+    /// Change set the daemon publishes for one tree right now
+    fn published_change_set(daemon: &mut Daemon, request: &Request) -> String {
+        daemon.publish_dirt(std::slice::from_ref(request));
+        fs::read_to_string(
+            request
+                .state_root
+                .join(RUNTIME_DIR_NAME)
+                .join(dirty::DIRTY_FILE_NAME),
+        )
+        .expect("change set")
+    }
+
+    #[test]
+    fn an_evicted_tree_names_no_bounded_change_set_once_it_is_watched_again() {
+        let root_guard = scratch("evict-dirt");
+        let root = root_guard.path().to_path_buf();
+        let idle = queried_corpus(&root.join("idle"), 1);
+        let wanting = queried_corpus(&root.join("wanting"), 1);
+        let mut daemon = evicting_daemon(&root, 3);
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &idle));
+        daemon.dirt.begin_build(&idle.state_root);
+        daemon.dirt.commit_build(&idle.state_root);
+        let bounded = published_change_set(&mut daemon, &idle);
+        assert!(!bounded.contains(dirty::UNBOUNDED_MARKER), "{bounded}");
+
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &wanting));
+        daemon.evict(&wanting.state_root);
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &idle));
+
+        let after = published_change_set(&mut daemon, &idle);
+        assert!(after.contains(dirty::UNBOUNDED_MARKER), "{after}");
+    }
+
+    #[test]
+    fn an_evicted_tree_loses_the_freshness_proof_it_already_earned() {
+        let root_guard = scratch("evict-clean");
+        let root = root_guard.path().to_path_buf();
+        let idle = queried_corpus(&root.join("idle"), 1);
+        let wanting = queried_corpus(&root.join("wanting"), 1);
+        let mut daemon = evicting_daemon(&root, 3);
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &idle));
+        markers::mark_journal_clean(&idle.state_root).expect("proof");
+
+        assert_eq!(WatchOutcome::Watching, watch_query(&mut daemon, &wanting));
+
+        assert!(
+            !idle
+                .state_root
+                .join(RUNTIME_DIR_NAME)
+                .join(JOURNAL_CLEAN_FILE_NAME)
+                .exists()
+        );
     }
 
     #[test]

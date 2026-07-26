@@ -79,7 +79,7 @@ pub fn open_disk_index(
     })?;
     let summaries = SummaryIndex::open(
         &index_home.join(summary::SUMMARY_FILE_NAME),
-        snapshot.file_count(),
+        snapshot.indexed_count(),
     )?
     .with_context(|| format!("summary index missing at {}", index_home.display()))?;
     Ok(TantivyIndex { index, summaries })
@@ -336,7 +336,7 @@ fn auto_disk_index(
     if changed_ordinals.is_empty() {
         if let Some(summaries) = SummaryIndex::open(
             &index_home.join(summary::SUMMARY_FILE_NAME),
-            snapshot.file_count(),
+            snapshot.indexed_count(),
         )? {
             return Ok((
                 TantivyIndex { index, summaries },
@@ -409,7 +409,7 @@ fn rebuild_disk_index(
     Ok((
         TantivyIndex {
             index,
-            summaries: SummaryIndex::from_records(summaries, snapshot.file_count())?,
+            summaries: SummaryIndex::from_records(summaries, snapshot.indexed_count())?,
         },
         timings,
     ))

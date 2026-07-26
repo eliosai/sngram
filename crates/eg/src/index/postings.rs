@@ -105,7 +105,7 @@ fn published_index_matches(
         return false;
     }
     matches!(
-        PostingsIndex::open(index_home, snapshot.file_count()),
+        PostingsIndex::open(index_home, snapshot.indexed_count()),
         Ok(Some(_))
     )
 }
@@ -302,13 +302,13 @@ fn rebuild_index(
     fsync_dir(&staging)?;
     swap_in(&staging, index_home)?;
     timings.set_publish_generation(publish_started_at);
-    let index = PostingsIndex::open(index_home, snapshot.file_count())?
+    let index = PostingsIndex::open(index_home, snapshot.indexed_count())?
         .with_context(|| format!("index at {} corrupt after publish", index_home.display()))?;
     Ok((index, timings))
 }
 
 pub fn open_index(index_home: &Path, snapshot: &CurrentSnapshot) -> anyhow::Result<PostingsIndex> {
-    PostingsIndex::open_trusted(index_home, snapshot.file_count())?.with_context(|| {
+    PostingsIndex::open_trusted(index_home, snapshot.indexed_count())?.with_context(|| {
         format!(
             "index at {} missing from daemon-owned generation",
             index_home.display()

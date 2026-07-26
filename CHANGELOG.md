@@ -7,7 +7,7 @@ schema moved from 16 to 21.
 
 ### Correctness
 
-Six ways an indexed search could return fewer matches than a plain scan:
+Nine ways an indexed search could return fewer matches than a plain scan:
 
 - A tree being written to could be served from a generation built before the
   last writes. Roughly one query in eight returned in milliseconds having
@@ -28,6 +28,21 @@ Six ways an indexed search could return fewer matches than a plain scan:
   queries against a fresh index. An index a query cannot read now falls back
   to the exact scan. A `--bench` run still fails, because it exists to measure
   the indexed path.
+- A build that raced a write still published a generation carrying the
+  freshness proof, and for the 35 to 46 ms until the daemon drained the events
+  the build had outrun, a query trusted it. Twenty files written during a
+  rebuild of a 7,117 file tree were missed by every query in that window. The
+  daemon now writes the proof itself, only once a drain after the build finds
+  nothing changed since the walk began.
+- A tree that lost its watches to a more recently queried tree kept its
+  freshness proof file, so re-watching it restored the proof over a generation
+  that missed every change made while it was unwatched. An eviction now
+  withdraws the proof and the change set with the watches.
+- A freshness proof was trusted on its own, so a query that beat the daemon to
+  the change it was about to search answered from a generation that missed it.
+  A save followed within about 13 ms by a search returned nothing where a scan
+  returned the file. Serving from the index now needs the daemon to name, after
+  the query started, everything the generation no longer covers.
 
 Also:
 
@@ -63,8 +78,15 @@ Also:
   query holds is never evicted, a tree keeps its watches for at least 30
   seconds, and an evicted tree loses its freshness proof before it loses its
   watches, so the next query on it rebuilds or scans.
+- A query on a tree with unindexed changes no longer waits for the rebuild.
+  The daemon publishes the paths changed since the generation it published,
+  and a query searches those directly while trusting the index for the rest.
+  A search after a save took 108 ms on a 7,102 file tree and now takes 5 ms,
+  and every such query used to abandon the index for a full scan where none
+  does now. Above 128 changed paths, or after a directory moves, the query
+  falls back to waiting or scanning.
 - A tree under continuous writes waits for quiet instead of rebuilding once
-  per event.
+  per event, and keeps draining its watcher while the rebuild runs.
 - A query waiting on the daemon drew a progress bar the moment it started, so
   every indexed query flashed "indexing changes (0s)". The bar now appears
   only once a wait passes 150ms. Cold builds report progress as before.
@@ -109,11 +131,18 @@ the code copied from it. See `LICENSE-RIPGREP-MIT`.
 - `--stats` reports fewer files and bytes searched than the same query under
   `--no-index`, because the index proves most files cannot match and never
   opens them. Match, line, and file-with-match counts agree.
-- A query landing in the window right after a rebuild publishes can still
-  trust a slightly old generation. Closing it means ordering the walk against
-  the watcher event stream.
 - With about 6,000 watches per large repository and a third of a 65,536 limit,
   roughly four large trees can be watched at once. A fifth takes the watches
   of the least recently queried tree, so the trees in use are the watched
   ones, but a working set larger than the budget still costs one exact scan
   per tree that lost its watches.
+- Every indexed answer now depends on the daemon replying within 30ms. A
+  daemon that is alive but wedged turns every query into an exact scan. That
+  is the right direction to fail, but it is a tighter coupling than before.
+- Publishing a generation renames the postings directory into place in two
+  steps, so a query can read a manifest from one generation and postings from
+  the next. Document counts are checked and any mismatch scans instead, but
+  equal counts could still pass. `renameat2(RENAME_EXCHANGE)` would close it.
+- Under `--max-depth`, a changed file is collected from its parent directory
+  and can surface where the depth limit would have excluded it. That adds a
+  candidate the verifier rejects; it never loses one.

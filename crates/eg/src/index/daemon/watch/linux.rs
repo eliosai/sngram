@@ -7,7 +7,7 @@ use std::{
 };
 
 use super::{
-    WatchOutcome,
+    DirtyEvents, WatchOutcome,
     dirs::{child_dirs, is_state_path},
     events::ParsedEvent,
     inotify::Inotify,
@@ -123,20 +123,20 @@ impl Watcher {
         }
     }
 
-    pub fn drain_dirty(&mut self) -> anyhow::Result<Vec<PathBuf>> {
-        let mut dirty = HashSet::new();
+    pub fn drain_dirty(&mut self) -> anyhow::Result<DirtyEvents> {
+        let mut dirty = DirtyEvents::default();
         let mut buffer = vec![0u8; 64 * 1024];
         while let Some(len) = self.inotify.read(&mut buffer)? {
             self.record_events(&buffer[..len], &mut dirty)?;
         }
-        Ok(dirty.into_iter().collect())
+        Ok(dirty)
     }
 
-    pub fn wait_dirty(&mut self, timeout: Duration) -> anyhow::Result<Vec<PathBuf>> {
+    pub fn wait_dirty(&mut self, timeout: Duration) -> anyhow::Result<DirtyEvents> {
         if self.inotify.wait(timeout)? {
             return self.drain_dirty();
         }
-        Ok(Vec::new())
+        Ok(DirtyEvents::default())
     }
 
     fn watch_dir_recursive(
@@ -181,11 +181,7 @@ impl Watcher {
         }
     }
 
-    fn record_events(
-        &mut self,
-        mut bytes: &[u8],
-        dirty: &mut HashSet<PathBuf>,
-    ) -> anyhow::Result<()> {
+    fn record_events(&mut self, mut bytes: &[u8], dirty: &mut DirtyEvents) -> anyhow::Result<()> {
         while let Some((event, rest)) = ParsedEvent::take(bytes)? {
             self.apply_event(&event, dirty)?;
             bytes = rest;
@@ -193,11 +189,11 @@ impl Watcher {
         Ok(())
     }
 
-    fn apply_event(
-        &mut self,
-        event: &ParsedEvent,
-        dirty: &mut HashSet<PathBuf>,
-    ) -> anyhow::Result<()> {
+    fn apply_event(&mut self, event: &ParsedEvent, dirty: &mut DirtyEvents) -> anyhow::Result<()> {
+        if event.overflowed() {
+            dirty.widen(&self.registry.state_roots());
+            return Ok(());
+        }
         let Some(watched) = self.registry.watched(event.wd()) else {
             return Ok(());
         };
@@ -208,7 +204,7 @@ impl Watcher {
         if is_state_path(&path, &state_root) {
             return Ok(());
         }
-        dirty.insert(state_root.clone());
+        dirty.record(&state_root, path.clone(), event.is_coarse());
         self.grow_into(event, &path, &state_root)
     }
 
@@ -246,6 +242,16 @@ mod tests {
         Watcher::with_budget(WatchBudget::with_ceiling(ceiling)).expect("watcher")
     }
 
+    /// State roots one drain reported as changed
+    fn dirty_roots(watcher: &mut Watcher) -> Vec<std::path::PathBuf> {
+        watcher
+            .drain_dirty()
+            .expect("dirty")
+            .into_trees()
+            .map(|(state_root, _)| state_root)
+            .collect()
+    }
+
     /// Corpus root with a state dir and `depth` nested subdirectories
     fn corpus(root: &Path, depth: usize) -> std::path::PathBuf {
         let state = root.join(".eg");
@@ -272,7 +278,7 @@ mod tests {
         fs::write(root.join("changed.txt"), "changed").expect("write");
         std::thread::sleep(Duration::from_millis(20));
 
-        assert!(watcher.drain_dirty().expect("dirty").contains(&state));
+        assert!(dirty_roots(&mut watcher).contains(&state));
     }
 
     #[test]
@@ -301,7 +307,7 @@ mod tests {
         fs::write(nested_state.join("runtime-marker"), "ignored").expect("write");
         std::thread::sleep(Duration::from_millis(20));
 
-        assert!(watcher.drain_dirty().expect("dirty").is_empty());
+        assert!(dirty_roots(&mut watcher).is_empty());
     }
 
     #[test]
@@ -339,7 +345,7 @@ mod tests {
 
         fs::write(small.join("changed.txt"), "changed").expect("write");
         std::thread::sleep(Duration::from_millis(20));
-        assert!(watcher.drain_dirty().expect("dirty").contains(&small_state));
+        assert!(dirty_roots(&mut watcher).contains(&small_state));
     }
 
     #[test]
@@ -394,7 +400,7 @@ mod tests {
         fs::create_dir_all(root.join("late")).expect("late dir");
         std::thread::sleep(Duration::from_millis(20));
 
-        assert!(watcher.drain_dirty().expect("dirty").contains(&state));
+        assert!(dirty_roots(&mut watcher).contains(&state));
         assert!(!watcher.watches_tree(&state));
         assert_eq!(0, watcher.held());
     }

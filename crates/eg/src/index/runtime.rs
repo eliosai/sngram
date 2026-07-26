@@ -28,8 +28,6 @@ const DISABLE_DAEMON_AUTOSPAWN_ENV: &str = "EG_INDEXD_DISABLE_AUTOSPAWN";
 const LEASE_TTL_ENV: &str = "EG_INDEXD_LEASE_TTL_SECS";
 const RUNTIME_ROOT_ENV: &str = "EG_INDEXD_RUNTIME_ROOT";
 const DEFAULT_LEASE_TTL: Duration = Duration::from_hours(24);
-/// How often a query rewrites its request so the daemon can rank trees by use
-const REGISTRATION_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_STARTUP_WAIT: Duration = Duration::from_secs(5);
 const INDEX_READY_POLL: Duration = Duration::from_millis(50);
 static GLOBAL_RUNTIME_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -51,16 +49,9 @@ impl<'a> Lease<'a> {
         request_refresh(self.index_root, self.state_root)
     }
 
-    /// Renew the lease and the request stamp off the hot path
-    pub fn keep_alive_detached(&self) {
-        if lease_is_fresh(self.state_root)
-            && registration_is_recent(self.index_root, self.state_root)
-        {
-            return;
-        }
-        let index_root = self.index_root.to_path_buf();
-        let state_root = self.state_root.to_path_buf();
-        std::thread::spawn(move || keep_alive_best_effort(&index_root, &state_root));
+    /// Renew the lease and the request stamp, waking the daemon to republish
+    pub fn keep_alive(&self) {
+        register_best_effort(self.index_root, self.state_root, false);
     }
 }
 
@@ -85,10 +76,6 @@ impl Drop for LeaseHold {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
-}
-
-pub fn keep_alive_best_effort(index_root: &Path, state_root: &Path) {
-    register_best_effort(index_root, state_root, false);
 }
 
 pub fn request_refresh(index_root: &Path, state_root: &Path) -> io::Result<()> {
@@ -191,6 +178,14 @@ fn daemon_freshness_proof_in(state_root: &Path, global_runtime: &Path) -> bool {
         .is_ok_and(|age| age <= lease_ttl())
 }
 
+/// True when a live daemon owns this tree and reports changes for it
+pub fn daemon_watches(state_root: &Path) -> bool {
+    let runtime = runtime_dir(state_root);
+    owned_by_ready_daemon(&runtime, &global_runtime_root())
+        && runtime.join(WATCHER_READY_FILE_NAME).exists()
+        && read_watch_refusal(&runtime).is_none()
+}
+
 /// Reason the owning daemon gave for refusing to watch this tree
 pub fn watch_refusal(state_root: &Path) -> Option<String> {
     let runtime = runtime_dir(state_root);
@@ -260,12 +255,6 @@ pub fn write_watch_dirs<'a>(
     }
     drop(file);
     fs::rename(tmp, path)
-}
-
-pub fn mark_journal_clean(state_root: &Path) -> std::io::Result<()> {
-    let runtime = runtime_dir(state_root);
-    fs::create_dir_all(&runtime)?;
-    write_marker(&runtime.join(JOURNAL_CLEAN_FILE_NAME))
 }
 
 pub fn clear_journal_clean(state_root: &Path) {
@@ -444,7 +433,8 @@ fn wait_for_startup_ready(timeout: Duration) -> bool {
     false
 }
 
-fn runtime_dir(state_root: &Path) -> PathBuf {
+/// Directory holding the daemon's coordination markers for one tree
+pub fn runtime_dir(state_root: &Path) -> PathBuf {
     state_root.join(RUNTIME_DIR_NAME)
 }
 
@@ -477,29 +467,6 @@ fn request_path(index_root: &Path, state_root: &Path) -> PathBuf {
     global_runtime_root()
         .join(REQUESTS_DIR_NAME)
         .join(format!("{key:016x}.request"))
-}
-
-/// True while the daemon still reads this query as a recent use of the tree
-fn registration_is_recent(index_root: &Path, state_root: &Path) -> bool {
-    fs::metadata(request_path(index_root, state_root))
-        .and_then(|meta| meta.modified())
-        .is_ok_and(|modified| {
-            SystemTime::now()
-                .duration_since(modified)
-                .is_ok_and(|age| age <= REGISTRATION_INTERVAL)
-        })
-}
-
-fn lease_is_fresh(state_root: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(runtime_dir(state_root).join(LEASE_FILE_NAME)) else {
-        return false;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    SystemTime::now()
-        .duration_since(modified)
-        .is_ok_and(|age| age <= lease_ttl())
 }
 
 fn lease_ttl() -> Duration {
@@ -562,10 +529,9 @@ fn hash_paths(index_root: &Path, state_root: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_LEASE_TTL, LEASE_FILE_NAME, LOCK_FILE_NAME, LeaseHold, OWNER_FILE_NAME,
+        DEFAULT_LEASE_TTL, LEASE_FILE_NAME, LOCK_FILE_NAME, Lease, LeaseHold, OWNER_FILE_NAME,
         STARTUP_READY_FILE_NAME, WAKE_FILE_NAME, daemon_freshness_proof_in, install_daemon_binary,
-        keep_alive_best_effort, lease_is_fresh, lease_ttl_from, request_refresh,
-        runtime_root_is_writable,
+        lease_ttl_from, request_refresh, runtime_root_is_writable,
     };
     use std::fs;
 
@@ -633,20 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn lease_freshness_uses_runtime_marker() {
-        let root_guard = scratch("lease-fresh");
-        let root = root_guard.path().to_path_buf();
-
-        assert!(!lease_is_fresh(&root));
-
-        let runtime = root.join("runtime");
-        fs::create_dir_all(&runtime).expect("runtime");
-        fs::write(runtime.join(LEASE_FILE_NAME), "lease").expect("lease");
-
-        assert!(lease_is_fresh(&root));
-    }
-
-    #[test]
     fn proof_rejects_wake_newer_than_clean() {
         let root_guard = scratch("wake");
         let root = root_guard.path().to_path_buf();
@@ -709,7 +661,7 @@ mod tests {
         let state_root = root.join("state-file");
         fs::write(&state_root, "not a directory").expect("state file");
 
-        keep_alive_best_effort(&state_root, &state_root);
+        Lease::new(&state_root, &state_root).keep_alive();
     }
 
     #[test]

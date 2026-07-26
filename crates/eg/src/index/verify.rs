@@ -93,11 +93,25 @@ fn ordered_candidates(
     snapshot: &manifest::CurrentSnapshot,
     candidates: &BTreeSet<usize>,
 ) -> Vec<usize> {
-    candidates
+    let ordered: Vec<usize> = candidates
         .iter()
         .copied()
         .filter(|&ord| ord < snapshot.file_count())
-        .collect()
+        .collect();
+    if snapshot.has_uncovered() {
+        return sorted_by_path(snapshot, ordered);
+    }
+    ordered
+}
+
+/// Order a candidate set that mixes indexed files with freshly changed ones
+fn sorted_by_path(snapshot: &manifest::CurrentSnapshot, ordered: Vec<usize>) -> Vec<usize> {
+    let mut keyed: Vec<(std::path::PathBuf, usize)> = ordered
+        .into_iter()
+        .filter_map(|ord| snapshot.file(ord).map(|file| (file.path, ord)))
+        .collect();
+    keyed.sort_unstable();
+    keyed.into_iter().map(|(_, ord)| ord).collect()
 }
 
 /// Every document ordinal in the manifest's requested output order.
@@ -109,7 +123,7 @@ fn all_ordered(snapshot: &manifest::CurrentSnapshot) -> Vec<usize> {
 const FILES_PER_VERIFY_WORKER: usize = 24;
 
 /// Return true when the mode reports on the whole corpus, not just matches.
-fn is_full_corpus_mode(args: &HiArgs, mode: SearchMode) -> bool {
+pub fn is_full_corpus_mode(args: &HiArgs, mode: SearchMode) -> bool {
     matches!(mode, SearchMode::FilesWithoutMatch)
         || (args.include_zero() && matches!(mode, SearchMode::Count | SearchMode::CountMatches))
 }

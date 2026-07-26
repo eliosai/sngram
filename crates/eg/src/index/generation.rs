@@ -9,7 +9,7 @@ use crate::flags::HiArgs;
 
 use super::{
     backend::CandidateQuery, bench, catalog::ReadyGeneration, location::IndexLocation, manifest,
-    planner,
+    planner, roots::SearchRoots,
 };
 
 pub struct Generation {
@@ -59,5 +59,23 @@ impl Generation {
         bench: Option<&mut bench::BenchReport>,
     ) -> anyhow::Result<Option<BTreeSet<usize>>> {
         CandidateQuery::new(args, &self.index_dir(), snapshot, plan, bench).run()
+    }
+
+    /// Drop candidates outside the roots this query was asked to search
+    pub fn restrict(
+        &self,
+        args: &HiArgs,
+        roots: &SearchRoots,
+        snapshot: &manifest::CurrentSnapshot,
+        candidates: &mut BTreeSet<usize>,
+    ) {
+        if roots.covers_index_root(self.index_root()) {
+            return;
+        }
+        candidates.retain(|ord| {
+            snapshot
+                .file(*ord)
+                .is_some_and(|file| roots.contains(args.cwd(), &file.path))
+        });
     }
 }

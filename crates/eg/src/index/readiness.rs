@@ -1,12 +1,16 @@
 //! Settling whether a daemon-owned index can answer this query.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::bail;
 
 use crate::flags::{HiArgs, SearchMode};
 
-use super::{generation::Generation, progress, runtime};
+use super::{
+    dirty::{self, Vouched},
+    generation::Generation,
+    progress, runtime,
+};
 
 const COLD_BUILD_WAIT: Duration = Duration::from_secs(60 * 60);
 const COLD_PROGRESS_POLL: Duration = Duration::from_millis(100);
@@ -34,6 +38,8 @@ pub enum ScanReason {
     DaemonUnavailable,
     /// the daemon cannot watch this tree, so it can never prove freshness
     Unwatchable,
+    /// the daemon replaced the generation while this query was reading it
+    Republished,
 }
 
 impl ScanReason {
@@ -43,6 +49,7 @@ impl ScanReason {
             Self::BuildTimedOut => "the daemon did not publish a first index in time",
             Self::DaemonUnavailable => "no daemon owns this index",
             Self::Unwatchable => "the daemon cannot watch this tree for changes",
+            Self::Republished => "the daemon republished the index during this query",
         }
     }
 }
@@ -94,6 +101,66 @@ fn churn_wait_from(value: Option<&str>) -> Duration {
         .map_or(CHURN_WAIT, Duration::from_millis)
 }
 
+/// How this query is answered once its generation is chosen.
+pub enum Settled {
+    Vouched(Vouched),
+    Scan(ScanReason),
+}
+
+/// Settle how this query is answered: what the daemon vouches for, or a scan.
+///
+/// A query asks the daemon to vouch first, because a vouch costs a round trip
+/// where waiting for a rebuild costs the rebuild.
+pub fn settle(
+    args: &HiArgs,
+    mode: SearchMode,
+    generation: &Generation,
+    floor: SystemTime,
+    cold_build: bool,
+) -> anyhow::Result<Settled> {
+    if args.index().bench() {
+        return settle_bench(args, generation, cold_build);
+    }
+    if let Some(vouched) = dirty::vouch(args, mode, generation, floor) {
+        return Ok(Settled::Vouched(vouched));
+    }
+    if !cold_build {
+        return Ok(Settled::Scan(ScanReason::Churning));
+    }
+    if let Some(reason) = ensure_index_ready(generation, WaitPolicy::for_query(args, generation))? {
+        return Ok(Settled::Scan(reason));
+    }
+    Ok(dirty::vouch(args, mode, generation, dirty::change_floor())
+        .map_or(Settled::Scan(ScanReason::Churning), Settled::Vouched))
+}
+
+/// A benchmark measures the indexed path, so it waits rather than unions
+fn settle_bench(
+    args: &HiArgs,
+    generation: &Generation,
+    cold_build: bool,
+) -> anyhow::Result<Settled> {
+    if cold_build
+        && let Some(reason) =
+            ensure_index_ready(generation, WaitPolicy::for_query(args, generation))?
+    {
+        return Ok(Settled::Scan(reason));
+    }
+    Ok(Settled::Vouched(Vouched::Covered))
+}
+
+/// An index failure a benchmark keeps and every other query scans past
+pub fn index_answered<T>(args: &HiArgs, result: anyhow::Result<T>) -> anyhow::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if args.index().bench() => Err(err),
+        Err(err) => {
+            log::debug!("eg index: the proved generation stopped answering: {err:#}");
+            Ok(None)
+        },
+    }
+}
+
 /// Answer a query with the exact unindexed scan, complete by construction.
 pub fn scan_instead(args: &HiArgs, mode: SearchMode, reason: &str) -> anyhow::Result<bool> {
     log::debug!("eg index: scanning directly because of {reason}");
@@ -105,7 +172,7 @@ pub fn scan_instead(args: &HiArgs, mode: SearchMode, reason: &str) -> anyhow::Re
 }
 
 /// Settle whether the index can serve; `Some` means scan this query instead.
-pub fn ensure_index_ready(
+fn ensure_index_ready(
     generation: &Generation,
     policy: WaitPolicy,
 ) -> anyhow::Result<Option<ScanReason>> {

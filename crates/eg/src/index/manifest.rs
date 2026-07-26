@@ -128,6 +128,7 @@ pub fn current_snapshot(
             .into_values()
             .map(|manifest| CurrentDir { manifest })
             .collect(),
+        uncovered: Vec::new(),
     })
 }
 
@@ -148,6 +149,7 @@ pub fn snapshot_from_manifest_owned(index_root: &Path, manifest: Manifest) -> Cu
         git_freshness: manifest.git_freshness,
         files: SnapshotFiles::Eager(files),
         dirs,
+        uncovered: Vec::new(),
     }
 }
 
@@ -307,6 +309,7 @@ fn read_binary_snapshot(
             git_freshness: header.git_freshness,
             files: SnapshotFiles::PathTable(files),
             dirs: Vec::new(),
+            uncovered: Vec::new(),
         }));
     }
 
@@ -341,6 +344,7 @@ fn read_binary_snapshot(
         git_freshness: header.git_freshness,
         files: SnapshotFiles::Lazy(LazyManifestFiles::new(bytes, index_root, offsets, skipped)),
         dirs: Vec::new(),
+        uncovered: Vec::new(),
     }))
 }
 
@@ -1064,6 +1068,7 @@ pub struct CurrentSnapshot {
     git_freshness: bool,
     files: SnapshotFiles,
     dirs: Vec<CurrentDir>,
+    uncovered: Vec<CurrentFile>,
 }
 
 impl CurrentSnapshot {
@@ -1072,8 +1077,13 @@ impl CurrentSnapshot {
         self.dirs.iter().map(|dir| dir.manifest.path.as_str())
     }
 
-    pub fn file_count(&self) -> usize {
+    /// Documents the published generation indexed
+    pub fn indexed_count(&self) -> usize {
         self.files.len()
+    }
+
+    pub fn file_count(&self) -> usize {
+        self.files.len() + self.uncovered.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1084,8 +1094,30 @@ impl CurrentSnapshot {
         self.files.binary_skipped_count()
     }
 
+    /// True when files outside the published generation were folded in
+    pub fn has_uncovered(&self) -> bool {
+        !self.uncovered.is_empty()
+    }
+
+    /// Fold in one file the generation does not cover, returning its ordinal
+    pub fn add_uncovered(&mut self, path: PathBuf, explicit: bool) -> usize {
+        let ord = self.file_count();
+        self.uncovered.push(CurrentFile {
+            ord,
+            path,
+            manifest: ManifestFile {
+                explicit,
+                ..ManifestFile::default()
+            },
+        });
+        ord
+    }
+
     pub fn file(&self, ord: usize) -> Option<CurrentFile> {
-        self.files.file(ord)
+        match ord.checked_sub(self.files.len()) {
+            Some(uncovered) => self.uncovered.get(uncovered).cloned(),
+            None => self.files.file(ord),
+        }
     }
 
     pub fn ordinals(&self) -> std::ops::Range<usize> {
@@ -1310,7 +1342,7 @@ struct ManifestDir {
     changed_ns: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct ManifestFile {
     path: String,
     path_hash: u64,

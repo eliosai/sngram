@@ -49,6 +49,17 @@ impl ParsedEvent {
     pub const fn created_dir(&self) -> bool {
         self.mask & libc::IN_ISDIR != 0 && self.mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0
     }
+
+    /// True when the change reaches further than the single path it names
+    pub const fn is_coarse(&self) -> bool {
+        self.mask & libc::IN_ISDIR != 0
+            || self.mask & (libc::IN_DELETE_SELF | libc::IN_MOVE_SELF | libc::IN_UNMOUNT) != 0
+    }
+
+    /// True when the kernel dropped events, so the queue is no longer complete
+    pub const fn overflowed(&self) -> bool {
+        self.mask & libc::IN_Q_OVERFLOW != 0
+    }
 }
 
 #[cfg(test)]

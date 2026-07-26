@@ -6,6 +6,7 @@ mod catalog;
 mod classify;
 mod config;
 mod daemon_refresh;
+mod dirty;
 mod document;
 mod executor;
 mod generation;
@@ -30,7 +31,6 @@ mod verify;
 mod walk;
 
 use std::{
-    collections::BTreeSet,
     fmt::{self, Write as FmtWrite},
     time::Instant,
 };
@@ -172,15 +172,12 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
         );
     }
     let lease = runtime::Lease::new(generation.index_root(), generation.state_root());
-    if !cold_build {
-        let register_started_at = Instant::now();
-        lease.keep_alive_detached();
-        if let Some(report) = bench.as_deref_mut() {
-            report.timing_mut().set_daemon_register(register_started_at);
-        }
+    let change_floor = dirty::change_floor();
+    let register_started_at = Instant::now();
+    if !cold_build && let Some(report) = bench.as_deref_mut() {
+        report.timing_mut().set_daemon_register(register_started_at);
     }
     if cold_build {
-        let register_started_at = Instant::now();
         if let Err(err) = lease.request_refresh() {
             if args.index().bench() {
                 return Err(err.into());
@@ -192,18 +189,20 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
             report.timing_mut().set_daemon_register(register_started_at);
             report.timing_mut().set_daemon_start(register_started_at);
         }
-        let build_started_at = Instant::now();
-        let policy = readiness::WaitPolicy::for_query(args, &generation);
-        if let Some(reason) = readiness::ensure_index_ready(&generation, policy)? {
+    }
+    let build_started_at = Instant::now();
+    let vouched = match readiness::settle(args, mode, &generation, change_floor, cold_build)? {
+        readiness::Settled::Scan(reason) => {
             return readiness::scan_instead(args, mode, reason.as_str());
+        },
+        readiness::Settled::Vouched(vouched) => vouched,
+    };
+    if cold_build && let Some(report) = bench.as_deref_mut() {
+        if let Some(build_timings) = bench::read_build_timings(generation.state_root())? {
+            report.timing_mut().merge_build(&build_timings);
         }
-        if let Some(report) = bench.as_deref_mut() {
-            if let Some(build_timings) = bench::read_build_timings(generation.state_root())? {
-                report.timing_mut().merge_build(&build_timings);
-            }
-            report.timing_mut().set_cold_build_total(build_started_at);
-            report.timing_mut().set_daemon_ready(build_started_at);
-        }
+        report.timing_mut().set_cold_build_total(build_started_at);
+        report.timing_mut().set_daemon_ready(build_started_at);
     }
     if let Some(report) = bench.as_deref_mut() {
         let proof_started_at = Instant::now();
@@ -214,11 +213,10 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     let loaded =
         snapshot::SnapshotLoader::new(args, table_fingerprint, generation.location(), &index_dir)
             .load(true);
-    let (snapshot, freshness_proof) = match loaded {
-        Ok(loaded) => loaded.into_parts(),
-        Err(err) if args.index().bench() => return Err(err),
-        Err(err) => return readiness::scan_instead(args, mode, &format!("{err}")),
+    let Some(loaded) = readiness::index_answered(args, loaded)? else {
+        return readiness::scan_instead(args, mode, readiness::ScanReason::Republished.as_str());
     };
+    let (mut snapshot, freshness_proof) = loaded.into_parts();
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_manifest_open(validate_started_at);
         report.set_snapshot_counts(snapshot.file_count(), snapshot.binary_skipped_count());
@@ -228,8 +226,11 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
         crate::eprint_nothing_searched();
     }
     let query_started_at = Instant::now();
-    let Some(mut candidates) = generation.query(args, &snapshot, &plan, bench.as_deref_mut())?
-    else {
+    let queried = generation.query(args, &snapshot, &plan, bench.as_deref_mut());
+    let Some(queried) = readiness::index_answered(args, queried)? else {
+        return readiness::scan_instead(args, mode, readiness::ScanReason::Republished.as_str());
+    };
+    let Some(mut candidates) = queried else {
         if let Some(report) = bench.as_deref_mut() {
             report.reject_selectivity();
         }
@@ -238,15 +239,12 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_index_lookup(query_started_at);
     }
+    if let dirty::Vouched::Changed(ref ledger) = vouched {
+        dirty::fold_into(args, &mut snapshot, &mut candidates, ledger);
+    }
     let restrict_started_at = Instant::now();
     let unrestricted_candidates = candidates.len();
-    restrict_candidates(
-        args,
-        &roots,
-        generation.index_root(),
-        &snapshot,
-        &mut candidates,
-    );
+    generation.restrict(args, &roots, &snapshot, &mut candidates);
     if let Some(report) = bench.as_deref_mut() {
         report
             .timing_mut()
@@ -339,23 +337,6 @@ impl fmt::Write for PlanPreview {
 
 fn plan_gram_count(plan: &QueryPlan) -> usize {
     plan.gram_count()
-}
-
-fn restrict_candidates(
-    args: &HiArgs,
-    roots: &SearchRoots,
-    index_root: &std::path::Path,
-    snapshot: &manifest::CurrentSnapshot,
-    candidates: &mut BTreeSet<usize>,
-) {
-    if roots.covers_index_root(index_root) {
-        return;
-    }
-    candidates.retain(|ord| {
-        snapshot
-            .file(*ord)
-            .is_some_and(|file| roots.contains(args.cwd(), &file.path))
-    });
 }
 
 #[cfg(test)]

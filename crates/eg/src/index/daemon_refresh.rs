@@ -84,6 +84,5 @@ pub fn run(args: &HiArgs) -> anyhow::Result<()> {
     }
     progress.phase(BuildPhase::Ready);
     runtime::write_watch_dirs(&location.state_root, snapshot.dir_paths())?;
-    runtime::mark_journal_clean(&location.state_root)?;
     Ok(())
 }
