@@ -157,8 +157,8 @@ mod tests {
         };
         let v2 = WeightTable::from_bytes(&counter.mint_table_bytes(&options).unwrap()).unwrap();
 
-        for a in [b'_', b's', b'c', b'\n', b'.', b'k'] {
-            for b in [b'_', b's', b'c', b'\n', b'.', b'k'] {
+        for a in *b"_sc\n.k" {
+            for b in *b"_sc\n.k" {
                 assert_eq!(v1.weight(a, b), v2.weight(a, b), "({a},{b})");
             }
         }
