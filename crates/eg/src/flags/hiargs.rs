@@ -339,9 +339,13 @@ impl HiArgs {
     /// then independently write to the buffers. Once a unit of work is
     /// complete, a buffer can be given to the buffer writer to write to
     /// stdout.
+    ///
+    /// The file separator is the standard printer's when single threaded
     pub(crate) fn buffer_writer(&self) -> termcolor::BufferWriter {
         let mut wtr = termcolor::BufferWriter::stdout(self.color.to_termcolor());
-        wtr.separator(self.file_separator.clone());
+        if self.threads != 1 {
+            wtr.separator(self.file_separator.clone());
+        }
         wtr
     }
 
