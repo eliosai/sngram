@@ -211,10 +211,14 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
         report.timing_mut().set_daemon_proof(proof_started_at);
     }
     let validate_started_at = Instant::now();
-    let (snapshot, freshness_proof) =
+    let loaded =
         snapshot::SnapshotLoader::new(args, table_fingerprint, generation.location(), &index_dir)
-            .load(true)?
-            .into_parts();
+            .load(true);
+    let (snapshot, freshness_proof) = match loaded {
+        Ok(loaded) => loaded.into_parts(),
+        Err(err) if args.index().bench() => return Err(err),
+        Err(err) => return readiness::scan_instead(args, mode, &format!("{err}")),
+    };
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_manifest_open(validate_started_at);
         report.set_snapshot_counts(snapshot.file_count(), snapshot.binary_skipped_count());
