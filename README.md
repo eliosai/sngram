@@ -58,12 +58,12 @@ ripgrep 15.2.0 and GNU grep 3.11. Every hit set is compared against
 ripgrep's before the pattern is timed, so these rows are the same answer
 at different speeds:
 
-| Pattern | Matched files | elgrep | ripgrep | grep | vs ripgrep |
-|---|---:|---:|---:|---:|---:|
-| `linus tor` | 0 | 5.9 ms | 84.0 ms | 821.2 ms | 14.2x |
-| `EXPORT_SYMBOL_GPL` | 3627 | 16.6 ms | 86.5 ms | 671.7 ms | 5.2x |
-| `copy_from_user` | 1221 | 7.0 ms | 82.9 ms | 677.9 ms | 11.9x |
-| `schedule_timeout` | 418 | 9.3 ms | 86.1 ms | 684.2 ms | 9.2x |
+| Pattern | Matched files | elgrep | ripgrep | grep |
+|---|---:|---:|---:|---:|
+| `linus tor` | 0 | 5.9 ms | 84.0 ms (14.2x) | 821.2 ms (139.3x) |
+| `EXPORT_SYMBOL_GPL` | 3627 | 16.6 ms | 86.5 ms (5.2x) | 671.7 ms (40.6x) |
+| `copy_from_user` | 1221 | 7.0 ms | 82.9 ms (11.9x) | 677.9 ms (97.1x) |
+| `schedule_timeout` | 418 | 9.3 ms | 86.1 ms (9.2x) | 684.2 ms (73.4x) |
 
 A pattern with no matches is where the index earns most: it answers from
 posting lists without opening a file. A pattern matching 3,627 files

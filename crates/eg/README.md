@@ -58,12 +58,12 @@ elgrep, ripgrep, and grep agree on the hit set. Measured 2026-07-26 on
 isolated corpus copies, each with a hot daemon-owned index, against
 ripgrep 15.2.0 and GNU grep 3.11:
 
-| Corpus | Index build | elgrep | ripgrep | grep | vs ripgrep | vs grep |
-|---|---:|---:|---:|---:|---:|---:|
-| linux (1.615 GB) | 11,880 ms | 6,521 ms | 22,507 ms | 506,745 ms | 3.45x | 77.7x |
-| k8s (272 MB) | 2,659 ms | 1,518 ms | 8,311 ms | 100,842 ms | 5.48x | 66.5x |
-| hass-core (179 MB) | 1,697 ms | 1,315 ms | 7,044 ms | 76,065 ms | 5.36x | 57.9x |
-| django (38 MB) | 765 ms | 1,083 ms | 3,283 ms | 21,625 ms | 3.03x | 20.0x |
+| Corpus | Index build | elgrep | ripgrep | grep |
+|---|---:|---:|---:|---:|
+| linux (1.615 GB) | 11,880 ms | 6,521 ms | 22,507 ms (3.45x) | 506,745 ms (77.7x) |
+| k8s (272 MB) | 2,659 ms | 1,518 ms | 8,311 ms (5.48x) | 100,842 ms (66.5x) |
+| hass-core (179 MB) | 1,697 ms | 1,315 ms | 7,044 ms (5.36x) | 76,065 ms (57.9x) |
+| django (38 MB) | 765 ms | 1,083 ms | 3,283 ms (3.03x) | 21,625 ms (20.0x) |
 
 Every query there pays process startup, which is what a person pays at a
 shell and which costs the fastest tool proportionally most. In process,
@@ -75,12 +75,12 @@ set, so a lost match fails the build rather than reaching a user.
 Per pattern on linux, p50 of 9 runs, each hit set checked against
 ripgrep's before it was timed:
 
-| Pattern | Matched files | elgrep | ripgrep | grep | vs ripgrep |
-|---|---:|---:|---:|---:|---:|
-| `linus tor` | 0 | 5.9 ms | 84.0 ms | 821.2 ms | 14.2x |
-| `EXPORT_SYMBOL_GPL` | 3627 | 16.6 ms | 86.5 ms | 671.7 ms | 5.2x |
-| `copy_from_user` | 1221 | 7.0 ms | 82.9 ms | 677.9 ms | 11.9x |
-| `schedule_timeout` | 418 | 9.3 ms | 86.1 ms | 684.2 ms | 9.2x |
+| Pattern | Matched files | elgrep | ripgrep | grep |
+|---|---:|---:|---:|---:|
+| `linus tor` | 0 | 5.9 ms | 84.0 ms (14.2x) | 821.2 ms (139.3x) |
+| `EXPORT_SYMBOL_GPL` | 3627 | 16.6 ms | 86.5 ms (5.2x) | 671.7 ms (40.6x) |
+| `copy_from_user` | 1221 | 7.0 ms | 82.9 ms (11.9x) | 677.9 ms (97.1x) |
+| `schedule_timeout` | 418 | 9.3 ms | 86.1 ms (9.2x) | 684.2 ms (73.4x) |
 
 The spread is the index working as designed. A pattern that matches
 nothing is answered from posting lists alone; a pattern that matches
