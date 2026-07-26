@@ -3379,12 +3379,13 @@ impl Flag for Index {
     }
     fn doc_long(&self) -> &'static str {
         r"
-Use eg's sparse n-gram index before ripgrep verifies matches. The supported
-modes are \fBauto\fP, the default daemon-owned index path.
+Pick candidate files from eg's sparse n-gram index before the regex engine
+verifies them. \fBauto\fP, the only mode, uses the daemon-owned index stored
+beside the corpus.
 .sp
-An unindexable query (for example a very short pattern, an inverted match, or
-a stdin pipe) errors with an explanation. Pass \fB--no-index\fP when you want
-the copied ripgrep scan path instead.
+A query the index cannot serve, for example a pattern with no literal run of
+three bytes, an inverted match, or a read from stdin, errors with an
+explanation. Pass \fB--no-index\fP for a plain scan.
 "
     }
     fn doc_choices(&self) -> &'static [&'static str] {
@@ -4698,8 +4699,9 @@ impl Flag for NoIndex {
     }
     fn doc_long(&self) -> &'static str {
         r"
-Disable eg's sparse n-gram index and run the copied ripgrep search path
-directly.
+Disable eg's sparse n-gram index and scan every file directly. The results
+are the same as an indexed search. Use this for a stdin pipe, an inverted
+match, or any other query the index refuses.
 "
     }
 
@@ -7488,8 +7490,8 @@ impl Flag for Version {
     fn doc_long(&self) -> &'static str {
         r"
 This flag prints elgrep's version. This also may print other relevant
-information, such as target specific optimizations and the upstream ripgrep
-revision copied into this build.
+information, such as target specific optimizations and the upstream revision
+copied into this build.
 "
     }
 

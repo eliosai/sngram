@@ -20,7 +20,7 @@ eg \- recursively search the current directory for lines matching a pattern
 .sp
 \fBeg\fP [\fIOPTIONS\fP] \fB\-\-type\-list\fP
 .sp
-\fIcommand\fP | \fBeg\fP [\fIOPTIONS\fP] \fIPATTERN\fP
+\fIcommand\fP | \fBeg\fP [\fIOPTIONS\fP] \fB\-\-no\-index\fP \fIPATTERN\fP
 .sp
 \fBeg\fP [\fIOPTIONS\fP] \fB\-\-help\fP
 .sp
@@ -29,7 +29,18 @@ eg \- recursively search the current directory for lines matching a pattern
 .
 .SH DESCRIPTION
 elgrep (eg) recursively searches the current directory for a regex pattern.
-It builds on ripgrep and adds sparse n-gram indexed search.
+It carries the search path of ripgrep, by Andrew Gallant, and puts a sparse
+n-gram index in front of it. The index picks candidate files and the regex
+engine verifies them, so results match a plain scan exactly.
+.sp
+Searches use the index by default. The first search under a directory builds
+the index and waits for it; the \fBeg\-indexd\fP daemon then watches the tree
+and refreshes the index in the background, so later searches start warm. Pass
+\fB\-\-no\-index\fP to skip all of that and scan every file.
+.sp
+A query the index cannot serve, such as an inverted match or a read from
+stdin, fails with an explanation instead of quietly changing what you get.
+Every such message names the flag that runs the query anyway.
 .sp
 ripgrep's default regex engine uses finite automata and guarantees linear
 time searching. Because of this, features like backreferences and arbitrary
@@ -43,9 +54,10 @@ starting with \fB#\fP are ignored. For more details, see \fBCONFIGURATION
 FILES\fP below.
 .sp
 ripgrep will automatically detect if stdin is a readable file and search stdin
-for a regex pattern, e.g. \fBls | eg foo\fP. In some environments, stdin may
-exist when it shouldn't. To turn off stdin detection, one can explicitly
-specify the directory to search, e.g. \fBeg foo ./\fP.
+for a regex pattern, e.g. \fBls | eg \-\-no\-index foo\fP. The index cannot
+cover a stream, so reading stdin needs \fB\-\-no\-index\fP. In some
+environments, stdin may exist when it shouldn't. To turn off stdin detection,
+one can explicitly specify the directory to search, e.g. \fBeg foo ./\fP.
 .sp
 Like other tools such as \fBls\fP, ripgrep will alter its output depending on
 whether stdout is connected to a tty. By default, when printing a tty, ripgrep
@@ -419,8 +431,12 @@ with the \fB\-\-debug\fP flag.
 .sp
 If you have questions that don't obviously fall into the "bug" or "feature
 request" category, then they are welcome in the Discussions section of the
-issue tracker: \fIhttps://github.com/BurntSushi/ripgrep/discussions\fP.
+issue tracker: \fIhttps://github.com/eliosai/sngram/discussions\fP.
 .
 .
 .SH AUTHORS
-Andrew Gallant <\fIjamslam@gmail.com\fP>
+!!AUTHORS!!
+.sp
+\fBeg\fP carries the search path of ripgrep, by Andrew Gallant
+<\fIjamslam@gmail.com\fP>, copied at the revision named in \fBVERSION\fP
+above and used under its own license terms.

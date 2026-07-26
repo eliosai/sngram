@@ -671,7 +671,7 @@ fn index_bench_reports_structured_errors() {
         non_search_report["unsupported_reason"]
             .as_str()
             .unwrap()
-            .contains("only supports search")
+            .contains("--files")
     );
 }
 

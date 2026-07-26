@@ -9,7 +9,7 @@ description = "Training pipeline for sngram weight tables"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Joshua Smotritsky" }]
+authors = [{ name = "Elios", email = "dev@elios.ai" }]
 dependencies = [
     "sngram",
     "huggingface-hub>=1.0",

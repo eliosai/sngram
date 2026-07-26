@@ -34,7 +34,9 @@ pub(crate) fn generate() -> String {
         generate_flag(flag, &mut cat);
     }
 
-    let mut out = TEMPLATE.replace("!!VERSION!!", &version::generate_digits());
+    let mut out = TEMPLATE
+        .replace("!!VERSION!!", &version::generate_digits())
+        .replace("!!AUTHORS!!", &super::authors());
     for (cat, value) in cats.iter() {
         let var = format!("!!{name}!!", name = cat.as_str());
         out = out.replace(&var, value);

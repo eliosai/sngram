@@ -1,8 +1,13 @@
 elgrep (eg) !!VERSION!!
-Andrew Gallant <jamslam@gmail.com>
+!!AUTHORS!!
 
 elgrep (eg) recursively searches the current directory for lines matching a
-regex pattern. It builds on ripgrep and adds sparse n-gram indexed search.
+regex pattern. It carries the search path of ripgrep, by Andrew Gallant, and
+puts a sparse n-gram index in front of it.
+
+Searches use the index by default. The first search under a directory builds
+it and waits; eg-indexd keeps it fresh after that. Pass --no-index to scan
+every file instead.
 
 Use -h for short descriptions and --help for more details.
 

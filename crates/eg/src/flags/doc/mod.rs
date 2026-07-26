@@ -6,6 +6,11 @@ pub(crate) mod help;
 pub(crate) mod man;
 pub(crate) mod version;
 
+/// elgrep's own author line, taken from the package manifest
+fn authors() -> String {
+    env!("CARGO_PKG_AUTHORS").replace(':', ", ")
+}
+
 /// Rewrite copied ripgrep flag docs for elgrep's user-facing command identity.
 pub(crate) fn elgrep_user_doc(doc: &str) -> String {
     doc.replace("ripgrep (rg)", "elgrep (eg)")

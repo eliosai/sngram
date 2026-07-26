@@ -26,6 +26,10 @@ eg 'max_\w+_size' ~/src/linux
 eg --no-index 'max_\w+_size' ~/src/linux   # plain scan, no index used
 ```
 
+Some queries the index cannot serve: an inverted match, a read from stdin, a
+pattern with no literal run of three bytes. Those exit 2 with an explanation
+that names `--no-index` as the way to run them anyway.
+
 ## Upgrading to 0.7
 
 0.7 moves the postings schema from 16 to 20. The daemon rebuilds any

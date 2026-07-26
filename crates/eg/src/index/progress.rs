@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 
 const RUNTIME_DIR_NAME: &str = "runtime";
 const PROGRESS_FILE_NAME: &str = "build-progress.json";
+/// Prefix that names the wait on every cold-build progress line
+const BUILDING: &str = "building index";
+/// Line printed above the bar the first time a tree is indexed
+const COLD_BUILD_NOTE: &str = "building a sparse n-gram index. This wait happens once per tree.";
 const PROGRESS_POLL: Duration = Duration::from_millis(100);
 const SCAN_UPDATE_FILES: u64 = 512;
 const WALK_UPDATE_ITEMS: u64 = 512;
@@ -44,13 +48,13 @@ pub enum BuildPhase {
 impl BuildPhase {
     const fn label(self) -> &'static str {
         match self {
-            Self::Walking => "walking files",
-            Self::Snapshot => "building snapshot",
+            Self::Walking => "walking the tree",
+            Self::Snapshot => "reading file metadata",
             Self::Scanning => "scanning files",
             Self::WritingSummary => "writing summaries",
             Self::WritingPostings => "writing postings",
-            Self::WritingManifest => "writing manifest",
-            Self::Publishing => "publishing index",
+            Self::WritingManifest => "writing the manifest",
+            Self::Publishing => "publishing",
             Self::Ready => "index ready",
         }
     }
@@ -71,29 +75,44 @@ pub struct BuildSnapshot {
 }
 
 impl BuildSnapshot {
+    /// True while the snapshot describes a build that is still running
+    const fn is_building(&self) -> bool {
+        !matches!(self.phase, None | Some(BuildPhase::Ready))
+    }
+
+    /// Total and completed units for the bar, or `None` for a phase with no count
+    const fn bar_bounds(&self) -> Option<(u64, u64)> {
+        if matches!(self.phase, Some(BuildPhase::WritingPostings)) {
+            return None;
+        }
+        if self.files_total > 0 {
+            return Some((self.files_total, self.files_done));
+        }
+        if self.items_total > 0 {
+            return Some((self.items_total, self.items_done));
+        }
+        None
+    }
+
     fn message(&self) -> String {
-        let phase = self.phase.map_or("building index", BuildPhase::label);
-        match self.phase {
-            Some(BuildPhase::Walking) => {
-                return format!(
-                    "{phase}: {} entries, {} files, {} dirs",
-                    self.items_done, self.files_done, self.dirs_done
-                );
+        let Some(phase) = self.phase else {
+            return BUILDING.to_owned();
+        };
+        match phase {
+            BuildPhase::Walking => {
+                format!(
+                    "{BUILDING}: walking the tree, {} files so far",
+                    self.files_done
+                )
             },
-            Some(BuildPhase::Snapshot) if self.files_total > 0 => {
-                return format!("{phase}: {}/{} files", self.files_done, self.files_total);
+            BuildPhase::Scanning if self.bytes_done > 0 => {
+                format!(
+                    "{BUILDING}: scanning files, {} MiB",
+                    self.bytes_done / 1024 / 1024
+                )
             },
-            _ => {},
+            other => format!("{BUILDING}: {}", other.label()),
         }
-        if self.files_total == 0 {
-            return phase.to_owned();
-        }
-        format!(
-            "{phase}: {}/{} files, {} MiB",
-            self.files_done,
-            self.files_total,
-            self.bytes_done / 1024 / 1024
-        )
     }
 }
 
@@ -306,27 +325,20 @@ impl BuildProgressRenderer {
     pub fn new(enabled: bool, spinner: bool) -> Self {
         let enabled = enabled && io::stderr().is_terminal();
         let bar = if enabled {
-            let bar = ProgressBar::new(0);
-            bar.set_draw_target(ProgressDrawTarget::stderr());
-            bar.set_style(if spinner {
-                spinner_style()
-            } else {
-                progress_style()
-            });
-            if spinner {
-                bar.set_message("indexing changes");
-            }
-            bar.enable_steady_tick(Duration::from_millis(100));
-            bar
+            new_bar(spinner)
         } else {
             ProgressBar::hidden()
         };
-        Self {
+        let renderer = Self {
             bar,
             last_poll: Instant::now() - PROGRESS_POLL,
             enabled,
             spinner,
+        };
+        if enabled && !spinner {
+            renderer.announce_cold_build();
         }
+        renderer
     }
 
     /// Redraw from the persisted daemon progress state.
@@ -335,36 +347,47 @@ impl BuildProgressRenderer {
             return;
         }
         self.last_poll = Instant::now();
-        let Ok(Some(snapshot)) = read(state_root) else {
-            self.bar.set_message("building index");
-            return;
-        };
-        if matches!(snapshot.phase, Some(BuildPhase::WritingPostings)) {
-            self.bar.set_style(phase_style());
-            self.bar.set_length(0);
-            self.bar.set_position(0);
-        } else if snapshot.files_total > 0 {
-            self.bar.set_style(progress_style());
-            self.bar.set_length(snapshot.files_total);
-            self.bar
-                .set_position(snapshot.files_done.min(snapshot.files_total));
-        } else if snapshot.items_total > 0 {
-            self.bar.set_style(progress_style());
-            self.bar.set_length(snapshot.items_total);
-            self.bar
-                .set_position(snapshot.items_done.min(snapshot.items_total));
-        } else {
-            self.bar.set_style(phase_style());
-            self.bar.set_length(0);
-            self.bar.set_position(0);
+        match read(state_root) {
+            Ok(Some(snapshot)) if snapshot.is_building() => self.draw(&snapshot),
+            _ => self.draw_waiting(),
         }
-        self.bar.set_message(snapshot.message());
     }
 
     /// Clear the terminal progress line.
     pub fn finish(self) {
         if self.enabled {
             self.bar.finish_and_clear();
+        }
+    }
+
+    /// Say once why the query is waiting, above the live bar
+    fn announce_cold_build(&self) {
+        if crate::messages::messages() {
+            self.bar.println(format!("eg: {COLD_BUILD_NOTE}"));
+        }
+    }
+
+    /// Show the phase-only line used before the daemon reports progress
+    fn draw_waiting(&self) {
+        self.bar.set_message(BUILDING);
+        self.bar.set_style(phase_style());
+        self.bar.set_length(0);
+        self.bar.set_position(0);
+    }
+
+    fn draw(&self, snapshot: &BuildSnapshot) {
+        self.bar.set_message(snapshot.message());
+        match snapshot.bar_bounds() {
+            Some((total, done)) => {
+                self.bar.set_style(progress_style());
+                self.bar.set_length(total);
+                self.bar.set_position(done.min(total));
+            },
+            None => {
+                self.bar.set_style(phase_style());
+                self.bar.set_length(0);
+                self.bar.set_position(0);
+            },
         }
     }
 }
@@ -385,8 +408,22 @@ fn progress_path(state_root: &Path) -> PathBuf {
     state_root.join(RUNTIME_DIR_NAME).join(PROGRESS_FILE_NAME)
 }
 
+fn new_bar(spinner: bool) -> ProgressBar {
+    let bar = ProgressBar::new(0);
+    bar.set_draw_target(ProgressDrawTarget::stderr());
+    if spinner {
+        bar.set_style(spinner_style());
+        bar.set_message("indexing changes");
+    } else {
+        bar.set_style(phase_style());
+        bar.set_message(BUILDING);
+    }
+    bar.enable_steady_tick(Duration::from_millis(100));
+    bar
+}
+
 fn progress_style() -> ProgressStyle {
-    ProgressStyle::with_template("{spinner:.green} {msg} [{bar:40.cyan/blue}] {pos}/{len}")
+    ProgressStyle::with_template("{spinner:.green} {msg} [{bar:20.cyan/blue}] {pos}/{len}")
         .unwrap_or_else(|_| ProgressStyle::default_bar())
         .progress_chars("=> ")
 }
@@ -421,7 +458,7 @@ mod tests {
         progress.phase(BuildPhase::Walking);
 
         let snapshot = read(&root).expect("read progress").expect("snapshot");
-        assert_eq!(snapshot.phase.expect("phase").label(), "walking files");
+        assert_eq!(snapshot.phase.expect("phase").label(), "walking the tree");
         assert_eq!(snapshot.files_total, 0);
     }
 
@@ -451,7 +488,7 @@ mod tests {
         progress.update_walk(512, 400, 100);
 
         let snapshot = read(&root).expect("read progress").expect("snapshot");
-        assert_eq!(snapshot.phase.expect("phase").label(), "walking files");
+        assert_eq!(snapshot.phase.expect("phase").label(), "walking the tree");
         assert_eq!(snapshot.items_done, 512);
         assert_eq!(snapshot.files_done, 400);
         assert_eq!(snapshot.dirs_done, 100);
@@ -467,7 +504,10 @@ mod tests {
         progress.update_snapshot(1024, 512);
 
         let snapshot = read(&root).expect("read progress").expect("snapshot");
-        assert_eq!(snapshot.phase.expect("phase").label(), "building snapshot");
+        assert_eq!(
+            snapshot.phase.expect("phase").label(),
+            "reading file metadata"
+        );
         assert_eq!(snapshot.files_total, 1024);
         assert_eq!(snapshot.files_done, 512);
     }
@@ -498,7 +538,32 @@ mod tests {
         progress.start_postings(198, 198);
 
         let snapshot = read(&root).expect("read progress").expect("snapshot");
-        assert_eq!(snapshot.message(), "writing postings");
+        assert_eq!(snapshot.message(), "building index: writing postings");
+    }
+
+    #[test]
+    fn ready_snapshot_from_an_earlier_build_is_not_building() {
+        let root_guard = scratch("ready");
+        let root = root_guard.path().to_path_buf();
+        let progress = BuildProgress::new(&root);
+
+        progress.phase(BuildPhase::Ready);
+
+        let snapshot = read(&root).expect("read progress").expect("snapshot");
+        assert!(!snapshot.is_building());
+    }
+
+    #[test]
+    fn every_build_message_names_the_wait() {
+        let root_guard = scratch("message");
+        let root = root_guard.path().to_path_buf();
+        let progress = BuildProgress::new(&root);
+
+        progress.start_scan(10);
+        progress.update_scan(10, 10, 4 * 1024 * 1024, 1);
+
+        let snapshot = read(&root).expect("read progress").expect("snapshot");
+        assert_eq!(snapshot.message(), "building index: scanning files, 4 MiB");
     }
 
     #[test]

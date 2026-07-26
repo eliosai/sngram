@@ -32,7 +32,9 @@ pub(crate) fn generate_short() -> String {
         columns.0.push(col1);
         columns.1.push(col2);
     }
-    let mut out = TEMPLATE_SHORT.replace("!!VERSION!!", &version::generate_digits());
+    let mut out = TEMPLATE_SHORT
+        .replace("!!VERSION!!", &version::generate_digits())
+        .replace("!!AUTHORS!!", &super::authors());
     for (cat, (col1, col2)) in cats.iter() {
         let var = format!("!!{name}!!", name = cat.as_str());
         let val = format_short_columns(col1, col2, maxcol1, maxcol2);
@@ -115,7 +117,9 @@ pub(crate) fn generate_long() -> String {
         generate_long_flag(flag, &mut cat);
     }
 
-    let mut out = TEMPLATE_LONG.replace("!!VERSION!!", &version::generate_digits());
+    let mut out = TEMPLATE_LONG
+        .replace("!!VERSION!!", &version::generate_digits())
+        .replace("!!AUTHORS!!", &super::authors());
     for (cat, value) in cats.iter() {
         let var = format!("!!{name}!!", name = cat.as_str());
         out = out.replace(&var, value);

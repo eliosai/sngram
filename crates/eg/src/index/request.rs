@@ -16,13 +16,10 @@ pub struct SearchRequest<'a> {
 impl<'a> SearchRequest<'a> {
     pub fn from_args(args: &'a HiArgs) -> anyhow::Result<Self> {
         let Mode::Search(mode) = args.mode() else {
-            bail!("indexed mode only supports search");
+            return unsupported(Unsupported::BenchOutsideSearch);
         };
         if args.index().is_no_index() {
-            return unsupported(Unsupported::Feature {
-                what: "`--bench` with `--no-index`",
-                why: "`--bench` measures the sparse n-gram indexed path, so disabling the index leaves no indexed work to measure",
-            });
+            return unsupported(Unsupported::BenchWithoutIndex);
         }
         if let Some(reason) = unsupported_reason(args, mode) {
             return unsupported(reason);
@@ -115,11 +112,20 @@ pub enum Unsupported {
         why: &'static str,
     },
     Stdin,
+    BenchOutsideSearch,
+    BenchWithoutIndex,
     PlannerError,
     TooBroadPattern,
     ImpossiblePattern,
     TooManyCandidates,
 }
+
+const STDIN: &str = "indexed search cannot read stdin.\n\nwhy: stdin is a stream, but the sparse n-gram index only covers stable files in the indexed corpus.\nwhat works: write the input to a file and search that path, or pass `--no-index` for an exact stream scan.";
+const BENCH_OUTSIDE_SEARCH: &str = "`--bench` measures indexed search, which needs a pattern to search for.\n\nwhat works: give `--bench` a pattern, or drop `--bench` from a `--files`, `--type-list`, or `--generate` run.";
+const BENCH_WITHOUT_INDEX: &str = "`--bench` and `--no-index` cancel each other out.\n\nwhy: `--bench` measures the sparse n-gram indexed path and `--no-index` removes it.\nwhat works: drop one of the two flags. `--bench` already re-runs each query through the unindexed path for comparison.";
+const TOO_BROAD: &str = "indexed search cannot use this pattern because it is too broad for the sparse n-gram index.\n\nwhy: the pattern has no required byte n-gram that can narrow candidate files.\nwhat works: add a literal substring of at least 3 bytes, narrow wide character classes or repetitions, or pass `--no-index` for an exact unindexed scan.";
+const IMPOSSIBLE: &str = "indexed search cannot use this pattern because it cannot match any text under the current regex options.\n\nwhy: contradictory anchors, boundaries, or character classes made the planner prove the language empty.\nwhat works: check anchors like `$`/`^`, word boundaries like `\\b`/`\\B`, and impossible classes; use `--no-index` only if you want to double-check with the regex engine.";
+const TOO_MANY: &str = "indexed search cannot use this pattern efficiently because it selects too much of the corpus.\n\nwhy: the sparse n-gram estimate is above the indexed-search selectivity ceiling, so verifying candidates would be slower than a scan.\nwhat works: add a rarer literal, narrow numeric or wide character classes, split the search into a more selective pattern, or pass `--no-index` for an exact unindexed scan.";
 
 /// Report an indexed-search request that cannot be served safely.
 pub fn unsupported<T>(reason: Unsupported) -> anyhow::Result<T> {
@@ -127,18 +133,12 @@ pub fn unsupported<T>(reason: Unsupported) -> anyhow::Result<T> {
         Unsupported::Feature { what, why } => bail!(
             "indexed search cannot run with {what}.\n\nwhy: {why}.\nwhat works: remove the unsupported option, or pass `--no-index` when you intentionally want an exact unindexed scan."
         ),
-        Unsupported::Stdin => bail!(
-            "indexed search cannot read stdin.\n\nwhy: stdin is a stream, but the sparse n-gram index only covers stable files in the indexed corpus.\nwhat works: write the input to a file and search that path, or pass `--no-index` for an exact stream scan."
-        ),
-        Unsupported::PlannerError | Unsupported::TooBroadPattern => bail!(
-            "indexed search cannot use this pattern because it is too broad for the sparse n-gram index.\n\nwhy: the pattern has no required byte n-gram that can narrow candidate files.\nwhat works: add a literal substring of at least 3 bytes, narrow wide character classes or repetitions, or pass `--no-index` for an exact unindexed scan."
-        ),
-        Unsupported::ImpossiblePattern => bail!(
-            "indexed search cannot use this pattern because it cannot match any text under the current regex options.\n\nwhy: contradictory anchors, boundaries, or character classes made the planner prove the language empty.\nwhat works: check anchors like `$`/`^`, word boundaries like `\\b`/`\\B`, and impossible classes; use `--no-index` only if you want to double-check with the regex engine."
-        ),
-        Unsupported::TooManyCandidates => bail!(
-            "indexed search cannot use this pattern efficiently because it selects too much of the corpus.\n\nwhy: the sparse n-gram estimate is above the indexed-search selectivity ceiling, so verifying candidates would be slower than a scan.\nwhat works: add a rarer literal, narrow numeric or wide character classes, split the search into a more selective pattern, or pass `--no-index` for an exact unindexed scan."
-        ),
+        Unsupported::Stdin => bail!(STDIN),
+        Unsupported::BenchOutsideSearch => bail!(BENCH_OUTSIDE_SEARCH),
+        Unsupported::BenchWithoutIndex => bail!(BENCH_WITHOUT_INDEX),
+        Unsupported::PlannerError | Unsupported::TooBroadPattern => bail!(TOO_BROAD),
+        Unsupported::ImpossiblePattern => bail!(IMPOSSIBLE),
+        Unsupported::TooManyCandidates => bail!(TOO_MANY),
     }
 }
 

@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::flags::HiArgs;
 
-use super::request::SearchRequest;
+use super::request::{SearchRequest, Unsupported, unsupported};
 
 /// Normalized paths requested by one search invocation.
 pub struct SearchRoots {
@@ -26,7 +26,7 @@ impl SearchRoots {
         let mut roots = Vec::with_capacity(paths.len().max(1));
         for path in paths {
             if path == Path::new("-") {
-                anyhow::bail!("indexed search does not support stdin yet; use --no-index");
+                return unsupported(Unsupported::Stdin);
             }
             roots.push(SearchRoot::new(path.clone(), absolute_path(cwd, path))?);
         }

@@ -2,11 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::bail;
-
 use crate::{flags::HiArgs, haystack::Haystack};
 
-use super::{progress::BuildProgress, roots::absolute_path};
+use super::{
+    progress::BuildProgress,
+    request::{Unsupported, unsupported},
+    roots::absolute_path,
+};
 
 pub struct CollectedHaystacks {
     pub haystacks: Vec<Haystack>,
@@ -52,7 +54,7 @@ pub fn collect_haystacks(
     let mut haystacks = Vec::new();
     for haystack in args.sort(unsorted.into_iter()) {
         if haystack.is_stdin() {
-            bail!("indexed search does not support stdin yet; use --no-index");
+            return unsupported(Unsupported::Stdin);
         }
         haystacks.push(haystack);
     }

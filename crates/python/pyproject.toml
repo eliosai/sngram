@@ -9,7 +9,7 @@ description = "A sparse ngram library with trained weight tables"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Joshua Smotritsky" }]
+authors = [{ name = "Elios", email = "dev@elios.ai" }]
 keywords = ["ngram", "regex", "search", "code-search", "index"]
 classifiers = [
     "Development Status :: 4 - Beta",
