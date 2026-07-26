@@ -228,7 +228,7 @@ def test_a_blend_ceiling_trims_the_boundary_batch_rather_than_overshooting(tmp_p
 
 
 def test_a_blend_run_stamps_its_corpus_and_family_mix(tmp_path: Path):
-    trainer = blend_run(tmp_path, {"wide": 750, "narrow": 250})
+    blend_run(tmp_path, {"wide": 750, "narrow": 250})
 
     table = sngram.WeightTable.from_path(tmp_path / "bins" / "final_weights.bin")
     assert "blend@fingerprint-" in table.provenance

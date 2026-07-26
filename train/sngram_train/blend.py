@@ -112,7 +112,7 @@ def _configs(
     caps = _split_caps(total, len(configs))
     sources = tuple(
         Source(family, repo, f"{config}/", reading, cap, config)
-        for config, cap in zip(configs, caps)
+        for config, cap in zip(configs, caps, strict=True)
     )
     return Family(family, total, sources)
 
@@ -130,7 +130,7 @@ def _multilingual_caps() -> dict[str, int]:
 
     others = [lang for lang in WEB_LANGS if lang not in CJK_LANGS]
     caps = {lang: 20 * GB for lang in WEB_LANGS if lang in CJK_LANGS}
-    caps.update(dict(zip(others, _split_caps(390 * GB, len(others)))))
+    caps.update(dict(zip(others, _split_caps(390 * GB, len(others)), strict=True)))
     return caps
 
 

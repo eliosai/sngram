@@ -102,7 +102,7 @@ class LineReader:
     """Batches of one JSON-lines shard, read as a single row group."""
 
     def __init__(self, handle, shard: Shard) -> None:
-        self._lines = gzip.open(handle, "rb") if shard.path.endswith(".gz") else handle
+        self._lines = gzip.open(handle, "rb") if shard.path.endswith(".gz") else handle  # noqa: SIM115
         self._field = shard.reading.field
 
     @property
@@ -213,6 +213,8 @@ def _language_bytes(languages: pa.Array, sizes: pa.Array) -> dict[str, int]:
     pairs = pa.table({"language": pc.cast(languages, pa.string()), "nbytes": sizes})
     grouped = pairs.group_by("language").aggregate([("nbytes", "sum")])
     named = zip(
-        grouped.column("language").to_pylist(), grouped.column("nbytes_sum").to_pylist()
+        grouped.column("language").to_pylist(),
+        grouped.column("nbytes_sum").to_pylist(),
+        strict=True,
     )
     return {language or "unknown": total or 0 for language, total in named}

@@ -180,7 +180,7 @@ class Trainer:
                 if unit is None:
                     return
                 self._consume(unit)
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001
             with self.lock:
                 if self.failure is None:
                     self.failure = error
@@ -250,14 +250,13 @@ class Trainer:
 
     def _spool(self, shard: Shard, index: int) -> Path | None:
         path = self._spool_dir / f"shard-{index:05d}"
-        with self.source.open(shard) as remote:
-            with open(path, "wb") as local:
-                while chunk := remote.read(_SPOOL_CHUNK):
-                    local.write(chunk)
-                    self.gate.pause_point()
-                    if self.stop.is_set():
-                        path.unlink(missing_ok=True)
-                        return None
+        with self.source.open(shard) as remote, open(path, "wb") as local:
+            while chunk := remote.read(_SPOOL_CHUNK):
+                local.write(chunk)
+                self.gate.pause_point()
+                if self.stop.is_set():
+                    path.unlink(missing_ok=True)
+                    return None
         return path
 
     def _acquire_slot(self) -> bool:

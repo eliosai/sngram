@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -58,9 +59,9 @@ def test_under_selects_by_prefix_and_suffix_in_order(monkeypatch):
 class FlakyApi:
     """Fails the first `fail_times` listings, then succeeds"""
 
-    fail_times = 0
-    error: Exception = RuntimeError("boom")
-    calls: list[float | None] = []
+    fail_times: ClassVar[int] = 0
+    error: ClassVar[Exception] = RuntimeError("boom")
+    calls: ClassVar[list[float | None]] = []
 
     def __init__(self, token=None):
         pass

@@ -57,7 +57,7 @@ def kl(p: list[float], q: list[float]) -> float:
     if len(p) != len(q):
         raise ValueError("distributions must be the same length")
     total = 0.0
-    for pi, qi in zip(p, q):
+    for pi, qi in zip(p, q, strict=True):
         if pi > 0.0:
             total += pi * math.log(pi / qi)
     # Clamp floating-point drift below zero

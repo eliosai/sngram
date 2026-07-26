@@ -6,7 +6,6 @@ import pytest
 
 import sngram
 
-
 DOCS = [
     b"fn main() { println!(\"hello world\"); }",
     b"pub async fn read_content(hash: Hash) -> Result<Bytes, Error> {\n    todo!()\n}",

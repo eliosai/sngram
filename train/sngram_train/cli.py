@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Annotated
 
 import typer
 
@@ -22,14 +22,14 @@ app = typer.Typer(
 
 @app.command()
 def train(
-    mint_dir: Path = typer.Option(Path("./bins"), help="Output and durable run state."),
-    corpus: CorpusName = typer.Option(CorpusName.BLEND, help="Which corpus to stream."),
-    workers: int = typer.Option(10, help="Parallel shard readers."),
-    limit: Optional[str] = typer.Option(None, help="Decoded-byte cap for a smoke run."),
-    shards: Optional[int] = typer.Option(None, help="Only the first N shards per source."),
-    checkpoint_every: float = typer.Option(60.0, help="Checkpoint period in seconds."),
-    resume: bool = typer.Option(True, help="Resume from the checkpoint."),
-    dashboard: bool = typer.Option(True, help="Show the live terminal dashboard."),
+    mint_dir: Annotated[Path, typer.Option(help="Output and durable run state.")] = Path("./bins"),
+    corpus: Annotated[CorpusName, typer.Option(help="Which corpus to stream.")] = CorpusName.BLEND,
+    workers: Annotated[int, typer.Option(help="Parallel shard readers.")] = 10,
+    limit: Annotated[str | None, typer.Option(help="Decoded-byte cap for a smoke run.")] = None,
+    shards: Annotated[int | None, typer.Option(help="Only the first N shards per source.")] = None,
+    checkpoint_every: Annotated[float, typer.Option(help="Checkpoint period in seconds.")] = 60.0,
+    resume: Annotated[bool, typer.Option(help="Resume from the checkpoint.")] = True,
+    dashboard: Annotated[bool, typer.Option(help="Show the live terminal dashboard.")] = True,
 ) -> None:
     """Stream a training corpus and mint the final weight table."""
 
@@ -51,8 +51,8 @@ def _trainer_factory(
     mint_dir: Path,
     corpus: CorpusName,
     workers: int,
-    limit: Optional[str],
-    shards: Optional[int],
+    limit: str | None,
+    shards: int | None,
     checkpoint_every: float,
     note=None,
 ):
@@ -118,8 +118,8 @@ def _production_trainer(
     mint_dir: Path,
     corpus: CorpusName,
     workers: int,
-    limit: Optional[int],
-    shards: Optional[int],
+    limit: int | None,
+    shards: int | None,
     checkpoint_interval: float,
     resume: bool,
     note=None,
@@ -172,8 +172,8 @@ def _transport_pause(error: Exception, delay: float) -> float:
 
 @app.command()
 def inspect(
-    path: Path = typer.Argument(..., help="A minted weight table."),
-    top: int = typer.Option(20, help="Pairs to show per end."),
+    path: Annotated[Path, typer.Argument(help="A minted weight table.")],
+    top: Annotated[int, typer.Option(help="Pairs to show per end.")] = 20,
 ) -> None:
     """Print the commonest and rarest byte pairs."""
 
@@ -197,9 +197,9 @@ def _show_pair(c1: int, c2: int) -> str:
 
 @app.command("fs-histogram")
 def fs_histogram(
-    roots: list[Path] = typer.Argument(..., help="Directories or files."),
-    cap: Optional[str] = typer.Option(None, help="Maximum text bytes."),
-    top: int = typer.Option(25, help="Pairs and extensions to show."),
+    roots: Annotated[list[Path], typer.Argument(help="Directories or files.")],
+    cap: Annotated[str | None, typer.Option(help="Maximum text bytes.")] = None,
+    top: Annotated[int, typer.Option(help="Pairs and extensions to show.")] = 25,
 ) -> None:
     """Measure the byte-pair distribution of text files."""
 
@@ -236,10 +236,10 @@ def _echo_extensions(stats, top: int) -> None:
 
 @app.command("fs-validate")
 def fs_validate(
-    table_path: Path = typer.Argument(..., help="A minted weight table."),
-    roots: list[Path] = typer.Argument(..., help="Directories or files."),
-    cap: Optional[str] = typer.Option(None, help="Maximum text bytes."),
-    top: int = typer.Option(15, help="Pairs to show."),
+    table_path: Annotated[Path, typer.Argument(help="A minted weight table.")],
+    roots: Annotated[list[Path], typer.Argument(help="Directories or files.")],
+    cap: Annotated[str | None, typer.Option(help="Maximum text bytes.")] = None,
+    top: Annotated[int, typer.Option(help="Pairs to show.")] = 15,
 ) -> None:
     """Compare a table with the byte-pair distribution on disk."""
 

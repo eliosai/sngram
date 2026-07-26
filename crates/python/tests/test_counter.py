@@ -2,6 +2,7 @@
 
 import random
 from collections import Counter as PyCounter
+from itertools import pairwise
 
 import pyarrow as pa
 import pytest
@@ -12,7 +13,7 @@ import sngram
 def naive_counts(rows: list[bytes]) -> PyCounter:
     c: PyCounter = PyCounter()
     for row in rows:
-        for a, b in zip(row, row[1:]):
+        for a, b in pairwise(row):
             c[(a, b)] += 1
     return c
 
@@ -83,7 +84,7 @@ def test_chunked_input_equals_contiguous():
     c1, c2 = sngram.BigramCounter(), sngram.BigramCounter()
     c1.merge(t1)
     c2.merge(t2)
-    for a, b in {(ord(x), ord(y)) for r in rows for x, y in zip(r, r[1:])}:
+    for a, b in {(ord(x), ord(y)) for r in rows for x, y in pairwise(r)}:
         assert c1.count(a, b) == c2.count(a, b)
 
 

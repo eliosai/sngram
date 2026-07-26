@@ -5,7 +5,6 @@ import pytest
 
 import sngram
 
-
 CORPUS = (
     b"fn main() { let x = foo_bar(42); }",
     b"pub async fn read_content(hash: Hash) -> Result<Bytes, Error> {}",
@@ -41,7 +40,7 @@ def test_scan_grams_and_key_bytes_agree(table):
     result = sngram.scan(table, doc)
     keys = np.frombuffer(result.key_bytes(), dtype=np.uint64)
     assert len(result.grams) == len(keys) > 0
-    for (start, end, h), k in zip(result.grams, keys):
+    for (start, end, h), k in zip(result.grams, keys, strict=True):
         assert h == k
         # sentinel-bracketed grams may span fewer than 3 content bytes
         assert 1 <= end - start <= 16

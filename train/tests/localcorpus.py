@@ -53,7 +53,7 @@ def code_repos(count: int, files_per_repo: int = 3) -> list[list[dict]]:
 
 def write_corpus(
     root: Path, shards: list[list[list[dict]]], rows_per_group: int = 2
-) -> tuple[Corpus, "LocalShards"]:
+) -> tuple[Corpus, LocalShards]:
     """Write nested stack shards and return the corpus over them."""
 
     (root / "data").mkdir(parents=True, exist_ok=True)
@@ -113,7 +113,7 @@ def write_line_shard(path: Path, field: str, records: list[dict]) -> None:
 
 def blend_corpus(
     root: Path, sources: dict[str, list[list[str]]], caps: dict[str, int]
-) -> tuple[Corpus, "LocalShards"]:
+) -> tuple[Corpus, LocalShards]:
     """A blend over flat parquet shards, one family per source."""
 
     shards = []

@@ -142,9 +142,11 @@ def test_a_flat_shard_without_the_text_column_fails_loudly(tmp_path: Path):
     shard = column_shard(tmp_path, "text", ["value"])
     wrong = Shard(shard.path, shard.size, Reading("parquet-column", "Body"), "f", "s")
 
-    with open(wrong.path, "rb") as handle:
-        with pytest.raises(ConfigurationError, match="no 'Body' column"):
-            open_reader(handle, wrong)
+    with (
+        open(wrong.path, "rb") as handle,
+        pytest.raises(ConfigurationError, match="no 'Body' column"),
+    ):
+        open_reader(handle, wrong)
 
 
 def test_null_column_values_are_dropped_from_a_flat_shard(tmp_path: Path):

@@ -27,7 +27,7 @@ class RunView:
 
     def note(self, message: str) -> None:
         with self.lock:
-            self.notes = (self.notes + [message])[-6:]
+            self.notes = [*self.notes, message][-6:]
 
     def training(self, trainer: Trainer) -> None:
         with self.lock:

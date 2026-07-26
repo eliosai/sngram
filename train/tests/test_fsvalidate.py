@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import sngram
+
 from sngram_train import fsvalidate, metrics
 
 
