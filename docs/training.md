@@ -10,12 +10,12 @@ The Python project in `train/` owns the production run. Rust's
 
 ## Production Run
 
-The run streams The Stack v3 from the Hugging Face Hub with parallel shard
-readers, counts every file in every repository once, vendored files
+The run streams the `blend` corpus from the Hugging Face Hub with parallel
+shard readers, dispatching to whichever family sits furthest below its
+target share of counted bytes, counts every file once with vendored files
 included, checkpoints every minute, and mints one final table when the
-stream ends, stamped with a provenance record naming `stack-v3`, the
-resolved dataset revision, the counted totals, and the realised language
-mix.
+stream ends, stamped with a provenance record naming the corpus, its
+roster fingerprint, the counted totals, and the realised mix.
 
 ```sh
 cd train
@@ -24,22 +24,24 @@ uv run pytest
 uv run sngram train --mint-dir ./runs/r1
 ```
 
-The wire ceiling to the Hub is 100 to 115 MB/s and snappy parquet expands
-about 3.3x, so the counter sees about 340 MB/s of decoded source text with
-ten readers. A full 4.71 TB pass takes about 13 hours at a peak RSS of
+`--corpus stack-v3` runs the single-dataset path instead. The wire ceiling
+to the Hub is 100 to 115 MB/s and snappy parquet expands about 3.3x, so
+the counter sees a few hundred MB/s of decoded text with ten readers. The
+shipped table took about ten hours to count 11.96 TB at a peak RSS of
 about 2.2 GB. The weight table has 65,536 counters, so bigram frequencies
 converge long before the corpus ends; a bounded run is first-class:
 
 ```sh
-uv run sngram train --mint-dir ./smoke --shards 10 --no-dashboard
+uv run sngram train --mint-dir ./smoke --shards 2 --no-dashboard
 uv run sngram train --mint-dir ./smoke2 --limit 20GB --no-dashboard
 ```
 
-`--shards N` consumes exactly the first N shards, so a killed and resumed
-bounded run reproduces the identical table. `--limit` stops at the next
-batch boundary past the cap, so it overshoots on a fast link. The rest of
-the surface is `--mint-dir`, `--workers`, `--checkpoint-every`,
-`--resume/--no-resume`, and `--dashboard/--no-dashboard`.
+`--shards N` consumes exactly the first N shards of every source, so a
+killed and resumed bounded run reproduces the identical table. `--limit`
+stops at the next batch boundary past the cap, so it overshoots on a fast
+link. The rest of the surface is `--mint-dir`, `--corpus`, `--workers`,
+`--checkpoint-every`, `--resume/--no-resume`, and
+`--dashboard/--no-dashboard`.
 
 Interrupt or kill the run at any point. Checkpoints are written at a
 consistent quiesce, with the readers held still, so the counter and every

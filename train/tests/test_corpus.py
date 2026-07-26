@@ -1,120 +1,112 @@
-from types import SimpleNamespace
-
 import pytest
 
-from sngram_train import corpus
+from sngram_train.corpus import (
+    Corpus,
+    CorpusIdentity,
+    CorpusName,
+    Quota,
+    Reading,
+    Shard,
+    Sifted,
+    Tallies,
+    resolve,
+)
 from sngram_train.errors import ConfigurationError
 
-
-class FakeApi:
-    info = None
-
-    def __init__(self, token=None):
-        pass
-
-    def dataset_info(self, repo, files_metadata=False, timeout=None):
-        return FakeApi.info
+READING = Reading("parquet-column", "text")
 
 
-def info_with(files):
-    return SimpleNamespace(
-        sha="rev-abc",
-        siblings=[SimpleNamespace(rfilename=name, size=size) for name, size in files],
+def shard(source: str, size: int) -> Shard:
+    return Shard(f"{source}/{size}", size, READING, source, source)
+
+
+def test_reading_rejects_an_unknown_layout():
+    with pytest.raises(ConfigurationError, match="layout"):
+        Reading("csv", "text")
+
+
+def test_reading_rejects_a_missing_text_field():
+    with pytest.raises(ConfigurationError, match="text field"):
+        Reading("parquet-column", "")
+
+
+def test_identity_stamps_a_short_fingerprint_and_binds_the_full_one():
+    identity = CorpusIdentity("blend", "0123456789abcdef")
+
+    assert identity.stamp() == "blend@0123456789ab"
+    assert identity.binding() == "blend@0123456789abcdef"
+
+
+def test_take_keeps_the_first_shards_of_every_source():
+    corpus = Corpus(
+        CorpusIdentity("blend", "f"),
+        (shard("a", 1), shard("a", 2), shard("b", 4), shard("b", 8)),
     )
 
+    assert corpus.wire_bytes() == 15
+    assert corpus.take(1).wire_bytes() == 5, "one shard per source, not one overall"
+    assert [s.source for s in corpus.take(1).shards] == ["a", "b"]
 
-def test_resolve_corpus_lists_sorted_parquet_shards(monkeypatch):
-    FakeApi.info = info_with(
-        [
-            ("data/part-00001.parquet", 20),
-            ("README.md", 5),
-            ("data/part-00000.parquet", 10),
-            ("data/stats.json", 3),
-        ]
+
+def test_quota_reports_the_tighter_of_the_family_and_source_ceilings():
+    quota = Quota({"fam": 100}, {"src": 40})
+    tallies = Tallies()
+    target = Shard("p", 1, READING, "fam", "src")
+
+    assert quota.remaining(target, tallies) == 40
+    tallies.add(target, 35)
+    assert quota.remaining(target, tallies) == 5
+    tallies.add(target, 50)
+    assert quota.remaining(target, tallies) == 0, "a ceiling never goes negative"
+
+
+def test_tallies_track_bytes_and_completions_per_bucket():
+    tallies = Tallies()
+    target = Shard("p", 1, READING, "fam", "src")
+
+    tallies.add(target, 7)
+    tallies.finish(target)
+
+    assert tallies.family_bytes == {"fam": 7}
+    assert tallies.source_bytes == {"src": 7}
+    assert tallies.family_done == {"fam": 1}
+    assert tallies.source_done == {"src": 1}
+
+
+def sifted_of(*values: str) -> Sifted:
+    import pyarrow as pa
+
+    column = pa.array(list(values), type=pa.string())
+    return Sifted(pa.record_batch([column], names=["content"]), len(values), len(values))
+
+
+def test_head_returns_the_batch_untouched_when_it_fits():
+    batch = sifted_of("abc", "de")
+
+    assert batch.head(5) is batch
+    assert batch.head(99) is batch
+
+
+def test_head_trims_to_the_longest_row_prefix_inside_the_budget():
+    batch = sifted_of("abc", "de", "fghij")
+
+    trimmed = batch.head(6)
+
+    assert trimmed.content.column(0).to_pylist() == ["abc", "de"]
+    assert trimmed.files == 2
+    assert trimmed.head(0).content.num_rows == 0
+
+
+def test_resolve_dispatches_to_the_named_corpus(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        "sngram_train.blend.resolve", lambda token, note: seen.append("blend")
     )
-    monkeypatch.setattr("huggingface_hub.HfApi", FakeApi)
-
-    resolved = corpus.resolve_corpus(token=None)
-
-    assert resolved.revision == "rev-abc"
-    assert [shard.name for shard in resolved.shards] == [
-        "data/part-00000.parquet",
-        "data/part-00001.parquet",
-    ]
-    assert resolved.wire_bytes() == 30
-    assert resolved.take(1).wire_bytes() == 10
-
-
-def test_resolve_corpus_without_shards_fails_with_guidance(monkeypatch):
-    FakeApi.info = info_with([("README.md", 5)])
-    monkeypatch.setattr("huggingface_hub.HfApi", FakeApi)
-
-    with pytest.raises(ConfigurationError, match="parquet shards"):
-        corpus.resolve_corpus(token=None)
-
-
-def test_corpus_repo_honours_the_environment(monkeypatch):
-    monkeypatch.setenv("SNGRAM_DATASET_REPO", "other/repo")
-    assert corpus.corpus_repo() == "other/repo"
-    monkeypatch.delenv("SNGRAM_DATASET_REPO")
-    assert corpus.corpus_repo() == corpus.DEFAULT_REPO
-
-
-class FlakyApi:
-    """Fails the first `fail_times` listings, then succeeds"""
-
-    fail_times = 0
-    error: Exception = RuntimeError("boom")
-    calls: list[float | None] = []
-
-    def __init__(self, token=None):
-        pass
-
-    def dataset_info(self, repo, files_metadata=False, timeout=None):
-        FlakyApi.calls.append(timeout)
-        if len(FlakyApi.calls) <= FlakyApi.fail_times:
-            raise FlakyApi.error
-        return FakeApi.info
-
-
-class ReadTimeoutError(Exception):
-    """Named to match the transient classifier"""
-
-
-def _arm(monkeypatch, error: Exception, fail_times: int):
-    FakeApi.info = info_with([("data/part-00000.parquet", 11)])
-    FlakyApi.calls = []
-    FlakyApi.error = error
-    FlakyApi.fail_times = fail_times
-    monkeypatch.setattr("huggingface_hub.HfApi", FlakyApi)
-    monkeypatch.setattr(corpus, "_LISTING_BACKOFF", 0.0)
-
-
-def test_listing_bounds_each_attempt_with_a_timeout(monkeypatch):
-    _arm(monkeypatch, ReadTimeoutError("stall"), 0)
-
-    corpus.resolve_corpus(None)
-
-    assert FlakyApi.calls == [corpus._LISTING_TIMEOUT], (
-        "a listing with no timeout hangs forever on a half-open socket"
+    monkeypatch.setattr(
+        "sngram_train.stack.resolve", lambda token, note: seen.append("stack")
     )
 
+    resolve(CorpusName.BLEND, None, None)
+    resolve(CorpusName.STACK_V3, None, None)
 
-def test_transient_listing_failure_is_retried(monkeypatch):
-    _arm(monkeypatch, ReadTimeoutError("stall"), 2)
-    notes: list[str] = []
-
-    resolved = corpus.resolve_corpus(None, notes.append)
-
-    assert len(resolved.shards) == 1
-    assert len(FlakyApi.calls) == 3
-    assert any("retrying" in note for note in notes)
-
-
-def test_unexpected_listing_failure_is_not_retried(monkeypatch):
-    _arm(monkeypatch, ValueError("bad credentials"), 5)
-
-    with pytest.raises(ValueError, match="bad credentials"):
-        corpus.resolve_corpus(None)
-
-    assert len(FlakyApi.calls) == 1, "only transport failures deserve a retry"
+    assert seen == ["blend", "stack"]

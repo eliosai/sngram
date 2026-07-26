@@ -48,21 +48,22 @@ def render(trainer: Trainer):
     recent = _recent(trainer)
     if recent is not None:
         parts.append(recent)
-    return Panel(Group(*parts), title="sngram train stack-v3", border_style="blue")
+    title = f"sngram train {trainer.corpus.identity.name}"
+    return Panel(Group(*parts), title=title, border_style="blue")
 
 
 def _header(trainer: Trainer) -> Text:
     header = Text()
     header.append(f"{fmt_bytes(trainer.state.decoded)} decoded", style="bold green")
-    header.append(f" ({trainer.progress():.1%}){_eta(trainer)}")
-    header.append(f"   now {fmt_rate(trainer.rate_now())}", style="cyan")
-    header.append(f"   avg {fmt_rate(trainer.rate_avg())}")
+    header.append(f" ({trainer.progress.fraction():.1%}){_eta(trainer)}")
+    header.append(f"   now {fmt_rate(trainer.progress.rate_now())}", style="cyan")
+    header.append(f"   avg {fmt_rate(trainer.progress.rate_avg())}")
     header.append(
-        f"   wire now {fmt_rate(trainer.wire_rate_now())}"
-        f" avg {fmt_rate(trainer.wire_rate_avg())}",
+        f"   wire now {fmt_rate(trainer.progress.wire_rate_now())}"
+        f" avg {fmt_rate(trainer.progress.wire_rate_avg())}",
         style="dim",
     )
-    header.append(f"\nrepos {trainer.state.repos:,}")
+    header.append(f"\nrows {trainer.state.rows:,}")
     header.append(f"   files {trainer.counter.files_processed:,}")
     header.append(f"   vendor {trainer.state.vendor_files:,}", style="dim")
     header.append(f"   rss {fmt_bytes(_rss_bytes())}", style="dim")
@@ -72,17 +73,17 @@ def _header(trainer: Trainer) -> Text:
 
 
 def _eta(trainer: Trainer) -> str:
-    eta = trainer.eta_seconds()
+    eta = trainer.progress.eta_seconds()
     if eta is None:
         return ""
     return f" in {int(eta // 3600)}:{int(eta % 3600 // 60):02d}:{int(eta % 60):02d}"
 
 
 def _mix(trainer: Trainer) -> Text:
-    ranked = trainer.language_mix(10)
+    ranked = trainer.progress.mix(10)
     if not ranked:
         return Text("mix pending", style="dim")
-    line = "  ".join(f"{language} {share:.1%}" for language, share in ranked)
+    line = "  ".join(f"{bucket} {share:.1%}" for bucket, share in ranked)
     return Text(line, style="dim")
 
 

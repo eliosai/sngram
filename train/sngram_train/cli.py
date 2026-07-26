@@ -9,6 +9,10 @@ from typing import Optional
 
 import typer
 
+from .corpus import CorpusName
+from .errors import ConfigurationError
+from .units import parse_size
+
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
@@ -19,45 +23,45 @@ app = typer.Typer(
 @app.command()
 def train(
     mint_dir: Path = typer.Option(Path("./bins"), help="Output and durable run state."),
+    corpus: CorpusName = typer.Option(CorpusName.BLEND, help="Which corpus to stream."),
     workers: int = typer.Option(10, help="Parallel shard readers."),
     limit: Optional[str] = typer.Option(None, help="Decoded-byte cap for a smoke run."),
-    shards: Optional[int] = typer.Option(None, help="Only the first N shards."),
+    shards: Optional[int] = typer.Option(None, help="Only the first N shards per source."),
     checkpoint_every: float = typer.Option(60.0, help="Checkpoint period in seconds."),
     resume: bool = typer.Option(True, help="Resume from the checkpoint."),
     dashboard: bool = typer.Option(True, help="Show the live terminal dashboard."),
 ) -> None:
-    """Stream the stack-v3 corpus and mint the final weight table."""
-
-    from .errors import ConfigurationError
+    """Stream a training corpus and mint the final weight table."""
 
     _tune_runtime()
     view = _run_view() if dashboard else None
     build = _trainer_factory(
-        mint_dir, workers, limit, shards, checkpoint_every, view.note if view else None
+        mint_dir, corpus, workers, limit, shards, checkpoint_every,
+        view.note if view else None,
     )
     try:
         trainer = _dashboard_run(build, resume, view)
     except ConfigurationError as error:
         typer.echo(f"error: {error}")
         raise typer.Exit(2) from error
-    typer.echo(f"done: {trainer.describe_progress()}")
+    typer.echo(f"done: {trainer.progress.describe()}")
 
 
 def _trainer_factory(
     mint_dir: Path,
+    corpus: CorpusName,
     workers: int,
     limit: Optional[str],
     shards: Optional[int],
     checkpoint_every: float,
     note=None,
 ):
-    from .units import parse_size
-
     cap = parse_size(limit) if limit else None
 
     def build(resume_now: bool):
         return _production_trainer(
             mint_dir=mint_dir,
+            corpus=corpus,
             workers=workers,
             limit=cap,
             shards=shards,
@@ -112,6 +116,7 @@ def _dashboard_run(build, resume: bool, view):
 def _production_trainer(
     *,
     mint_dir: Path,
+    corpus: CorpusName,
     workers: int,
     limit: Optional[int],
     shards: Optional[int],
@@ -119,20 +124,21 @@ def _production_trainer(
     resume: bool,
     note=None,
 ):
+    from . import corpus as corpora
     from .config import hf_token
-    from .corpus import HubShards, resolve_corpus
+    from .hub import HubShards
     from .pipeline import Trainer, TrainerConfig
 
     token = hf_token()
-    corpus = resolve_corpus(token, note)
+    resolved = corpora.resolve(corpus, token, note)
     if shards is not None:
-        corpus = corpus.take(shards)
+        resolved = resolved.take(shards)
     config = TrainerConfig(mint_dir, workers, checkpoint_interval, limit, resume)
-    return Trainer(corpus, HubShards(corpus, token), config)
+    return Trainer(resolved, HubShards(token), config)
 
 
 def _run_until_done(build, resume: bool, view):
-    from .errors import ConfigurationError, is_transient
+    from .errors import is_transient
 
     attempt = 0
     delay = 5.0
@@ -198,7 +204,7 @@ def fs_histogram(
     """Measure the byte-pair distribution of text files."""
 
     from . import fsvalidate
-    from .units import fmt_bytes, parse_size
+    from .units import fmt_bytes
 
     counts, stats = fsvalidate.filesystem_histogram(
         [str(root) for root in roots], cap=parse_size(cap) if cap else None
@@ -240,7 +246,6 @@ def fs_validate(
     import sngram
 
     from . import fsvalidate
-    from .units import parse_size
 
     table = sngram.WeightTable.from_path(table_path)
     counts, _stats = fsvalidate.filesystem_histogram(

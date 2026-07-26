@@ -1,27 +1,33 @@
 import os
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
 from sngram_train import cli
+from sngram_train.corpus import CorpusName
 from sngram_train.errors import ConfigurationError
 
 
-def test_train_defaults_to_the_full_corpus(monkeypatch, tmp_path):
-    captured = {}
+def capture_build(monkeypatch) -> dict:
+    captured: dict = {}
 
     class FakeTrainer:
         def run(self):
             captured["ran"] = True
 
-        def describe_progress(self):
-            return "complete"
+        progress = SimpleNamespace(describe=lambda: "complete")
 
     def fake_build(**kwargs):
         captured.update(kwargs)
         return FakeTrainer()
 
     monkeypatch.setattr(cli, "_production_trainer", fake_build)
+    return captured
+
+
+def test_train_defaults_to_the_whole_blend(monkeypatch, tmp_path):
+    captured = capture_build(monkeypatch)
 
     result = CliRunner().invoke(
         cli.app,
@@ -29,10 +35,40 @@ def test_train_defaults_to_the_full_corpus(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0, result.output
+    assert captured["corpus"] is CorpusName.BLEND
     assert captured["limit"] is None
     assert captured["shards"] is None
     assert captured["ran"] is True
     assert "complete" in result.output
+
+
+def test_stack_v3_stays_selectable(monkeypatch, tmp_path):
+    captured = capture_build(monkeypatch)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "train", "--mint-dir", str(tmp_path / "bins"),
+            "--corpus", "stack-v3", "--no-dashboard",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["corpus"] is CorpusName.STACK_V3
+
+
+def test_an_unknown_corpus_is_refused(monkeypatch, tmp_path):
+    capture_build(monkeypatch)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "train", "--mint-dir", str(tmp_path / "bins"),
+            "--corpus", "the-pile", "--no-dashboard",
+        ],
+    )
+
+    assert result.exit_code != 0
 
 
 def test_cli_keeps_table_inspection_and_validation_commands():
@@ -49,8 +85,7 @@ def test_train_bounds_hugging_face_request_time(monkeypatch, tmp_path):
         def run(self):
             pass
 
-        def describe_progress(self):
-            return "complete"
+        progress = SimpleNamespace(describe=lambda: "complete")
 
     monkeypatch.delenv("HF_HUB_DOWNLOAD_TIMEOUT", raising=False)
     monkeypatch.delenv("HF_HUB_ETAG_TIMEOUT", raising=False)

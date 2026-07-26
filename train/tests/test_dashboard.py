@@ -7,7 +7,7 @@ from tests.localcorpus import code_repos, write_corpus
 from tests.test_pipeline import build
 
 
-def test_dashboard_shows_rates_progress_and_language_mix(tmp_path: Path):
+def test_dashboard_shows_rates_progress_and_the_mix(tmp_path: Path):
     corpus, source = write_corpus(tmp_path / "corpus", [code_repos(6)])
     trainer = build(tmp_path, corpus, source)
     trainer.run()
@@ -20,7 +20,7 @@ def test_dashboard_shows_rates_progress_and_language_mix(tmp_path: Path):
     assert "now" in output and "avg" in output
     assert "wire now" in output
     assert "vendor" in output and "skipped" not in output
-    assert "repos" in output
+    assert "rows" in output
     assert "Rust" in output
 
 

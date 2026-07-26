@@ -5,9 +5,17 @@ from pathlib import Path
 import pytest
 import sngram
 
+from sngram_train.corpus import CorpusIdentity
 from sngram_train.errors import ConfigurationError
 from sngram_train.pipeline import Trainer, TrainerConfig
-from tests.localcorpus import code_repos, decoded_bytes, repo, write_corpus
+from tests.localcorpus import (
+    blend_corpus,
+    blend_rows,
+    code_repos,
+    decoded_bytes,
+    repo,
+    write_corpus,
+)
 
 
 def build(tmp_path: Path, corpus, source, limit=None, resume=False, interval=3600.0):
@@ -57,7 +65,7 @@ def test_full_stream_counts_every_repo_and_mints_final(tmp_path: Path):
 
     assert trainer.counter.bytes_processed == decoded_bytes(shards)
     assert trainer.state.decoded == decoded_bytes(shards)
-    assert trainer.state.repos == 10
+    assert trainer.state.rows == 10
     assert trainer.counter.files_processed == 30
     assert trainer.state.langs == {"Rust": decoded_bytes(shards)}
     table = sngram.WeightTable.from_path(tmp_path / "bins" / "final_weights.bin")
@@ -129,9 +137,18 @@ def test_checkpoint_rejects_a_different_corpus_revision(tmp_path: Path):
     corpus, source = write_corpus(tmp_path / "corpus", [code_repos(4)])
     build(tmp_path, corpus, source).run()
 
-    drifted = replace(corpus, revision="other")
-    with pytest.raises(ConfigurationError, match="revision"):
+    drifted = replace(corpus, identity=CorpusIdentity("stack-v3", "other"))
+    with pytest.raises(ConfigurationError, match="another revision"):
         build(tmp_path, drifted, source, resume=True)
+
+
+def test_a_run_refuses_to_resume_into_a_different_corpus(tmp_path: Path):
+    corpus, source = write_corpus(tmp_path / "corpus", [code_repos(4)])
+    build(tmp_path, corpus, source).run()
+
+    other = replace(corpus, identity=CorpusIdentity("blend", corpus.identity.fingerprint))
+    with pytest.raises(ConfigurationError, match="corpus 'stack-v3'"):
+        build(tmp_path, other, source, resume=True)
 
 
 def test_no_resume_starts_a_fresh_run(tmp_path: Path):
@@ -148,12 +165,12 @@ def test_no_resume_starts_a_fresh_run(tmp_path: Path):
 def test_eta_with_a_limit_uses_the_average_decoded_rate(tmp_path: Path):
     corpus, source = write_corpus(tmp_path / "corpus", [code_repos(2)])
     trainer = build(tmp_path, corpus, source, limit=10_000)
-    trainer.meter.started_at = time.monotonic() - 10.0
+    trainer.progress.decoded.started_at = time.monotonic() - 10.0
     trainer.state.decoded = 5_000
-    trainer.meter.sample(0)
-    trainer.meter.sample(5_000)
+    trainer.progress.decoded.sample(0)
+    trainer.progress.decoded.sample(5_000)
 
-    eta = trainer.eta_seconds()
+    eta = trainer.progress.eta_seconds()
 
     assert eta is not None
     assert 8.0 < eta < 12.0
@@ -162,12 +179,12 @@ def test_eta_with_a_limit_uses_the_average_decoded_rate(tmp_path: Path):
 def test_eta_without_a_limit_uses_the_average_wire_rate(tmp_path: Path):
     corpus, source = write_corpus(tmp_path / "corpus", [code_repos(2)])
     trainer = build(tmp_path, corpus, source)
-    trainer.wire_meter.started_at = time.monotonic() - 10.0
+    trainer.progress.wire.started_at = time.monotonic() - 10.0
     trainer.state.shard_bytes = trainer.wire_target // 2
-    trainer.wire_meter.sample(0)
-    trainer.wire_meter.sample(trainer.state.shard_bytes)
+    trainer.progress.wire.sample(0)
+    trainer.progress.wire.sample(trainer.state.shard_bytes)
 
-    eta = trainer.eta_seconds()
+    eta = trainer.progress.eta_seconds()
 
     assert eta is not None
     assert 8.0 < eta < 12.0
@@ -181,4 +198,66 @@ def test_resumed_run_average_rate_starts_from_zero(tmp_path: Path):
     resumed = build(tmp_path, corpus, source, resume=True)
 
     assert resumed.state.decoded == decoded_bytes(shards)
-    assert resumed.rate_avg() < 1.0
+    assert resumed.progress.rate_avg() < 1.0
+
+
+BLEND_SOURCES = {"wide": blend_rows("w", 40), "narrow": blend_rows("n", 40)}
+
+
+def blend_run(tmp_path: Path, caps: dict[str, int], workers: int = 1):
+    corpus, opener = blend_corpus(tmp_path / "corpus", BLEND_SOURCES, caps)
+    config = TrainerConfig(tmp_path / "bins", workers, 3600.0, None, False)
+    trainer = Trainer(corpus, opener, config)
+    trainer.run()
+    return trainer
+
+
+def test_a_blend_run_enforces_every_byte_ceiling(tmp_path: Path):
+    trainer = blend_run(tmp_path, {"wide": 750, "narrow": 250})
+
+    assert trainer.state.tallies.family_bytes == {"wide": 750, "narrow": 250}
+    assert trainer.state.decoded == 1000
+    assert trainer.counter.bytes_processed == 1000
+
+
+def test_a_blend_ceiling_trims_the_boundary_batch_rather_than_overshooting(tmp_path):
+    trainer = blend_run(tmp_path, {"wide": 250, "narrow": 130})
+
+    assert trainer.state.tallies.family_bytes == {"wide": 250, "narrow": 130}
+    assert trainer.state.decoded == 380, "the last shard lands in part, not whole"
+
+
+def test_a_blend_run_stamps_its_corpus_and_family_mix(tmp_path: Path):
+    trainer = blend_run(tmp_path, {"wide": 750, "narrow": 250})
+
+    table = sngram.WeightTable.from_path(tmp_path / "bins" / "final_weights.bin")
+    assert "blend@fingerprint-" in table.provenance
+    assert "wide 75.0%" in table.provenance
+    assert "narrow 25.0%" in table.provenance
+
+
+def test_an_interrupted_blend_resumes_to_the_identical_table(tmp_path: Path):
+    caps = {"wide": 750, "narrow": 250}
+    corpus, opener = blend_corpus(tmp_path / "corpus", BLEND_SOURCES, caps)
+
+    stopped = Trainer(
+        corpus,
+        InterruptingShards(opener, 4),
+        TrainerConfig(tmp_path / "run", 1, 3600.0, None, False),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        stopped.run()
+
+    resumed = Trainer(
+        corpus, opener, TrainerConfig(tmp_path / "run", 1, 3600.0, None, True)
+    )
+    resumed.run()
+    reference = Trainer(
+        corpus, opener, TrainerConfig(tmp_path / "reference", 1, 3600.0, None, False)
+    )
+    reference.run()
+
+    assert resumed.state.tallies.family_bytes == {"wide": 750, "narrow": 250}
+    assert (tmp_path / "run" / "final_weights.bin").read_bytes() == (
+        tmp_path / "reference" / "final_weights.bin"
+    ).read_bytes()

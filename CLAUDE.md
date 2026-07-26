@@ -50,7 +50,12 @@ Do not expose table internals, filenames, constants, or low-level lookup helpers
 
 `crates/python` is the standalone `sngram` Python library. It is a maturin project: the pyo3 bindings crate, the `sngram/` wrapper package, the pyproject, and the lib tests live together in that one directory. It exposes the scan/query core, the embedded production weight table, and the GIL-free training counters. It ships no CLI and no runtime dependencies. This is the package that goes to PyPI.
 
-`train/` is the `sngram-train` project: the corpus training pipeline and the `sngram` training CLI. It depends on the library by path and trains on The Stack v3 (`HuggingFaceCode/stack-v3-train`, ODC-By, ungated). It streams the parquet shards from the Hugging Face Hub, reads file content inline from `files[].content`, counts byte pairs through Rust, checkpoints every minute at a consistent quiesce, resumes byte-exactly, and mints one provenance-stamped final table. There is no separate object store and no per-file fetch. Keep `.env` under `train/.env`; reading the dataset uses the Hugging Face token there.
+`train/` is the `sngram-train` project: the corpus training pipeline and the `sngram` training CLI. It depends on the library by path and streams from the Hugging Face Hub. It trains on one of two corpora, chosen with `--corpus`:
+
+- `blend` (default, production): nine families over 38 sources with per-family and per-source byte ceilings summing to 15 TB. A planner feeds the counter from whichever family is furthest below its target share of counted bytes, so a mint holds the intended mix rather than raw dataset sizes.
+- `stack-v3`: the single-dataset path (`HuggingFaceCode/stack-v3-train`, ODC-By, ungated), file content inline in `files[].content`, one row per repository.
+
+Sources differ by file layout (nested stack shards, flat parquet columns, gzipped JSON lines) and by text field (`content`, `text`, `Body`). The trainer counts byte pairs through Rust, checkpoints every minute at a consistent quiesce, resumes byte-exactly, and mints one provenance-stamped final table naming whichever corpus ran. A checkpoint is bound to the corpus name and its pinned revisions, so resuming into a different corpus is refused. Keep `.env` under `train/.env`; reading the data uses the Hugging Face token there.
 
 Useful commands:
 
@@ -62,12 +67,13 @@ uv run pytest
 cd train
 uv sync
 uv run pytest
-uv run sngram train --shards 10 --no-dashboard
+uv run sngram train --shards 2 --no-dashboard
 uv run sngram train --mint-dir ./runs/r1
+uv run sngram train --corpus stack-v3
 uv run sngram inspect runs/r1/final_weights.bin
 ```
 
-The `train` options are `--mint-dir`, `--workers`, `--limit`, `--shards`, `--checkpoint-every`, `--resume/--no-resume`, and `--dashboard/--no-dashboard`.
+The `train` options are `--mint-dir`, `--corpus`, `--workers`, `--limit`, `--shards`, `--checkpoint-every`, `--resume/--no-resume`, and `--dashboard/--no-dashboard`. `--shards N` bounds a run to the first N shards of every source.
 
 ### `eg`
 

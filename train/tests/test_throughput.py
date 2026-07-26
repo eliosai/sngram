@@ -14,9 +14,10 @@ class LatencyShards:
         self.slow = slow
         self.slow_delay = slow_delay
 
-    def open(self, name):
-        time.sleep(self.slow_delay if name in self.slow else self.delay)
-        return self.inner.open(name)
+    def open(self, shard):
+        delay = self.slow_delay if shard.path in self.slow else self.delay
+        time.sleep(delay)
+        return self.inner.open(shard)
 
 
 def run_trainer(tmp_path: Path, corpus, source, workers):
@@ -47,7 +48,7 @@ def test_parallel_workers_overlap_shard_reads(tmp_path: Path):
 def test_one_slow_shard_does_not_stall_the_run(tmp_path: Path):
     shards = [code_repos(4) for _ in range(12)]
     corpus, source = write_corpus(tmp_path / "corpus", shards)
-    slow = {corpus.shards[5].name}
+    slow = {corpus.shards[5].path}
 
     trainer, wall = run_trainer(
         tmp_path,

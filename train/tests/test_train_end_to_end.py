@@ -11,19 +11,18 @@ SHARDS = [code_repos(8) for _ in range(3)]
 
 def patch_hub(monkeypatch, tmp_path: Path):
     corpus, source = write_corpus(tmp_path / "corpus", SHARDS)
-    monkeypatch.setattr(
-        "sngram_train.corpus.resolve_corpus", lambda token, note=None: corpus
-    )
-    monkeypatch.setattr(
-        "sngram_train.corpus.HubShards", lambda corpus, token: source
-    )
+    monkeypatch.setattr("sngram_train.stack.resolve", lambda token, note=None: corpus)
+    monkeypatch.setattr("sngram_train.hub.HubShards", lambda token: source)
 
 
 def train_command(monkeypatch, tmp_path: Path, *arguments):
     patch_hub(monkeypatch, tmp_path)
     return CliRunner().invoke(
         cli.app,
-        ["train", "--mint-dir", str(tmp_path / "bins"), "--workers", "3", *arguments],
+        [
+            "train", "--mint-dir", str(tmp_path / "bins"),
+            "--corpus", "stack-v3", "--workers", "3", *arguments,
+        ],
     )
 
 
@@ -88,7 +87,7 @@ def test_train_without_a_readable_dataset_fails_with_guidance(monkeypatch, tmp_p
     def missing(token, note=None):
         raise ConfigurationError("cannot read dataset local/missing")
 
-    monkeypatch.setattr("sngram_train.corpus.resolve_corpus", missing)
+    monkeypatch.setattr("sngram_train.blend.resolve", missing)
     result = CliRunner().invoke(
         cli.app,
         ["train", "--mint-dir", str(tmp_path / "bins"), "--no-dashboard"],

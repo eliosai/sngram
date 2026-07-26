@@ -1,102 +1,155 @@
-"""Stack v3 corpus identity and shard access."""
+"""The shapes every training corpus shares, and the choice between them."""
 
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
+
+import pyarrow as pa
+import pyarrow.compute as pc
 
 from .errors import ConfigurationError
 
-DEFAULT_REPO = "HuggingFaceCode/stack-v3-train"
-
-_BLOCK_SIZE = 8 * 2**20
-
-# seconds before one shard listing attempt is abandoned
-_LISTING_TIMEOUT = 30.0
-
-_LISTING_ATTEMPTS = 5
-
-_LISTING_BACKOFF = 3.0
+LAYOUTS = ("stack-files", "parquet-column", "json-lines")
 
 
-def corpus_repo() -> str:
-    return os.environ.get("SNGRAM_DATASET_REPO", DEFAULT_REPO)
+class CorpusName(str, Enum):
+    """The corpora a training run can be pointed at"""
+
+    BLEND = "blend"
+    STACK_V3 = "stack-v3"
+
+
+@dataclass(frozen=True)
+class Reading:
+    """How one shard yields text: its file layout and its text column"""
+
+    layout: str
+    field: str
+
+    def __post_init__(self) -> None:
+        if self.layout not in LAYOUTS:
+            raise ConfigurationError(f"unknown shard layout {self.layout!r}")
+        if not self.field:
+            raise ConfigurationError(f"{self.layout} shards need a text field")
 
 
 @dataclass(frozen=True)
 class Shard:
-    """One parquet shard file in the dataset"""
+    """One streamable file and the buckets its bytes count against"""
+
+    path: str
+    size: int
+    reading: Reading
+    family: str
+    source: str
+
+
+@dataclass(frozen=True)
+class CorpusIdentity:
+    """Name and content fingerprint of the corpus a run is bound to"""
 
     name: str
-    size: int
+    fingerprint: str
+
+    def stamp(self) -> str:
+        return f"{self.name}@{self.fingerprint[:12]}"
+
+    def binding(self) -> str:
+        return f"{self.name}@{self.fingerprint}"
+
+
+@dataclass
+class Tallies:
+    """Counted bytes and completed shards per family and per source"""
+
+    family_bytes: dict[str, int] = field(default_factory=dict)
+    family_done: dict[str, int] = field(default_factory=dict)
+    source_bytes: dict[str, int] = field(default_factory=dict)
+    source_done: dict[str, int] = field(default_factory=dict)
+
+    def add(self, shard: Shard, amount: int) -> None:
+        self.family_bytes[shard.family] = self.family_bytes.get(shard.family, 0) + amount
+        self.source_bytes[shard.source] = self.source_bytes.get(shard.source, 0) + amount
+
+    def finish(self, shard: Shard) -> None:
+        self.family_done[shard.family] = self.family_done.get(shard.family, 0) + 1
+        self.source_done[shard.source] = self.source_done.get(shard.source, 0) + 1
+
+
+@dataclass(frozen=True)
+class Quota:
+    """Byte ceilings per family and per source"""
+
+    families: dict[str, int]
+    sources: dict[str, int]
+
+    def remaining(self, shard: Shard, tallies: Tallies) -> int:
+        family = self.families[shard.family] - tallies.family_bytes.get(shard.family, 0)
+        source = self.sources[shard.source] - tallies.source_bytes.get(shard.source, 0)
+        return max(min(family, source), 0)
 
 
 @dataclass(frozen=True)
 class Corpus:
-    """The resolved dataset: repo, pinned revision, shard listing"""
+    """A resolved shard list with its identity and byte ceilings"""
 
-    repo: str
-    revision: str
+    identity: CorpusIdentity
     shards: tuple[Shard, ...]
+    quota: Quota | None = None
 
     def wire_bytes(self) -> int:
         return sum(shard.size for shard in self.shards)
 
     def take(self, count: int) -> Corpus:
-        return Corpus(self.repo, self.revision, self.shards[:count])
+        """The first `count` shards of every source."""
+
+        seen: dict[str, int] = {}
+        kept = []
+        for shard in self.shards:
+            seen[shard.source] = seen.get(shard.source, 0) + 1
+            if seen[shard.source] <= count:
+                kept.append(shard)
+        return Corpus(self.identity, tuple(kept), self.quota)
 
 
-def resolve_corpus(token: str | None, note=None) -> Corpus:
-    """Pin the dataset revision and list its parquet shards with sizes."""
+@dataclass(frozen=True)
+class Sifted:
+    """One decoded batch reduced to countable content"""
 
-    info = _dataset_info(token, note)
-    shards = tuple(
-        Shard(entry.rfilename, entry.size or 0)
-        for entry in sorted(info.siblings, key=lambda entry: entry.rfilename)
-        if entry.rfilename.startswith("data/") and entry.rfilename.endswith(".parquet")
-    )
-    if not shards:
-        raise ConfigurationError(f"{corpus_repo()} has no parquet shards under data/")
-    return Corpus(corpus_repo(), info.sha, shards)
+    content: pa.RecordBatch
+    rows: int
+    files: int
+    # vendor flagged files, included in the counts
+    vendor_files: int = 0
+    lang_bytes: dict[str, int] = field(default_factory=dict)
 
+    def head(self, limit: int) -> Sifted:
+        """The longest row prefix whose content fits a byte budget."""
 
-def _dataset_info(token: str | None, note):
-    """Fetch the listing, bounding every attempt so a stalled socket cannot hang."""
-
-    import time
-
-    from huggingface_hub import HfApi
-    from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
-
-    from .errors import is_transient
-
-    api = HfApi(token=token)
-    for attempt in range(_LISTING_ATTEMPTS):
-        if note is not None:
-            note(f"listing {corpus_repo()} shards (attempt {attempt + 1})")
-        try:
-            return api.dataset_info(
-                corpus_repo(), files_metadata=True, timeout=_LISTING_TIMEOUT
-            )
-        except (RepositoryNotFoundError, GatedRepoError) as error:
-            raise ConfigurationError(f"cannot read dataset {corpus_repo()}") from error
-        except Exception as error:
-            if not is_transient(error) or attempt + 1 == _LISTING_ATTEMPTS:
-                raise
-            if note is not None:
-                note(f"listing failed ({error}); retrying")
-            time.sleep(_LISTING_BACKOFF * (attempt + 1))
-    raise ConfigurationError(f"cannot list {corpus_repo()} shards")
+        lengths = pc.fill_null(pc.binary_length(self.content.column(0)), 0)
+        if (pc.sum(lengths).as_py() or 0) <= limit:
+            return self
+        kept = _prefix_rows(lengths, limit)
+        return Sifted(self.content.slice(0, kept), self.rows, kept)
 
 
-class HubShards:
-    """Random access shard reads over the Hub filesystem."""
+def _prefix_rows(lengths: pa.Array, limit: int) -> int:
+    total = 0
+    for index, length in enumerate(lengths.to_pylist()):
+        if total + length > limit:
+            return index
+        total += length
+    return len(lengths)
 
-    def __init__(self, corpus: Corpus, token: str | None) -> None:
-        from huggingface_hub import HfFileSystem
 
-        self._prefix = f"datasets/{corpus.repo}@{corpus.revision}"
-        self._fs = HfFileSystem(token=token)
+def resolve(name: CorpusName, token: str | None, note=None) -> Corpus:
+    """Pin the chosen corpus and list every shard it will stream."""
 
-    def open(self, name: str):
-        return self._fs.open(f"{self._prefix}/{name}", "rb", block_size=_BLOCK_SIZE)
+    if name is CorpusName.BLEND:
+        from . import blend
+
+        return blend.resolve(token, note)
+    from . import stack
+
+    return stack.resolve(token, note)
