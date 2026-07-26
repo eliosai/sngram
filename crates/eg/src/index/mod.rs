@@ -17,6 +17,7 @@ mod merge;
 mod planner;
 mod postings;
 mod progress;
+mod readiness;
 mod request;
 mod roots;
 mod runtime;
@@ -31,14 +32,13 @@ mod walk;
 use std::{
     collections::BTreeSet,
     fmt::{self, Write as FmtWrite},
-    time::Duration,
     time::Instant,
 };
 
 use anyhow::bail;
 use catalog::GenerationCatalog;
 use generation::Generation;
-use request::{SearchRequest, Unsupported, unsupported};
+use request::{Requested, SearchRequest, Unsupported, refuse};
 use roots::{SearchRoots, absolute_path};
 use sngram_types::QueryPlan;
 
@@ -103,11 +103,14 @@ fn run_bench(args: &HiArgs) -> anyhow::Result<bool> {
 
 fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyhow::Result<bool> {
     let parse_started_at = Instant::now();
-    let request = SearchRequest::from_args(args);
+    let requested = SearchRequest::from_args(args);
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_parse_request(parse_started_at);
     }
-    let request = request?;
+    let request = match requested? {
+        Requested::Indexed(request) => request,
+        Requested::Refused(reason) => return scan_unsupported(args, reason),
+    };
     if !request.matches_possible() {
         return Ok(false);
     }
@@ -138,7 +141,7 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
             {
                 report.reject_too_broad();
             }
-            return unsupported(reason);
+            return scan_unsupported(args, reason);
         },
     };
     if let Some(report) = bench.as_deref_mut() {
@@ -178,13 +181,22 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     }
     if cold_build {
         let register_started_at = Instant::now();
-        lease.request_refresh()?;
+        if let Err(err) = lease.request_refresh() {
+            if args.index().bench() {
+                return Err(err.into());
+            }
+            let reason = format!("the index daemon could not be reached: {err}");
+            return readiness::scan_instead(args, mode, &reason);
+        }
         if let Some(report) = bench.as_deref_mut() {
             report.timing_mut().set_daemon_register(register_started_at);
             report.timing_mut().set_daemon_start(register_started_at);
         }
         let build_started_at = Instant::now();
-        ensure_daemon_index_ready(&generation, !args.index().bench())?;
+        let policy = readiness::WaitPolicy::for_query(args, &generation);
+        if let Some(reason) = readiness::ensure_index_ready(&generation, policy)? {
+            return readiness::scan_instead(args, mode, reason.as_str());
+        }
         if let Some(report) = bench.as_deref_mut() {
             if let Some(build_timings) = bench::read_build_timings(generation.state_root())? {
                 report.timing_mut().merge_build(&build_timings);
@@ -217,7 +229,7 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
         if let Some(report) = bench.as_deref_mut() {
             report.reject_selectivity();
         }
-        return unsupported(Unsupported::TooManyCandidates);
+        return scan_unsupported(args, Unsupported::TooManyCandidates);
     };
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_index_lookup(query_started_at);
@@ -251,87 +263,25 @@ fn run_inner(args: &HiArgs, mut bench: Option<&mut bench::BenchReport>) -> anyho
     Ok(matched)
 }
 
-const COLD_BUILD_WAIT: Duration = Duration::from_secs(60 * 60);
-const COLD_PROGRESS_POLL: Duration = Duration::from_millis(100);
-const DAEMON_GONE_GRACE: Duration = Duration::from_secs(5);
-
-fn ensure_daemon_index_ready(generation: &Generation, show_progress: bool) -> anyhow::Result<()> {
-    if !runtime::daemon_watch_supported() {
-        bail!("indexed daemon search requires Linux filesystem watch support; use --no-index");
-    }
-    let started = Instant::now();
-    let lease = runtime::Lease::new(generation.index_root(), generation.state_root());
-    let catching_up = generation.source() == "stale";
-    let wake_floor = runtime::wake_mtime(generation.state_root());
-    let mut progress = progress::BuildProgressRenderer::new(show_progress, catching_up);
-    let mut daemon_gone_since = None;
-    loop {
-        progress.tick(generation.state_root());
-        check_daemon_available(&mut daemon_gone_since)?;
-        check_tree_is_watchable(generation)?;
-        if catching_up
-            && let Some(floor) = wake_floor
-            && runtime::daemon_caught_up_since(generation.state_root(), floor)
-        {
-            progress.finish();
-            return Ok(());
-        }
-        if wait_one_proof_poll(generation, &lease, started)? {
-            progress.finish();
-            return Ok(());
-        }
-    }
-}
-
-/// Fail fast when the daemon cannot watch this tree for changes
-fn check_tree_is_watchable(generation: &Generation) -> anyhow::Result<()> {
-    let Some(reason) = runtime::watch_refusal(generation.state_root()) else {
-        return Ok(());
+/// Serve a query the index cannot express through the exact unindexed scan.
+///
+/// The index is only a prefilter, so the scan is always a valid answer to a
+/// query the planner refuses. `--bench` still reports the refusal, because the
+/// suite counts refused rows rather than measuring the scan behind them.
+fn scan_unsupported(args: &HiArgs, reason: Unsupported) -> anyhow::Result<bool> {
+    let crate::flags::Mode::Search(mode) = args.mode() else {
+        return refuse(reason);
     };
-    bail!(
-        "indexed search cannot watch {} for changes.\n\nwhy: {reason}.\nwhat works: raise `fs.inotify.max_user_watches`, raise `EG_INDEXD_WATCH_BUDGET`, search a narrower path, or pass `--no-index` for an exact unindexed scan.",
-        generation.index_root().display()
-    )
-}
-
-/// Tolerate a daemon-liveness misread briefly before failing the query
-fn check_daemon_available(gone_since: &mut Option<Instant>) -> anyhow::Result<()> {
-    if !runtime::daemon_autospawn_disabled() || runtime::daemon_running() {
-        *gone_since = None;
-        return Ok(());
+    if args.index().bench() {
+        return refuse(reason);
     }
-    let since = gone_since.get_or_insert_with(Instant::now);
-    if since.elapsed() > DAEMON_GONE_GRACE {
-        bail!("indexed search needs eg-indexd when daemon autospawn is disabled");
+    if args.index().is_explicit() {
+        eprintln_locked!(
+            "the sparse index cannot serve {}; searching without it",
+            reason.what()
+        );
     }
-    std::thread::sleep(COLD_PROGRESS_POLL);
-    Ok(())
-}
-
-/// One bounded proof poll; true means the index is ready to serve
-fn wait_one_proof_poll(
-    generation: &Generation,
-    lease: &runtime::Lease<'_>,
-    started: Instant,
-) -> anyhow::Result<bool> {
-    let remaining = COLD_BUILD_WAIT.saturating_sub(started.elapsed());
-    let poll = remaining.min(COLD_PROGRESS_POLL);
-    match runtime::wait_for_freshness_proof(generation.state_root(), poll) {
-        runtime::ProofWait::Ready => return Ok(true),
-        runtime::ProofWait::DaemonStopped if !runtime::daemon_autospawn_disabled() => {
-            if started.elapsed() < COLD_BUILD_WAIT {
-                lease.request_refresh()?;
-                return Ok(false);
-            }
-        },
-        runtime::ProofWait::DaemonStopped => return Ok(false),
-        runtime::ProofWait::TimedOut if started.elapsed() < COLD_BUILD_WAIT => return Ok(false),
-        runtime::ProofWait::TimedOut => {},
-    }
-    bail!(
-        "timed out waiting for daemon-owned index at {}",
-        generation.index_dir().display()
-    );
+    readiness::scan_instead(args, mode, reason.what())
 }
 
 const DEBUG_PLAN_PREVIEW_BYTES: usize = 4096;

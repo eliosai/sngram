@@ -257,7 +257,8 @@ fn ensure_daemon() -> io::Result<()> {
     let Some(source) = daemon_source_binary() else {
         return Err(io::Error::new(
             ErrorKind::NotFound,
-            "eg-indexd binary was not found next to eg",
+            "no eg-indexd binary next to eg, so no daemon can own an index; \
+             install eg-indexd alongside eg, or pass --no-index to scan directly",
         ));
     };
     fs::create_dir_all(&runtime_root)?;

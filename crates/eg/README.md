@@ -26,9 +26,15 @@ eg 'max_\w+_size' ~/src/linux
 eg --no-index 'max_\w+_size' ~/src/linux   # plain scan, no index used
 ```
 
-Some queries the index cannot serve: an inverted match, a read from stdin, a
-pattern with no literal run of three bytes. Those exit 2 with an explanation
-that names `--no-index` as the way to run them anyway.
+Every ripgrep invocation works. When the index cannot serve a query, `eg`
+searches without it and returns the same results a scan would, just
+slower. That covers flags the sparse grams cannot express (`-v`,
+`--passthru`, `-a`, `-z`, `--pre`, `-E`, `-P`, `--null-data`), stdin
+pipes, patterns with no selective n-gram, and patterns that select so
+much of the corpus that verifying candidates costs more than scanning.
+`--debug` names the reason; an invocation that named `--index` explicitly
+gets one line on stderr. Only real errors, an invalid regex or a missing
+path, still fail.
 
 ## Upgrading to 0.7
 

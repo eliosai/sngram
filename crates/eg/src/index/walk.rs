@@ -6,7 +6,7 @@ use crate::{flags::HiArgs, haystack::Haystack};
 
 use super::{
     progress::BuildProgress,
-    request::{Unsupported, unsupported},
+    request::{Unsupported, refuse},
     roots::absolute_path,
 };
 
@@ -54,7 +54,7 @@ pub fn collect_haystacks(
     let mut haystacks = Vec::new();
     for haystack in args.sort(unsorted.into_iter()) {
         if haystack.is_stdin() {
-            return unsupported(Unsupported::Stdin);
+            return refuse(Unsupported::Stdin);
         }
         haystacks.push(haystack);
     }

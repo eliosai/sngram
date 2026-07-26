@@ -50,6 +50,8 @@ pub struct IndexConfig {
     dir: Option<PathBuf>,
     /// Emit indexed-search benchmark data instead of match output.
     bench: bool,
+    /// The invocation named an index flag rather than taking the default.
+    explicit: bool,
 }
 
 impl IndexConfig {
@@ -59,6 +61,7 @@ impl IndexConfig {
             "auto" => IndexUse::Enabled,
             other => anyhow::bail!("unrecognized index mode '{other}', expected auto"),
         };
+        self.explicit = true;
         Ok(())
     }
 
@@ -71,6 +74,7 @@ impl IndexConfig {
                 anyhow::bail!("unrecognized index backend '{other}', expected postings or tantivy")
             },
         };
+        self.explicit = true;
         self.enable_if_disabled();
         Ok(())
     }
@@ -78,6 +82,7 @@ impl IndexConfig {
     /// Store an explicit index-state directory and enable the index if needed.
     pub fn set_dir(&mut self, dir: PathBuf) {
         self.dir = Some(dir);
+        self.explicit = true;
         self.enable_if_disabled();
     }
 
@@ -104,6 +109,11 @@ impl IndexConfig {
 
     pub const fn bench(&self) -> bool {
         self.bench
+    }
+
+    /// True when the invocation asked for the index rather than defaulting to it.
+    pub const fn is_explicit(&self) -> bool {
+        self.explicit
     }
 
     pub const fn mode_name(&self) -> &'static str {

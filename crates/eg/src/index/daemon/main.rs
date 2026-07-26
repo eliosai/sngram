@@ -1,6 +1,9 @@
 //! File-based daemon for eg indexes.
 
 mod budget;
+mod churn;
+mod generations;
+mod reclaim;
 mod watch;
 
 use std::{
@@ -12,7 +15,7 @@ use std::{
     io::{BufRead, BufReader, ErrorKind, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::Context;
@@ -30,9 +33,8 @@ const LEASE_FILE_NAME: &str = "lease";
 const WAKE_FILE_NAME: &str = "wake";
 const WATCH_DIRS_FILE_NAME: &str = "watch-dirs";
 const INDEX_DIR_NAME: &str = "index";
-const POSTINGS_MANIFEST: &str = "postings-v9/manifest.bin";
-const POSTINGS_JSON_MANIFEST: &str = "postings-v9/manifest.json";
-const TANTIVY_JSON_MANIFEST: &str = "tantivy-v2/manifest.json";
+const BINARY_MANIFEST_NAME: &str = "manifest.bin";
+const JSON_MANIFEST_NAME: &str = "manifest.json";
 const LOCK_FILE_NAME: &str = "daemon.lock";
 const STARTUP_READY_FILE_NAME: &str = "startup-ready";
 const EG_BINARY_NAME: &str = "eg";
@@ -42,6 +44,7 @@ const LEASE_TTL_ENV: &str = "EG_INDEXD_LEASE_TTL_SECS";
 const DEFAULT_LEASE_TTL: Duration = Duration::from_hours(24);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const STARTUP_IDLE_GRACE: Duration = Duration::from_mins(1);
+const RECLAIM_INTERVAL: Duration = Duration::from_mins(5);
 
 fn main() {
     if let Err(err) = run() {
@@ -65,6 +68,8 @@ struct Daemon {
     watcher: watch::Watcher,
     watch_stamps: HashMap<PathBuf, SystemTime>,
     refused: HashMap<PathBuf, usize>,
+    churn: churn::Churn,
+    last_reclaim: Instant,
 }
 
 impl Daemon {
@@ -83,6 +88,8 @@ impl Daemon {
             watcher: watch::Watcher::with_budget(budget)?,
             watch_stamps: HashMap::new(),
             refused: HashMap::new(),
+            churn: churn::Churn::default(),
+            last_reclaim: Instant::now(),
         })
     }
 
@@ -91,13 +98,14 @@ impl Daemon {
         let requests = self.runtime_root.join(REQUESTS_DIR_NAME);
         let _ = fs::create_dir_all(&requests);
         self.watcher.watch_signal_dir(&requests)?;
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         loop {
             let requests = read_requests(&self.runtime_root)?;
             self.clear_dirty()?;
             self.release_unleased(&requests);
             self.refresh_requests(&requests);
             consolidate_children(&requests);
+            self.reclaim_when_due(&requests);
             if requests.iter().any(Request::has_live_lease) {
                 self.wait_for_changes(POLL_INTERVAL)?;
                 continue;
@@ -120,7 +128,30 @@ impl Daemon {
                 StartupDisposition::Discard => discard_state(request),
             }
         }
+        self.reclaim(&requests);
         self.mark_startup_ready()
+    }
+
+    /// Reclaim state left by a daemon that died, and generations now retired
+    fn reclaim(&self, requests: &[Request]) {
+        let roots = requests.iter().map(Request::known_root).collect::<Vec<_>>();
+        let mut reclaimed = reclaim::sweep(&roots);
+        reclaimed.absorb(&reclaim::sweep_quarantine(&self.runtime_root));
+        if reclaimed.paths > 0 {
+            log::debug!(
+                "eg-indexd: reclaimed {} paths holding {} bytes",
+                reclaimed.paths,
+                reclaimed.bytes
+            );
+        }
+    }
+
+    fn reclaim_when_due(&mut self, requests: &[Request]) {
+        if self.last_reclaim.elapsed() < RECLAIM_INTERVAL {
+            return;
+        }
+        self.reclaim(requests);
+        self.last_reclaim = Instant::now();
     }
 
     fn refresh_requests(&mut self, requests: &[Request]) {
@@ -241,17 +272,22 @@ impl Daemon {
     }
 
     fn refresh_if_needed(&mut self, request: &Request) -> anyhow::Result<()> {
-        if request.has_live_lease() && request.needs_refresh() {
-            if refresh_request(request, &self.runtime_root).is_ok() {
-                mark_lease_live(&request.state_root)?;
-            }
-            self.clear_dirty()?;
+        if !request.has_live_lease() || !request.needs_refresh() {
+            return Ok(());
         }
-        Ok(())
+        if self.churn.defers(&request.state_root, request.has_index()) {
+            return Ok(());
+        }
+        if refresh_request(request, &self.runtime_root).is_ok() {
+            mark_lease_live(&request.state_root)?;
+            self.churn.settle(&request.state_root);
+        }
+        self.clear_dirty()
     }
 
     fn clear_dirty(&mut self) -> anyhow::Result<()> {
         for state_root in self.watcher.drain_dirty()? {
+            self.churn.mark(&state_root);
             clear_journal_clean(&state_root);
         }
         Ok(())
@@ -259,6 +295,7 @@ impl Daemon {
 
     fn wait_for_changes(&mut self, timeout: Duration) -> anyhow::Result<()> {
         for state_root in self.watcher.wait_dirty(timeout)? {
+            self.churn.mark(&state_root);
             clear_journal_clean(&state_root);
         }
         Ok(())
@@ -384,9 +421,25 @@ impl Request {
 
     fn has_index(&self) -> bool {
         let index = self.state_root.join(INDEX_DIR_NAME);
-        index.join(POSTINGS_MANIFEST).exists()
-            || index.join(POSTINGS_JSON_MANIFEST).exists()
-            || index.join(TANTIVY_JSON_MANIFEST).exists()
+        [
+            generations::POSTINGS_GENERATION,
+            generations::TANTIVY_GENERATION,
+        ]
+        .iter()
+        .any(|generation| {
+            let published = index.join(generation);
+            published.join(BINARY_MANIFEST_NAME).exists()
+                || published.join(JSON_MANIFEST_NAME).exists()
+        })
+    }
+
+    /// The reclaimer's view of this request's paths
+    fn known_root(&self) -> reclaim::KnownRoot {
+        reclaim::KnownRoot {
+            index_root: self.index_root.clone(),
+            state_root: self.state_root.clone(),
+            lease_live: self.has_live_lease(),
+        }
     }
 
     fn needs_refresh(&self) -> bool {

@@ -53,11 +53,32 @@ under continuous file churn a query waits for at most one refresh cycle
 instead of starving. The foreground renders that wait as a single spinner;
 the detailed phase bar only shows on a first build.
 
-Cold path: no index or no proof. The process writes a durable request,
-touches `wake`, spawns the daemon if none is live, and blocks polling for
-the freshness proof. The daemon walks the tree, builds the index in a
-staging directory, fsyncs, and renames it into place; a crashed rename
-recovers from the `.old` sibling on the next build.
+Churning path: a compatible generation exists but no proof does, because
+the corpus moved under it. The query registers its wake so the daemon
+rebuilds, waits out a 250 ms grace for a rebuild that is nearly done
+(`EG_INDEX_CHURN_WAIT_MS` overrides it), and otherwise answers from the
+exact unindexed scan. That answer is complete by construction: it is the
+same walk and the same search workers `--no-index` uses, so no match can
+be missed by an index that no longer describes the tree. The trade is
+measured: a full rebuild of a mid-sized corpus costs seconds, while the
+scan it replaces costs tens of milliseconds. `--bench` never takes this
+path, so benchmark reports keep measuring the indexed path.
+
+Refused path: the query names something the sparse grams cannot express,
+such as `-v`, `--passthru`, a preprocessor, stdin, a pattern with no
+selective n-gram, or a pattern selecting more of the corpus than the
+selectivity ceiling allows. The index is a prefilter, so the scan is
+always a valid answer to a query the planner refuses, and the query takes
+it instead of failing. `--bench` still refuses, because the suite counts
+refused rows rather than measuring the scan behind them.
+
+Cold path: no index at all. The process writes a durable request, touches
+`wake`, spawns the daemon if none is live, and blocks polling for the
+freshness proof behind a phase progress bar. The daemon walks the tree,
+builds the index in a staging directory, fsyncs, and renames it into
+place; a crashed rename recovers from the `.old` sibling on the next
+build. If that build never lands, or no daemon can own the index, the
+query falls back to the exact scan rather than hanging or failing.
 
 ## Daemon loop
 
@@ -69,6 +90,27 @@ Missing roots and unwatchable paths are tolerated rather than fatal: a
 request for a deleted directory discards that request instead of killing
 the serve loop. A killed daemon restarts and re-adopts published indexes
 from their manifests in about two seconds, without rebuilding.
+
+Rebuilds are debounced. A corpus the watcher reports dirty waits one
+quiet second before its rebuild starts (`EG_INDEXD_DEBOUNCE_MS` overrides
+it), and never waits longer than thirty seconds, so a build writing into
+the tree costs one rebuild instead of one per event. A corpus with no
+published index skips the debounce, because there is nothing to serve
+until the first build lands.
+
+## Reclamation
+
+The request directory is the daemon's durable record of the paths it
+serves, so it survives a crash. On startup, and every five minutes while
+serving, the daemon sweeps those paths for state nothing serves any more:
+staging and `.old` copies left by an interrupted build whose lock is
+free, generation directories this binary no longer publishes, quarantined
+request files older than a day, and the state shell an index kept outside
+a corpus that has since been deleted. The sweep is deliberately timid.
+A directory is only reclaimed when it carries index generation files, the
+published generation of a live root is never touched, and a held build
+lock keeps its staging directory, because leaving garbage costs disk
+while deleting a served index costs correctness.
 
 ## Ownership rules
 

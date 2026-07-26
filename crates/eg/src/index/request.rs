@@ -13,26 +13,34 @@ pub struct SearchRequest<'a> {
     matches_possible: bool,
 }
 
+/// What the sparse index can do with one invocation.
+pub enum Requested<'a> {
+    /// the index can plan this query
+    Indexed(SearchRequest<'a>),
+    /// the index cannot express this query, so the exact scan answers it
+    Refused(Unsupported),
+}
+
 impl<'a> SearchRequest<'a> {
-    pub fn from_args(args: &'a HiArgs) -> anyhow::Result<Self> {
+    pub fn from_args(args: &'a HiArgs) -> anyhow::Result<Requested<'a>> {
         let Mode::Search(mode) = args.mode() else {
-            return unsupported(Unsupported::BenchOutsideSearch);
+            return refuse(Unsupported::BenchOutsideSearch);
         };
         if args.index().is_no_index() {
-            return unsupported(Unsupported::BenchWithoutIndex);
+            return refuse(Unsupported::BenchWithoutIndex);
         }
         if let Some(reason) = unsupported_reason(args, mode) {
-            return unsupported(reason);
+            return Ok(Requested::Refused(reason));
         }
         if searches_stdin(args) {
-            return unsupported(Unsupported::Stdin);
+            return Ok(Requested::Refused(Unsupported::Stdin));
         }
-        Ok(Self {
+        Ok(Requested::Indexed(Self {
             args,
             mode,
             started_at: Instant::now(),
             matches_possible: args.matches_possible(),
-        })
+        }))
     }
 
     pub const fn args(&self) -> &'a HiArgs {
@@ -127,8 +135,23 @@ const TOO_BROAD: &str = "indexed search cannot use this pattern because it is to
 const IMPOSSIBLE: &str = "indexed search cannot use this pattern because it cannot match any text under the current regex options.\n\nwhy: contradictory anchors, boundaries, or character classes made the planner prove the language empty.\nwhat works: check anchors like `$`/`^`, word boundaries like `\\b`/`\\B`, and impossible classes; use `--no-index` only if you want to double-check with the regex engine.";
 const TOO_MANY: &str = "indexed search cannot use this pattern efficiently because it selects too much of the corpus.\n\nwhy: the sparse n-gram estimate is above the indexed-search selectivity ceiling, so verifying candidates would be slower than a scan.\nwhat works: add a rarer literal, narrow numeric or wide character classes, split the search into a more selective pattern, or pass `--no-index` for an exact unindexed scan.";
 
+impl Unsupported {
+    /// Short phrase naming what the index cannot do for this query
+    pub const fn what(self) -> &'static str {
+        match self {
+            Self::Feature { what, .. } => what,
+            Self::Stdin => "stdin input",
+            Self::BenchOutsideSearch => "`--bench` outside a search",
+            Self::BenchWithoutIndex => "`--bench` with `--no-index`",
+            Self::PlannerError | Self::TooBroadPattern => "a pattern with no selective n-gram",
+            Self::ImpossiblePattern => "a pattern that cannot match any text",
+            Self::TooManyCandidates => "a pattern that selects too much of the corpus",
+        }
+    }
+}
+
 /// Report an indexed-search request that cannot be served safely.
-pub fn unsupported<T>(reason: Unsupported) -> anyhow::Result<T> {
+pub fn refuse<T>(reason: Unsupported) -> anyhow::Result<T> {
     match reason {
         Unsupported::Feature { what, why } => bail!(
             "indexed search cannot run with {what}.\n\nwhy: {why}.\nwhat works: remove the unsupported option, or pass `--no-index` when you intentionally want an exact unindexed scan."

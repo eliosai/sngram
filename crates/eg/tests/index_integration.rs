@@ -74,6 +74,12 @@ fn eg_with_env(args: &[&str], envs: &[(&str, &Path)]) -> Output {
     command.output().unwrap()
 }
 
+/// Run eg with an unbounded churn grace, for tests that assert the indexed path
+/// is used right after a corpus change rather than the exact scan fallback.
+fn eg_indexed(args: &[&str]) -> Output {
+    eg_with_env_vars(args, &[("EG_INDEX_CHURN_WAIT_MS", "60000")])
+}
+
 fn eg_with_env_vars(args: &[&str], envs: &[(&str, &str)]) -> Output {
     let _guard = EG_COMMAND_LOCK.lock().unwrap();
     let mut command = eg_command();
@@ -1140,6 +1146,94 @@ fn killed_daemon_leaves_index_unusable_until_next_startup_deletes_it() {
     assert!(!has_request_file(&runtime_root));
 }
 
+#[test]
+fn churning_corpus_is_scanned_instead_of_waiting_for_a_rebuild() {
+    let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    fs::write(fixture.path("first.txt"), "churn needle one\n").unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_parent_str = runtime_parent.to_str().unwrap();
+    let runtime_root = runtime_parent.join("eg");
+    let root_str = fixture.root.to_str().unwrap();
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent_str),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+        ("EG_INDEX_CHURN_WAIT_MS", "0"),
+    ];
+
+    let daemon = ChildGuard::spawn_daemon(&runtime_root);
+    let build = eg_with_env_vars(&["churn needle", root_str], &envs);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+    assert!(fixture.path(".eg/index/postings-v9").exists());
+
+    // no daemon can prove the index again, and the corpus grew past it
+    let _ = daemon.kill_and_wait();
+    fs::write(fixture.path("second.txt"), "churn needle two\n").unwrap();
+
+    let churned = eg_with_env_vars(&["--debug", "churn needle", root_str], &envs);
+    let stdout = String::from_utf8(churned.stdout).unwrap();
+    let stderr = String::from_utf8(churned.stderr).unwrap();
+
+    assert!(churned.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("eg index: scanning directly because"),
+        "{stderr}"
+    );
+    assert!(stdout.contains("churn needle one"), "{stdout}");
+    assert!(stdout.contains("churn needle two"), "{stdout}");
+}
+
+#[test]
+fn daemon_startup_reclaims_interrupted_builds_and_retired_generations() {
+    let fixture = Fixture::new();
+    let runtime_fixture = Fixture::new();
+    fs::write(fixture.path("hit.txt"), "reclaim needle\n").unwrap();
+    let runtime_parent = runtime_fixture.path("xdg");
+    let runtime_parent_str = runtime_parent.to_str().unwrap();
+    let runtime_root = runtime_parent.join("eg");
+    let root_str = fixture.root.to_str().unwrap();
+    let envs = [
+        ("XDG_RUNTIME_DIR", runtime_parent_str),
+        ("EG_INDEXD_DISABLE_AUTOSPAWN", "1"),
+    ];
+
+    let daemon = ChildGuard::spawn_daemon(&runtime_root);
+    let build = eg_with_env_vars(&["reclaim needle", root_str], &envs);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8(build.stderr).unwrap()
+    );
+    let index = fixture.path(".eg/index");
+    assert!(index.join("postings-v9/manifest.bin").exists());
+
+    let _ = daemon.kill_and_wait();
+    // a killed daemon leaves its readiness marker behind
+    fs::remove_file(runtime_root.join("startup-ready")).unwrap();
+    let staging = index.join("postings-v9.rebuilding");
+    let retired = index.join("postings-v8");
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join("manifest.bin"), vec![0u8; 4096]).unwrap();
+    fs::create_dir_all(&retired).unwrap();
+    fs::write(retired.join("manifest.bin"), vec![0u8; 8192]).unwrap();
+
+    let _restarted = ChildGuard::spawn_daemon(&runtime_root);
+
+    assert!(
+        !staging.exists(),
+        "interrupted build staging should be gone"
+    );
+    assert!(!retired.exists(), "retired generation should be gone");
+    assert!(
+        index.join("postings-v9/manifest.bin").exists(),
+        "the live generation must survive reclamation"
+    );
+}
+
 fn has_request_file(runtime_root: &Path) -> bool {
     fs::read_dir(runtime_root.join("requests"))
         .ok()
@@ -1271,7 +1365,7 @@ fn auto_index_unchanged_uses_daemon_proofed_snapshot() {
         String::from_utf8(first.stderr).unwrap()
     );
 
-    let second = eg(&[
+    let second = eg_indexed(&[
         "--debug",
         "--index=auto",
         "fast freshness needle",
@@ -1313,7 +1407,7 @@ fn auto_index_refreshes_changed_files_through_daemon_republish() {
     std::thread::sleep(std::time::Duration::from_millis(20));
     fs::write(fixture.path("sample.txt"), "beta changed needle\n").unwrap();
 
-    let changed = eg(&[
+    let changed = eg_indexed(&[
         "--debug",
         "--index=auto",
         "changed needle",
@@ -1374,7 +1468,7 @@ fn auto_index_ignores_stale_base_postings_for_changed_files() {
         .unwrap();
     }
 
-    let stale = eg(&[
+    let stale = eg_indexed(&[
         "--debug",
         "--index=auto",
         "zzzz_obsolete_token_zzzz file 0",
@@ -1398,7 +1492,7 @@ fn indexed_byte_count_needs_prune_short_repetition_candidates() {
     }
     fs::write(fixture.path("hit.txt"), "ababababab\n").unwrap();
 
-    let output = eg(&[
+    let output = eg_indexed(&[
         "--debug",
         "--index=auto",
         "--files-with-matches",
@@ -1457,7 +1551,7 @@ fn auto_index_uses_daemon_proof_for_git_worktrees() {
         String::from_utf8(first.stderr).unwrap()
     );
 
-    let clean = eg(&[
+    let clean = eg_indexed(&[
         "--debug",
         "--index=auto",
         "git freshness",
@@ -1475,7 +1569,7 @@ fn auto_index_uses_daemon_proof_for_git_worktrees() {
     );
 
     fs::write(fixture.path("tracked.txt"), "git changed tracked\n").unwrap();
-    let changed = eg(&[
+    let changed = eg_indexed(&[
         "--debug",
         "--index=auto",
         "git changed tracked",
@@ -1574,28 +1668,33 @@ fn indexed_empty_files_do_not_fail_mmap_indexing() {
 }
 
 #[test]
-fn indexed_passthru_errors_with_help() {
+fn indexed_passthru_falls_back_to_the_scan() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "alpha constrained needle\n").unwrap();
     let root = fixture.root.to_str().unwrap();
 
     let output = eg(&["--index=auto", "--passthru", "constrained needle", root]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code());
-    assert!(stderr.contains("indexed search cannot run with `--passthru`"));
-    assert!(stderr.contains("--no-index"), "{stderr}");
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
+    assert!(stdout.contains("alpha constrained needle"), "{stdout}");
+    assert!(
+        stderr.contains("the sparse index cannot serve `--passthru`"),
+        "{stderr}"
+    );
 }
 
 #[test]
-fn indexed_transformed_input_modes_error_without_scan_fallback() {
+fn indexed_transformed_input_modes_fall_back_to_the_scan() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "alpha constrained needle\n").unwrap();
     let root = fixture.root.to_str().unwrap();
 
     for args in [
+        // pcre2 is left out: it is not compiled into every build, so the scan
+        // it falls back to fails for a reason that is not about the index
         vec!["--index=auto", "--engine=auto", "constrained needle", root],
-        vec!["--index=auto", "--engine=pcre2", "constrained needle", root],
         vec![
             "--index=auto",
             "--encoding=utf-16",
@@ -1606,29 +1705,38 @@ fn indexed_transformed_input_modes_error_without_scan_fallback() {
         vec!["--index=auto", "-z", "constrained needle", root],
     ] {
         let output = eg(&args);
+        let stdout = String::from_utf8(output.stdout).unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
 
-        assert_eq!(Some(2), output.status.code(), "{args:?}");
+        // --encoding re-decodes the corpus, so a match is not guaranteed; what
+        // matters is that the query is answered rather than refused
+        assert_ne!(Some(2), output.status.code(), "{args:?}: {stderr}");
         assert!(
-            stderr.contains("indexed search cannot run with"),
-            "{stderr}"
+            stderr.contains("the sparse index cannot serve"),
+            "{args:?}: {stderr}"
         );
-        assert!(stderr.contains("--no-index"), "{stderr}");
+        if output.status.code() == Some(0) {
+            assert!(stdout.contains("constrained needle"), "{args:?}: {stdout}");
+        }
     }
 }
 
 #[test]
-fn indexed_null_data_errors_with_help() {
+fn indexed_null_data_falls_back_to_the_scan() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), b"alpha\0beta").unwrap();
     let root = fixture.root.to_str().unwrap();
 
     let output = eg(&["--index=auto", "--null-data", "alpha", root]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code());
-    assert!(stderr.contains("indexed search cannot run with `--null-data`"));
-    assert!(stderr.contains("--no-index"), "{stderr}");
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
+    assert!(stdout.contains("alpha"), "{stdout}");
+    assert!(
+        stderr.contains("the sparse index cannot serve `--null-data`"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -1645,7 +1753,7 @@ fn indexed_invalid_regex_reports_parse_error() {
 }
 
 #[test]
-fn indexed_many_patterns_past_planner_limit_errors_with_no_index_help() {
+fn indexed_many_patterns_past_planner_limit_fall_back_to_the_scan() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "needle_420\n").unwrap();
     let mut args = vec!["--index=auto".to_owned()];
@@ -1657,14 +1765,15 @@ fn indexed_many_patterns_past_planner_limit_errors_with_no_index_help() {
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
 
     let output = eg(&refs);
+    let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code());
-    assert!(stderr.contains("--no-index"), "{stderr}");
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
+    assert!(stdout.contains("needle_420"), "{stdout}");
 }
 
 #[test]
-fn indexed_invert_match_errors_with_help() {
+fn indexed_invert_match_falls_back_to_the_scan() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "alpha\n").unwrap();
 
@@ -1674,11 +1783,15 @@ fn indexed_invert_match_errors_with_help() {
         "absent",
         fixture.root.to_str().unwrap(),
     ]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code());
-    assert!(stderr.contains("inverted matches"), "{stderr}");
-    assert!(stderr.contains("--no-index"), "{stderr}");
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
+    assert!(stdout.contains("alpha"), "{stdout}");
+    assert!(
+        stderr.contains("the sparse index cannot serve inverted matches"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -1751,57 +1864,70 @@ fn indexed_no_mmap_search_uses_read_path() {
 }
 
 #[test]
-fn indexed_broad_regex_errors_without_scan_fallback() {
+fn indexed_broad_regex_falls_back_to_the_scan() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "alpha\n").unwrap();
 
-    let output = eg(&[".*", fixture.root.to_str().unwrap()]);
+    let output = eg(&["--debug", ".*", fixture.root.to_str().unwrap()]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code());
-    assert!(stderr.contains("indexed search cannot use this pattern"));
-    assert!(stderr.contains("too broad"));
-    assert!(stderr.contains("--no-index"));
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
+    assert!(stdout.contains("alpha"), "{stdout}");
+    assert!(
+        stderr.contains("scanning directly because of a pattern with no selective n-gram"),
+        "{stderr}"
+    );
+    // no index flag was typed, so the fallback stays out of the way
+    assert!(
+        !stderr.contains("the sparse index cannot serve"),
+        "{stderr}"
+    );
 }
 
 #[test]
-fn indexed_metadata_only_patterns_error_without_scan_fallback() {
+fn indexed_metadata_only_patterns_fall_back_to_the_scan() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "alpha beta ab\n").unwrap();
 
     for pattern in [".", "[a-z]+", "ab"] {
         let output = eg(&["--index=auto", pattern, fixture.root.to_str().unwrap()]);
+        let stdout = String::from_utf8(output.stdout).unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
 
-        assert_eq!(Some(2), output.status.code(), "{stderr}");
-        assert!(stderr.contains("indexed search cannot use this pattern"));
-        assert!(stderr.contains("too broad"));
-        assert!(stderr.contains("--no-index"));
-        assert_eq!("", String::from_utf8(output.stdout).unwrap());
+        assert_eq!(Some(0), output.status.code(), "{pattern}: {stderr}");
+        assert!(stdout.contains("alpha beta ab"), "{pattern}: {stdout}");
+        assert!(
+            stderr.contains("the sparse index cannot serve a pattern with no selective n-gram"),
+            "{pattern}: {stderr}"
+        );
     }
 }
 
 #[test]
-fn indexed_impossible_regex_errors_with_help() {
+fn indexed_impossible_regex_falls_back_to_the_scan() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "foo bar\n").unwrap();
 
-    let output = eg(&["foo$bar", fixture.root.to_str().unwrap()]);
+    let output = eg(&["--debug", "foo$bar", fixture.root.to_str().unwrap()]);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code());
-    assert!(stderr.contains("indexed search cannot use this pattern"));
-    assert!(stderr.contains("cannot match"));
-    assert!(stderr.contains("anchors"));
+    // the planner proved the language empty, but only the scan may report it
+    assert_eq!(Some(1), output.status.code(), "{stderr}");
+    assert_eq!("", String::from_utf8(output.stdout).unwrap());
+    assert!(
+        stderr.contains("scanning directly because of a pattern that cannot match any text"),
+        "{stderr}"
+    );
 }
 
 #[test]
-fn indexed_common_literal_over_ceiling_errors_without_verify() {
+fn indexed_common_literal_over_ceiling_scans_without_verify() {
     assert_common_literal_over_ceiling(&[]);
 }
 
 #[test]
-fn tantivy_common_literal_over_ceiling_errors_without_verify() {
+fn tantivy_common_literal_over_ceiling_scans_without_verify() {
     assert_common_literal_over_ceiling(&["--index-backend=tantivy"]);
 }
 
@@ -1819,10 +1945,11 @@ fn assert_common_literal_over_ceiling(backend_args: &[&str]) {
     args.extend_from_slice(backend_args);
     args.extend_from_slice(&["static int", fixture.root.to_str().unwrap()]);
     let output = eg(&args);
+    let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code(), "{stderr}");
-    assert_eq!("", String::from_utf8(output.stdout).unwrap());
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
+    assert_eq!(80, stdout.lines().count(), "{stdout}");
     assert!(
         stderr.contains("selects too much of the corpus"),
         "common gram-backed plans should reject before verification: {stderr}"
@@ -1861,8 +1988,11 @@ fn postings_selectivity_ceiling_uses_text_entries_not_skipped_files() {
     ]);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code(), "{stderr}");
-    assert_eq!("", String::from_utf8(output.stdout).unwrap());
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
+    assert_eq!(
+        40,
+        String::from_utf8(output.stdout).unwrap().lines().count()
+    );
     assert!(
         stderr.contains("actual candidates 40 of 80 docs exceeds 30%"),
         "selectivity should be based on text entries, not skipped binary files: {stderr}"
@@ -1870,7 +2000,7 @@ fn postings_selectivity_ceiling_uses_text_entries_not_skipped_files() {
 }
 
 #[test]
-fn indexed_broad_numeric_class_over_ceiling_errors_without_verify() {
+fn indexed_broad_numeric_class_over_ceiling_scans_without_verify() {
     let fixture = Fixture::new();
     for i in 0..80 {
         fs::write(
@@ -1889,8 +2019,11 @@ fn indexed_broad_numeric_class_over_ceiling_errors_without_verify() {
     ]);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code(), "{stderr}");
-    assert_eq!("", String::from_utf8(output.stdout).unwrap());
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
+    assert_eq!(
+        80,
+        String::from_utf8(output.stdout).unwrap().lines().count()
+    );
     assert!(
         stderr.contains("selects too much of the corpus"),
         "class-expanded numeric plans should stay estimate-rejected: {stderr}"
@@ -1918,14 +2051,16 @@ fn forced_candidates_count_toward_selectivity_rejection() {
     ]);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code(), "{stderr}");
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
     assert!(
         stderr.contains("selects too much of the corpus"),
         "high estimates should reject the indexed path: {stderr}"
     );
     assert!(
-        stderr.contains("--no-index"),
-        "rejection should explain the exact-scan escape hatch: {stderr}"
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("hit.txt"),
+        "the scan the rejection falls back to still finds the match: {stderr}"
     );
 }
 
@@ -1951,14 +2086,16 @@ fn tantivy_forced_candidates_count_toward_selectivity_rejection() {
     ]);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(Some(2), output.status.code(), "{stderr}");
+    assert_eq!(Some(0), output.status.code(), "{stderr}");
     assert!(
         stderr.contains("selects too much of the corpus"),
         "high estimates should reject the indexed path in tantivy backend: {stderr}"
     );
     assert!(
-        stderr.contains("--no-index"),
-        "rejection should explain the exact-scan escape hatch: {stderr}"
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("hit.txt"),
+        "the scan the rejection falls back to still finds the match: {stderr}"
     );
 }
 
@@ -2394,21 +2531,26 @@ fn indexed_full_corpus_modes_do_not_synthesize_binary_no_matches() {
 }
 
 #[test]
-fn indexed_search_rejects_binary_modes() {
+fn indexed_binary_modes_fall_back_to_the_scan() {
     let fixture = Fixture::new();
     fs::write(fixture.path("sample.txt"), "plain text needle\n").unwrap();
 
     for flag in ["--binary", "--text"] {
-        let output = eg(&[flag, "plain text needle", fixture.root.to_str().unwrap()]);
+        let output = eg(&[
+            "--debug",
+            flag,
+            "plain text needle",
+            fixture.root.to_str().unwrap(),
+        ]);
+        let stdout = String::from_utf8(output.stdout).unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
 
-        assert_eq!(Some(2), output.status.code(), "{flag}: {stderr}");
-        assert!(stderr.contains("binary search flags"), "{flag}: {stderr}");
+        assert_eq!(Some(0), output.status.code(), "{flag}: {stderr}");
+        assert!(stdout.contains("plain text needle"), "{flag}: {stdout}");
         assert!(
-            stderr.contains("does not search binary data"),
+            stderr.contains("scanning directly because of binary search flags"),
             "{flag}: {stderr}"
         );
-        assert!(stderr.contains("--no-index"), "{flag}: {stderr}");
     }
 }
 
@@ -2579,7 +2721,7 @@ fn indexed_utf16_bom_file_is_not_searched_as_binary() {
     }
     fs::write(fixture.path("utf16.txt"), bytes).unwrap();
 
-    let output = eg(&[
+    let output = eg_indexed(&[
         "--debug",
         "--index=auto",
         "--files-with-matches",
@@ -2773,7 +2915,7 @@ fn word_boundary_queries_prune_midword_candidates() {
 }
 
 #[test]
-fn a_tree_over_the_watch_budget_is_reported_instead_of_served() {
+fn a_tree_over_the_watch_budget_is_scanned_instead_of_served() {
     let fixture = Fixture::new();
     let runtime_fixture = Fixture::new();
     fs::create_dir_all(fixture.path("a/b/c/d/e")).unwrap();
@@ -2787,20 +2929,29 @@ fn a_tree_over_the_watch_budget_is_reported_instead_of_served() {
     ];
     let _daemon = ChildGuard::spawn_daemon_with_watch_budget(&runtime_root, 2);
 
-    let refused = eg_with_env_vars(&["watch budget needle", root_str], &envs);
+    let refused = eg_with_env_vars(&["--debug", "watch budget needle", root_str], &envs);
+    let stdout = String::from_utf8(refused.stdout).unwrap();
     let stderr = String::from_utf8(refused.stderr).unwrap();
 
-    assert!(!refused.status.success());
-    assert!(stderr.contains("cannot watch"), "{stderr}");
-    assert!(stderr.contains("max_user_watches"), "{stderr}");
-    assert!(stderr.contains("--no-index"), "{stderr}");
+    // a tree no daemon can watch can never earn a proof, so the query is
+    // answered by the exact scan rather than left failing
+    assert!(refused.status.success(), "{stderr}");
+    assert!(stdout.contains("watch budget needle"), "{stdout}");
+    assert!(
+        stderr.contains("daemon refused to watch this tree"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("allowed filesystem watches"), "{stderr}");
     assert!(!fixture.path(".eg/runtime/watcher-ready").exists());
 
-    let scanned = eg_with_env_vars(&["--no-index", "watch budget needle", root_str], &envs);
-    let stdout = String::from_utf8(scanned.stdout).unwrap();
+    let benched = eg_with_env_vars(&["--bench", "watch budget needle", root_str], &envs);
+    let bench_stderr = String::from_utf8(benched.stderr).unwrap();
 
-    assert!(scanned.status.success());
-    assert!(stdout.contains("watch budget needle"), "{stdout}");
+    // --bench measures the indexed path, so it still reports the refusal
+    assert!(!benched.status.success());
+    assert!(bench_stderr.contains("cannot watch"), "{bench_stderr}");
+    assert!(bench_stderr.contains("max_user_watches"), "{bench_stderr}");
+    assert!(bench_stderr.contains("--no-index"), "{bench_stderr}");
 }
 
 #[test]
