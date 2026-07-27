@@ -1,36 +1,8 @@
 //! Count-to-weight minting policy.
 
-use sngram_types::WeightTable;
-
-use super::BigramCounter;
 use super::settings::LearnSettings;
 
-impl BigramCounter {
-    /// Serialize the learned weight table in the `SPNG` binary format.
-    #[must_use]
-    pub fn to_table_bytes(&self) -> Vec<u8> {
-        self.weight_table(Tuning::OFF).to_bytes()
-    }
-
-    fn weight_table(&self, tuning: Tuning) -> WeightTable {
-        let total = self.pairs_processed();
-        WeightTable::from_weight_fn(|c1, c2| {
-            let raw = compute_weight(total, self.count(c1, c2));
-            tune_weight(raw, c1, c2, tuning)
-        })
-    }
-
-    #[cfg(test)]
-    fn mint_table_bytes(
-        &self,
-        options: &MintOptions<'_>,
-    ) -> Result<Vec<u8>, sngram_types::TableError> {
-        Ok(self
-            .weight_table(options.tuning)
-            .with_provenance(options.provenance)?
-            .to_bytes())
-    }
-}
+mod table;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Tuning {
@@ -56,7 +28,8 @@ impl Default for Tuning {
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
-struct MintOptions<'a> {
+/// Test-only mint controls
+pub struct MintOptions<'a> {
     provenance: &'a str,
     tuning: Tuning,
 }
@@ -99,7 +72,10 @@ fn compute_weight(total: u64, count: u64) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use sngram_types::WeightTable;
+
     use super::*;
+    use crate::learn::BigramCounter;
 
     #[test]
     fn case_seam_discounts_lower_to_upper_only() {

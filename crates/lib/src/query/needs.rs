@@ -1,17 +1,17 @@
 //! Root scan-need derivation from regex HIR.
 
-use regex_syntax::hir::{Class, Hir, HirKind};
-use sngram_types::{ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanNeed};
+use regex_syntax::hir::Hir;
+use sngram_types::{ByteSet256, EdgeBytes, ScanNeed};
 
-use super::edges::{Edge, class_lead_bytes, doc_edge_literal, line_anchor_bytes, set_len, union};
+use super::edges::{Edge, doc_edge_literal, line_anchor_bytes};
 
-const MAX_ANY_BYTE_SETS: usize = 4;
-const MAX_ANY_BYTE_SET_LEN: u32 = 128;
+mod classes;
+mod facts;
 
 pub struct RootNeeds {
     min_len: u64,
     single_line: bool,
-    byte_counts: ByteCountNeed,
+    byte_counts: Option<ScanNeed>,
     any_byte_sets: Vec<ByteSet256>,
     line_start: Option<ByteSet256>,
     line_end: Option<ByteSet256>,
@@ -22,10 +22,10 @@ pub struct RootNeeds {
 impl RootNeeds {
     pub fn from_hir(hir: &Hir) -> Self {
         Self {
-            min_len: min_match_len(hir),
-            single_line: !can_match_newline(hir),
-            byte_counts: ByteCountNeed::from_hir(hir),
-            any_byte_sets: required_class_sets(hir),
+            min_len: facts::min_match_len(hir),
+            single_line: !facts::can_match_newline(hir),
+            byte_counts: facts::byte_counts(hir),
+            any_byte_sets: classes::required(hir),
             line_start: line_anchor_bytes(hir, Edge::Start),
             line_end: line_anchor_bytes(hir, Edge::End),
             starts_with: doc_edge_literal(hir, Edge::Start),
@@ -42,7 +42,7 @@ impl RootNeeds {
             let len = u32::try_from(self.min_len).unwrap_or(u32::MAX);
             needs.push(ScanNeed::MinLongestLineLen(len));
         }
-        if let Some(need) = self.byte_counts.into_scan_need() {
+        if let Some(need) = self.byte_counts {
             needs.push(need);
         }
         needs.extend(
@@ -55,159 +55,6 @@ impl RootNeeds {
         needs.extend(self.starts_with.map(ScanNeed::StartsWith));
         needs.extend(self.ends_with.map(ScanNeed::EndsWith));
         needs
-    }
-}
-
-fn required_class_sets(hir: &Hir) -> Vec<ByteSet256> {
-    let mut sets = collect_class_sets(hir);
-    sets.retain(|set| {
-        let len = set_len(set);
-        len > 0 && len <= MAX_ANY_BYTE_SET_LEN
-    });
-    sets.sort_by_key(set_len);
-    sets.dedup();
-    sets.truncate(MAX_ANY_BYTE_SETS);
-    sets
-}
-
-fn collect_class_sets(hir: &Hir) -> Vec<ByteSet256> {
-    match hir.kind() {
-        HirKind::Class(class) => vec![class_lead_bytes(class)],
-        HirKind::Capture(capture) => collect_class_sets(&capture.sub),
-        HirKind::Repetition(rep) if rep.min >= 1 => collect_class_sets(&rep.sub),
-        HirKind::Empty | HirKind::Look(_) | HirKind::Literal(_) | HirKind::Repetition(_) => {
-            Vec::new()
-        },
-        HirKind::Concat(subs) => subs.iter().flat_map(collect_class_sets).collect(),
-        HirKind::Alternation(subs) => union_branch_sets(subs),
-    }
-}
-
-fn union_branch_sets(subs: &[Hir]) -> Vec<ByteSet256> {
-    let mut branches: Vec<Vec<ByteSet256>> = subs.iter().map(collect_class_sets).collect();
-    for branch in &mut branches {
-        branch.sort_by_key(set_len);
-    }
-    let shortest = branches.iter().map(Vec::len).min().unwrap_or(0);
-    (0..shortest)
-        .map(|i| {
-            branches
-                .iter()
-                .fold(ByteSet256::default(), |acc, branch| union(acc, branch[i]))
-        })
-        .collect()
-}
-
-#[derive(Clone, Copy, Default)]
-struct ByteCountNeed {
-    counts: SaturatingByteCounts256,
-}
-
-impl ByteCountNeed {
-    fn from_hir(hir: &Hir) -> Self {
-        match hir.kind() {
-            HirKind::Empty | HirKind::Look(_) | HirKind::Class(_) => Self::default(),
-            HirKind::Literal(lit) => Self::from_literal(&lit.0),
-            HirKind::Repetition(rep) => Self::from_hir(&rep.sub).repeated(rep.min),
-            HirKind::Capture(capture) => Self::from_hir(&capture.sub),
-            HirKind::Concat(subs) => Self::from_concat(subs),
-            HirKind::Alternation(subs) => Self::from_alternation(subs),
-        }
-    }
-
-    fn from_literal(bytes: &[u8]) -> Self {
-        let mut need = Self::default();
-        for &byte in bytes {
-            need.counts.observe(byte);
-        }
-        need
-    }
-
-    fn from_concat(subs: &[Hir]) -> Self {
-        subs.iter()
-            .map(Self::from_hir)
-            .fold(Self::default(), |mut acc, need| {
-                acc.add(need);
-                acc
-            })
-    }
-
-    fn from_alternation(subs: &[Hir]) -> Self {
-        let Some((first, rest)) = subs.split_first() else {
-            return Self::default();
-        };
-        let mut acc = Self::from_hir(first);
-        for sub in rest {
-            acc.keep_branch_min(Self::from_hir(sub));
-        }
-        acc
-    }
-
-    fn repeated(mut self, min: u32) -> Self {
-        for count in &mut self.counts.counts {
-            *count = repeat_count(*count, min);
-        }
-        self
-    }
-
-    fn add(&mut self, other: Self) {
-        for (left, right) in self.counts.counts.iter_mut().zip(other.counts.counts) {
-            *left = left.saturating_add(right);
-        }
-    }
-
-    fn keep_branch_min(&mut self, other: Self) {
-        for (left, right) in self.counts.counts.iter_mut().zip(other.counts.counts) {
-            *left = (*left).min(right);
-        }
-    }
-
-    fn into_scan_need(self) -> Option<ScanNeed> {
-        (!self.counts.is_empty()).then_some(ScanNeed::MinByteCounts(Box::new(self.counts)))
-    }
-}
-
-fn repeat_count(count: u8, times: u32) -> u8 {
-    let product = u32::from(count).saturating_mul(times);
-    u8::try_from(product).unwrap_or(u8::MAX)
-}
-
-fn can_match_newline(hir: &Hir) -> bool {
-    match hir.kind() {
-        HirKind::Empty | HirKind::Look(_) => false,
-        HirKind::Literal(lit) => lit.0.contains(&b'\n'),
-        HirKind::Class(class) => class_has_newline(class),
-        HirKind::Repetition(rep) => rep.max != Some(0) && can_match_newline(&rep.sub),
-        HirKind::Capture(capture) => can_match_newline(&capture.sub),
-        HirKind::Concat(subs) | HirKind::Alternation(subs) => subs.iter().any(can_match_newline),
-    }
-}
-
-fn class_has_newline(class: &Class) -> bool {
-    match class {
-        Class::Bytes(bytes) => bytes
-            .ranges()
-            .iter()
-            .any(|r| r.start() <= b'\n' && b'\n' <= r.end()),
-        Class::Unicode(chars) => chars
-            .ranges()
-            .iter()
-            .any(|r| r.start() <= '\n' && '\n' <= r.end()),
-    }
-}
-
-fn min_match_len(hir: &Hir) -> u64 {
-    match hir.kind() {
-        HirKind::Empty | HirKind::Look(_) => 0,
-        HirKind::Literal(lit) => u64::try_from(lit.0.len()).unwrap_or(u64::MAX),
-        HirKind::Class(_) => 1,
-        HirKind::Repetition(rep) => u64::from(rep.min).saturating_mul(min_match_len(&rep.sub)),
-        HirKind::Capture(capture) => min_match_len(&capture.sub),
-        HirKind::Concat(subs) => subs
-            .iter()
-            .map(min_match_len)
-            .fold(0u64, u64::saturating_add),
-        HirKind::Alternation(subs) => subs.iter().map(min_match_len).min().unwrap_or(0),
     }
 }
 

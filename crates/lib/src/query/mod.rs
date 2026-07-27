@@ -34,6 +34,6 @@ use sngram_types::{QueryError, QueryPlan, WeightTable};
 /// Returns [`QueryError`] when `pattern` exceeds the length limit or fails to
 /// parse.
 pub fn query(table: &WeightTable, pattern: &str) -> Result<QueryPlan, QueryError> {
-    let pattern = validate::PatternValidator::validate(pattern)?;
+    let pattern = validate::validate(pattern)?;
     planner::QueryPlanner::new(table).plan(pattern)
 }

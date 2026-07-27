@@ -1,118 +1,125 @@
 //! Df-driven query plan tuning.
 
-use crate::{DfStats, GramNeedle, PlanExpr};
+use super::{DfStats, GramNeedle, PlanExpr, QueryPlan};
 
-const MAX_ALL_OF_GRAMS: usize = 32;
-
-/// Reorder and thin one expression tree by df.
-pub fn tune(expr: &mut PlanExpr, df: &dyn DfStats, stop_df: u64) {
-    match expr {
-        PlanExpr::All | PlanExpr::None => {},
-        PlanExpr::AllOf {
-            grams, children, ..
-        } => {
-            let keep_first = children.is_empty();
-            sort_grams_by_df(grams, df);
-            retain_selective_grams(grams, keep_first, df, stop_df);
-            tune_children(children, df, stop_df);
-            drop_weak_bags(grams, children, df, stop_df);
-        },
-        PlanExpr::AnyOf {
-            grams, children, ..
-        } => {
-            sort_grams_by_df(grams, df);
-            tune_children(children, df, stop_df);
-        },
+impl QueryPlan {
+    /// Reorder and thin the plan by df
+    pub fn tune(&mut self, df: &dyn DfStats, stop_df: u64) {
+        self.root.tune(df, stop_df);
     }
 }
 
-/// Drop pure-gram `AnyOf` children whose summed df cannot prune, as
-/// long as a stronger sibling constraint remains
-fn drop_weak_bags(
-    grams: &[GramNeedle],
-    children: &mut Vec<PlanExpr>,
-    df: &dyn DfStats,
-    stop_df: u64,
-) {
-    let weak: Vec<bool> = children
-        .iter()
-        .map(|child| is_weak_bag(child, df, stop_df))
-        .collect();
-    let strong_left = grams.len() + weak.iter().filter(|&&flag| !flag).count();
-    if strong_left == 0 {
-        return;
+impl PlanExpr {
+    const MAX_ALL_OF_GRAMS: usize = 32;
+
+    fn tune(&mut self, df: &dyn DfStats, stop_df: u64) {
+        match self {
+            Self::All | Self::None => {},
+            Self::AllOf {
+                grams, children, ..
+            } => {
+                let keep_first = children.is_empty();
+                Self::sort_grams_by_df(grams, df);
+                Self::retain_selective_grams(grams, keep_first, df, stop_df);
+                Self::tune_children(children, df, stop_df);
+                Self::drop_weak_bags(grams, children, df, stop_df);
+            },
+            Self::AnyOf {
+                grams, children, ..
+            } => {
+                Self::sort_grams_by_df(grams, df);
+                Self::tune_children(children, df, stop_df);
+            },
+        }
     }
-    let mut flags = weak.into_iter();
-    children.retain(|_| !flags.next().unwrap_or(false));
-}
 
-fn is_weak_bag(expr: &PlanExpr, df: &dyn DfStats, stop_df: u64) -> bool {
-    let PlanExpr::AnyOf {
-        grams,
-        needs,
-        children,
-    } = expr
-    else {
-        return false;
-    };
-    if !needs.is_empty() || !children.is_empty() {
-        return false;
-    }
-    grams
-        .iter()
-        .map(|gram| estimate_candidates(gram, df))
-        .fold(0u64, u64::saturating_add)
-        >= stop_df
-}
-
-fn retain_selective_grams(
-    grams: &mut Vec<GramNeedle>,
-    keep_first: bool,
-    df: &dyn DfStats,
-    stop_df: u64,
-) {
-    let mut kept = 0usize;
-    grams.retain(|g| {
-        kept += 1;
-        ((keep_first && kept == 1) || estimate_candidates(g, df) < stop_df)
-            && kept <= MAX_ALL_OF_GRAMS
-    });
-}
-
-fn sort_grams_by_df(grams: &mut [GramNeedle], df: &dyn DfStats) {
-    for needle in grams.iter_mut() {
-        sort_keys_by_df(needle, df);
-    }
-    grams.sort_by_cached_key(|g| estimate_candidates(g, df));
-}
-
-fn tune_children(children: &mut [PlanExpr], df: &dyn DfStats, stop_df: u64) {
-    for child in children {
-        tune(child, df, stop_df);
-    }
-}
-
-fn estimate_candidates(needle: &GramNeedle, df: &dyn DfStats) -> u64 {
-    let total = df.total_entries();
-    match needle {
-        GramNeedle::Key(key) => df.entry_count(*key).min(total),
-        GramNeedle::AnyKey(keys)
-        | GramNeedle::AtWordEdge { keys, .. }
-        | GramNeedle::AtLineEdge { keys, .. } => keys
+    /// Drop weak gram bags when a stronger sibling remains
+    fn drop_weak_bags(
+        grams: &[GramNeedle],
+        children: &mut Vec<Self>,
+        df: &dyn DfStats,
+        stop_df: u64,
+    ) {
+        let weak: Vec<bool> = children
             .iter()
-            .map(|&key| df.entry_count(key))
-            .sum::<u64>()
-            .min(total),
+            .map(|child| Self::is_weak_bag(child, df, stop_df))
+            .collect();
+        let strong_left = grams.len() + weak.iter().filter(|&&flag| !flag).count();
+        if strong_left == 0 {
+            return;
+        }
+        let mut flags = weak.into_iter();
+        children.retain(|_| !flags.next().unwrap_or(false));
+    }
+
+    fn is_weak_bag(expr: &Self, df: &dyn DfStats, stop_df: u64) -> bool {
+        let Self::AnyOf {
+            grams,
+            needs,
+            children,
+        } = expr
+        else {
+            return false;
+        };
+        if !needs.is_empty() || !children.is_empty() {
+            return false;
+        }
+        grams
+            .iter()
+            .map(|gram| gram.estimate_candidates(df))
+            .fold(0u64, u64::saturating_add)
+            >= stop_df
+    }
+
+    fn retain_selective_grams(
+        grams: &mut Vec<GramNeedle>,
+        keep_first: bool,
+        df: &dyn DfStats,
+        stop_df: u64,
+    ) {
+        let mut kept = 0usize;
+        grams.retain(|gram| {
+            kept += 1;
+            ((keep_first && kept == 1) || gram.estimate_candidates(df) < stop_df)
+                && kept <= Self::MAX_ALL_OF_GRAMS
+        });
+    }
+
+    fn sort_grams_by_df(grams: &mut [GramNeedle], df: &dyn DfStats) {
+        for needle in grams.iter_mut() {
+            needle.sort_keys_by_df(df);
+        }
+        grams.sort_by_cached_key(|gram| gram.estimate_candidates(df));
+    }
+
+    fn tune_children(children: &mut [Self], df: &dyn DfStats, stop_df: u64) {
+        for child in children {
+            child.tune(df, stop_df);
+        }
     }
 }
 
-fn sort_keys_by_df(needle: &mut GramNeedle, df: &dyn DfStats) {
-    if let GramNeedle::AnyKey(keys)
-    | GramNeedle::AtWordEdge { keys, .. }
-    | GramNeedle::AtLineEdge { keys, .. } = needle
-    {
-        keys.sort_by_cached_key(|&key| df.entry_count(key));
-        keys.dedup();
+impl GramNeedle {
+    fn estimate_candidates(&self, df: &dyn DfStats) -> u64 {
+        let total = df.total_entries();
+        match self {
+            Self::Key(key) => df.entry_count(*key).min(total),
+            Self::AnyKey(keys) | Self::AtWordEdge { keys, .. } | Self::AtLineEdge { keys, .. } => {
+                keys.iter()
+                    .map(|&key| df.entry_count(key))
+                    .sum::<u64>()
+                    .min(total)
+            },
+        }
+    }
+
+    fn sort_keys_by_df(&mut self, df: &dyn DfStats) {
+        if let Self::AnyKey(keys) | Self::AtWordEdge { keys, .. } | Self::AtLineEdge { keys, .. } =
+            self
+        {
+            keys.sort_by_cached_key(|&key| df.entry_count(key));
+            keys.dedup();
+        }
     }
 }
 
@@ -121,7 +128,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::{GramKey, QueryPlan};
+    use crate::GramKey;
 
     struct MapDf {
         counts: HashMap<GramKey, u64>,
@@ -268,7 +275,7 @@ mod tests {
         children: &[PlanExpr],
         df: &dyn DfStats,
     ) -> u64 {
-        let grams = grams.iter().map(|gram| estimate_candidates(gram, df)).min();
+        let grams = grams.iter().map(|gram| gram.estimate_candidates(df)).min();
         let children = children
             .iter()
             .map(|child| estimate_expr_candidates(child, df))
@@ -287,7 +294,7 @@ mod tests {
     ) -> u64 {
         let grams = grams
             .iter()
-            .map(|gram| estimate_candidates(gram, df))
+            .map(|gram| gram.estimate_candidates(df))
             .fold(0u64, u64::saturating_add);
         let children = children
             .iter()

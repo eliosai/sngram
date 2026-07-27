@@ -4,25 +4,19 @@ use sngram_types::QueryError;
 
 use super::settings::QuerySettings;
 
-/// Validates raw query input before planning starts.
-pub struct PatternValidator;
-
-impl PatternValidator {
-    /// Validate one regex pattern.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`QueryError::PatternTooLong`] when the pattern exceeds the
-    /// planner's configured byte limit.
-    pub const fn validate(pattern: &str) -> Result<ValidatedPattern<'_>, QueryError> {
-        if pattern.len() > QuerySettings::MAX_PATTERN_LEN {
-            return Err(QueryError::PatternTooLong {
-                len: pattern.len(),
-                max: QuerySettings::MAX_PATTERN_LEN,
-            });
-        }
-        Ok(ValidatedPattern { pattern })
+/// Validate one regex pattern
+///
+/// # Errors
+///
+/// Returns [`QueryError::PatternTooLong`] when the pattern exceeds its limit
+pub const fn validate(pattern: &str) -> Result<ValidatedPattern<'_>, QueryError> {
+    if pattern.len() > QuerySettings::MAX_PATTERN_LEN {
+        return Err(QueryError::PatternTooLong {
+            len: pattern.len(),
+            max: QuerySettings::MAX_PATTERN_LEN,
+        });
     }
+    Ok(ValidatedPattern { pattern })
 }
 
 /// A regex pattern that passed cheap input validation.

@@ -1,12 +1,11 @@
 //! Query plan bindings
 
-use std::cell::RefCell;
-
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed};
 
+use crate::callback::PythonCallback;
 use crate::scanning::PyScanSummary;
 use crate::table::PyWeightTable;
 
@@ -106,16 +105,15 @@ impl PyQueryPlan {
     /// A copy reordered and thinned by the `df` per-key entry counts
     fn tune(&self, df: Bound<'_, PyAny>, total_entries: u64, stop_df: u64) -> PyResult<Self> {
         let stats = CallableDf {
-            func: df,
+            callback: PythonCallback::new(df),
             total: total_entries,
-            failure: RefCell::new(None),
         };
         let mut plan = QueryPlan::new(self.inner.clone());
         plan.tune(&stats, stop_df);
         let tuned = Self {
             inner: plan.root().clone(),
         };
-        stats.failure.into_inner().map_or_else(|| Ok(tuned), Err)
+        stats.callback.finish(tuned)
     }
 
     fn __repr__(&self) -> String {
@@ -125,20 +123,13 @@ impl PyQueryPlan {
 
 /// Document-frequency stats backed by a Python callable
 struct CallableDf<'py> {
-    func: Bound<'py, PyAny>,
+    callback: PythonCallback<'py>,
     total: u64,
-    failure: RefCell<Option<PyErr>>,
 }
 
 impl DfStats for CallableDf<'_> {
     fn entry_count(&self, key: GramKey) -> u64 {
-        self.func
-            .call1((key.value(),))
-            .and_then(|count| count.extract())
-            .unwrap_or_else(|e| {
-                self.failure.borrow_mut().get_or_insert(e);
-                0
-            })
+        self.callback.call_count(key.value())
     }
 
     fn total_entries(&self) -> u64 {

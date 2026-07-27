@@ -1,6 +1,5 @@
 //! Weight table bindings
 
-use std::cell::RefCell;
 use std::path::PathBuf;
 
 use pyo3::exceptions::{PyIOError, PyValueError};
@@ -8,6 +7,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use sngram_types::WeightTable;
+
+use crate::callback::PythonCallback;
 
 /// 256x256 byte-pair weight table
 #[pyclass(frozen, name = "WeightTable", module = "sngram")]
@@ -48,19 +49,10 @@ impl PyWeightTable {
     /// Build a table by calling `weight(c1, c2)` for every byte pair
     #[staticmethod]
     fn from_weight_fn(weight: Bound<'_, PyAny>) -> PyResult<Self> {
-        let failure = RefCell::new(None);
-        let inner = WeightTable::from_weight_fn(|c1, c2| {
-            weight
-                .call1((c1, c2))
-                .and_then(|value| value.extract())
-                .unwrap_or_else(|e| {
-                    failure.borrow_mut().get_or_insert(e);
-                    0
-                })
-        });
-        failure
-            .into_inner()
-            .map_or_else(|| Ok(Self::new(inner)), Err)
+        let callback = PythonCallback::new(weight);
+        let inner =
+            WeightTable::from_weight_fn(|first, second| callback.call_weight(first, second));
+        callback.finish(Self::new(inner))
     }
 
     /// Serialize the table to its SPNG binary

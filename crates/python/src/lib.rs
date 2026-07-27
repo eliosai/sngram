@@ -7,6 +7,7 @@
 #![allow(clippy::missing_const_for_fn, reason = "pymethods cannot be const")]
 
 mod arrow_ffi;
+mod callback;
 mod counter;
 mod plan;
 mod scanning;

@@ -26,31 +26,25 @@ impl ParsedPattern {
     }
 }
 
-/// Parses a validated pattern into regex HIR.
-pub struct QueryParser;
-
-impl QueryParser {
-    /// Parse one regex pattern with the planner's internal defaults.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`QueryError::InvalidRegex`] when regex-syntax rejects the
-    /// pattern.
-    pub fn parse(pattern: ValidatedPattern<'_>) -> Result<ParsedPattern, QueryError> {
-        let pattern = pattern.as_str();
-        let facts = PatternFacts::analyze(pattern);
-        let hir = regex_syntax::ParserBuilder::new()
-            .nest_limit(QuerySettings::VERIFIER_NEST_LIMIT)
-            .octal(QuerySettings::OCTAL)
-            .utf8(QuerySettings::UTF8)
-            .multi_line(QuerySettings::MULTI_LINE)
-            .case_insensitive(QuerySettings::CASE_INSENSITIVE)
-            .dot_matches_new_line(QuerySettings::DOT_MATCHES_NEW_LINE)
-            .crlf(QuerySettings::CRLF)
-            .unicode(QuerySettings::UNICODE)
-            .build()
-            .parse(pattern)
-            .map_err(|err| QueryError::InvalidRegex(Box::new(err)))?;
-        Ok(ParsedPattern { hir, facts })
-    }
+/// Parse one regex pattern with the planner's internal defaults
+///
+/// # Errors
+///
+/// Returns [`QueryError::InvalidRegex`] when regex-syntax rejects the pattern
+pub fn parse(pattern: ValidatedPattern<'_>) -> Result<ParsedPattern, QueryError> {
+    let pattern = pattern.as_str();
+    let facts = PatternFacts::analyze(pattern);
+    let hir = regex_syntax::ParserBuilder::new()
+        .nest_limit(QuerySettings::VERIFIER_NEST_LIMIT)
+        .octal(QuerySettings::OCTAL)
+        .utf8(QuerySettings::UTF8)
+        .multi_line(QuerySettings::MULTI_LINE)
+        .case_insensitive(QuerySettings::CASE_INSENSITIVE)
+        .dot_matches_new_line(QuerySettings::DOT_MATCHES_NEW_LINE)
+        .crlf(QuerySettings::CRLF)
+        .unicode(QuerySettings::UNICODE)
+        .build()
+        .parse(pattern)
+        .map_err(|error| QueryError::InvalidRegex(Box::new(error)))?;
+    Ok(ParsedPattern { hir, facts })
 }

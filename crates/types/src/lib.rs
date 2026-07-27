@@ -10,7 +10,6 @@ mod query;
 mod scan;
 mod spng;
 mod table;
-mod tuning;
 
 pub use bytes::{ByteSet256, EdgeBytes, SaturatingByteCounts256};
 pub use content::Content;
@@ -19,5 +18,6 @@ pub use gram::Gram;
 pub use hashing::HashKey;
 pub use learn::LearnError;
 pub use query::{DfStats, GramNeedle, PlanExpr, QueryError, QueryPlan, ScanNeed};
-pub use scan::{ByteRange, GramKey, ScanError, ScanEvent, ScanFlags, ScanSummary, ScannedGram};
+pub use scan::flags::ScanFlags;
+pub use scan::{ByteRange, GramKey, ScanError, ScanEvent, ScanSummary, ScannedGram};
 pub use table::WeightTable;
