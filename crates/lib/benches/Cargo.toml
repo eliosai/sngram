@@ -25,7 +25,7 @@ sngram = { workspace = true, features = ["learn"] }
 sngram-types = { workspace = true }
 crc32fast = { workspace = true }
 rustc-hash = "2.1"
-criterion = { version = "0.5", features = ["html_reports"] }
+divan = { workspace = true }
 
 [lints]
 workspace = true

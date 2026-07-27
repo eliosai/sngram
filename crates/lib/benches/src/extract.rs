@@ -5,33 +5,50 @@
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::excessive_nesting,
-    clippy::too_many_lines,
     clippy::unwrap_used,
     clippy::expect_used
 )]
 
-use std::{hint::black_box, io::Cursor};
+use std::{collections::HashSet, io::Cursor};
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use sngram_types::ScanEvent;
-use sngram_types::WeightTable;
+use divan::{Bencher, counter::BytesCount};
+use sngram_types::{ScanEvent, WeightTable};
+
+const SIZES: &[usize] = &[64, 256, 1024, 4096, 16384, 65536, 262_144, 1_048_576];
+const SMALL: &[usize] = &[256, 4096, 65536];
+const PIPELINE_SIZES: &[usize] = &[65_536, 1_048_576];
+const DENSITY_SIZES: &[usize] = &[4096, 65536, 1_048_576];
+
+fn main() {
+    report_density();
+    divan::main();
+}
 
 fn crc32_table() -> WeightTable {
-    WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
+    WeightTable::from_weight_fn(|first, second| crc32fast::hash(&[first, second]))
+}
+
+fn repeated(size: usize, text: &[u8]) -> Vec<u8> {
+    (0..size).map(|index| text[index % text.len()]).collect()
 }
 
 fn source_code(size: usize) -> Vec<u8> {
-    let src = b"fn main() { let x = foo_bar(42); println!(\"{x}\"); }\n";
-    (0..size).map(|i| src[i % src.len()]).collect()
+    repeated(
+        size,
+        b"fn main() { let x = foo_bar(42); println!(\"{x}\"); }\n",
+    )
 }
 
 fn prose(size: usize) -> Vec<u8> {
-    let txt = b"The quick brown fox jumps over the lazy dog. ";
-    (0..size).map(|i| txt[i % txt.len()]).collect()
+    repeated(size, b"The quick brown fox jumps over the lazy dog. ")
+}
+
+fn ascending(size: usize) -> Vec<u8> {
+    (0..size).map(|index| 32 + (index % 95) as u8).collect()
 }
 
 fn count_grams(table: &WeightTable, data: &[u8]) -> u64 {
-    let mut count = 0u64;
+    let mut count = 0;
     sngram::scan(table, Cursor::new(data), |event| {
         count += u64::from(matches!(event, ScanEvent::Gram(_)));
     })
@@ -39,138 +56,95 @@ fn count_grams(table: &WeightTable, data: &[u8]) -> u64 {
     count
 }
 
-const SIZES: &[usize] = &[64, 256, 1024, 4096, 16384, 65536, 262_144, 1_048_576];
-const SMALL: &[usize] = &[256, 4096, 65536];
-
-fn bench_weight_lookup(c: &mut Criterion) {
+fn bench_scan(bencher: Bencher, data: &[u8]) {
     let table = crc32_table();
-    c.bench_function("weight_lookup", |b| {
-        let mut i = 0u8;
-        let mut j = 0u8;
-        b.iter(|| {
-            let w = table.weight(i, j);
-            j = j.wrapping_add(1);
-            if j == 0 {
-                i = i.wrapping_add(1);
-            }
-            w
-        });
+    let bytes = BytesCount::new(data.len());
+    bencher
+        .counter(bytes)
+        .bench_local(|| count_grams(&table, data));
+}
+
+#[divan::bench(args = SIZES)]
+fn scan_code(bencher: Bencher, size: usize) {
+    let data = source_code(size);
+    bench_scan(bencher, &data);
+}
+
+#[divan::bench(args = SMALL)]
+fn scan_prose(bencher: Bencher, size: usize) {
+    let data = prose(size);
+    bench_scan(bencher, &data);
+}
+
+#[divan::bench(args = SMALL)]
+fn scan_uniform(bencher: Bencher, size: usize) {
+    let data = vec![b'a'; size];
+    bench_scan(bencher, &data);
+}
+
+#[divan::bench(args = SMALL)]
+fn scan_ascending(bencher: Bencher, size: usize) {
+    let data = ascending(size);
+    bench_scan(bencher, &data);
+}
+
+#[divan::bench]
+fn weight_lookup(bencher: Bencher) {
+    let table = crc32_table();
+    let mut first = 0u8;
+    let mut second = 0u8;
+    bencher.bench_local(|| {
+        let weight = table.weight(first, second);
+        second = second.wrapping_add(1);
+        if second == 0 {
+            first = first.wrapping_add(1);
+        }
+        weight
     });
 }
 
-fn bench_scan_code(c: &mut Criterion) {
+#[divan::bench(args = PIPELINE_SIZES)]
+fn pipeline_code_keys(bencher: Bencher, size: usize) {
     let table = crc32_table();
-    let mut group = c.benchmark_group("scan/code");
-
-    for &size in SIZES {
-        let data = source_code(size);
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, c| {
-            b.iter(|| count_grams(&table, c));
-        });
-    }
-    group.finish();
+    let data = source_code(size);
+    bencher
+        .counter(BytesCount::new(size))
+        .bench_local(|| pipeline_keys(&table, &data));
 }
 
-fn bench_scan_prose(c: &mut Criterion) {
-    let table = crc32_table();
-    let mut group = c.benchmark_group("scan/prose");
-
-    for &size in SMALL {
-        let data = prose(size);
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, c| {
-            b.iter(|| count_grams(&table, c));
-        });
-    }
-    group.finish();
+fn pipeline_keys(table: &WeightTable, data: &[u8]) -> u64 {
+    let mut keys = 0;
+    sngram::scan(table, Cursor::new(data), |event| {
+        if let ScanEvent::Gram(gram) = event {
+            keys ^= gram.key.value();
+        }
+    })
+    .expect("scan succeeds");
+    divan::black_box(keys)
 }
 
-fn bench_scan_uniform(c: &mut Criterion) {
+fn report_density() {
     let table = crc32_table();
-    let mut group = c.benchmark_group("scan/uniform");
-
-    for &size in SMALL {
-        let data = vec![b'a'; size];
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, c| {
-            b.iter(|| count_grams(&table, c));
-        });
-    }
-    group.finish();
-}
-
-fn bench_scan_ascending(c: &mut Criterion) {
-    let table = crc32_table();
-    let mut group = c.benchmark_group("scan/ascending");
-
-    for &size in SMALL {
-        // printable rotation so the binary sniff accepts the input
-        let data: Vec<u8> = (0..size).map(|i| 32 + (i % 95) as u8).collect();
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, c| {
-            b.iter(|| count_grams(&table, c));
-        });
-    }
-    group.finish();
-}
-
-// The workload every real consumer runs: content in, 64-bit index keys out.
-fn bench_pipeline(c: &mut Criterion) {
-    let table = crc32_table();
-    let mut group = c.benchmark_group("pipeline/code");
-
-    for &size in &[65_536usize, 1_048_576] {
-        let data = source_code(size);
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::new("keys", size), &data, |b, c| {
-            b.iter(|| {
-                let mut acc = 0u64;
-                sngram::scan(&table, Cursor::new(c), |event| {
-                    if let ScanEvent::Gram(gram) = event {
-                        acc ^= gram.key.value();
-                    }
-                })
-                .expect("scan succeeds");
-                black_box(acc)
-            });
-        });
-    }
-    group.finish();
-}
-
-// Reports emissions/byte and distinct-grams/byte for the indexer's per-task
-// memory and concurrency budget; prints once, registers no timed bench.
-fn report_density(_c: &mut Criterion) {
-    let table = crc32_table();
-    for &size in &[4096usize, 65536, 1_048_576] {
-        let data = source_code(size);
-        let mut emissions = 0u64;
-        let mut distinct = std::collections::HashSet::new();
-        sngram::scan(&table, Cursor::new(&data), |event| {
-            if let ScanEvent::Gram(gram) = event {
-                emissions += 1;
-                distinct.insert(gram.key.value());
-            }
-        })
-        .expect("scan succeeds");
-        eprintln!(
-            "density {size:>8}B: {:.3} emissions/byte, {:.3} distinct/byte, {} distinct",
-            emissions as f64 / size as f64,
-            distinct.len() as f64 / size as f64,
-            distinct.len(),
-        );
+    for &size in DENSITY_SIZES {
+        print_density(&table, size);
     }
 }
 
-criterion_group!(
-    benches,
-    bench_scan_code,
-    bench_scan_prose,
-    bench_scan_uniform,
-    bench_scan_ascending,
-    bench_weight_lookup,
-    bench_pipeline,
-    report_density,
-);
-criterion_main!(benches);
+fn print_density(table: &WeightTable, size: usize) {
+    let data = source_code(size);
+    let mut emissions = 0u64;
+    let mut distinct = HashSet::new();
+    sngram::scan(table, Cursor::new(&data), |event| {
+        if let ScanEvent::Gram(gram) = event {
+            emissions += 1;
+            distinct.insert(gram.key.value());
+        }
+    })
+    .expect("scan succeeds");
+    eprintln!(
+        "density {size:>8}B: {:.3} emissions/byte, {:.3} distinct/byte, {} distinct",
+        emissions as f64 / size as f64,
+        distinct.len() as f64 / size as f64,
+        distinct.len(),
+    );
+}

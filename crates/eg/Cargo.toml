@@ -46,7 +46,7 @@ textwrap = { version = "0.16.2", default-features = false }
 termcolor = "1.4.1"
 
 [dev-dependencies]
-divan = "0.1.21"
+divan = { workspace = true }
 tempfile = "3"
 
 [features]
