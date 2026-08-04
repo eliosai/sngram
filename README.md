@@ -1,5 +1,7 @@
 # sngram
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/eliosai/sngram?utm_source=badge)
+
 Sparse n-gram extraction for regular-expression search indexing, and
 elgrep, an indexed ripgrep alternative built on it.
 

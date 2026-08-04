@@ -88,18 +88,20 @@ fn scan_ascending(bencher: Bencher, size: usize) {
     bench_scan(bencher, &data);
 }
 
+// A single lookup is below the resolution of CPU simulation, so sweep the
+// whole byte-pair space to give the benchmark a measurable body.
 #[divan::bench]
 fn weight_lookup(bencher: Bencher) {
     let table = crc32_table();
-    let mut first = 0u8;
-    let mut second = 0u8;
     bencher.bench_local(|| {
-        let weight = table.weight(first, second);
-        second = second.wrapping_add(1);
-        if second == 0 {
-            first = first.wrapping_add(1);
+        let mut total = 0u64;
+        for first in 0..=u8::MAX {
+            for second in 0..=u8::MAX {
+                let weight = table.weight(divan::black_box(first), divan::black_box(second));
+                total += u64::from(weight);
+            }
         }
-        weight
+        total
     });
 }
 
