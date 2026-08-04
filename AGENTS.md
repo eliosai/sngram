@@ -131,7 +131,7 @@ Unit tests belong in `mod tests {}` inside the source file that owns the logic. 
 
 ## benchmarking
 
-`eg` benches run on Divan; the library benches in `crates/lib/benches` run on Criterion.
+`eg` benches and the library benches in `crates/lib/benches` run on Divan, through the CodSpeed compatibility layer. The Python bindings are benchmarked with `pytest-codspeed` in `crates/python/benchmarks`. Every push and pull request runs both suites under CodSpeed CPU simulation (`.github/workflows/codspeed.yml`).
 
 CLI:
 
@@ -151,6 +151,20 @@ Library benches, from the `sngram-benches` crate at `crates/lib/benches`:
 cargo bench -p sngram-benches --bench extract
 cargo bench -p sngram-benches --bench query
 cargo bench -p sngram-benches --bench counter
+```
+
+Under CodSpeed, locally, matching what CI does. `RUSTFLAGS=""` is required: the repo-local `target-cpu=native` codegen is not executable under valgrind.
+
+```sh
+RUSTFLAGS="" cargo codspeed build -p sngram-benches
+RUSTFLAGS="" codspeed run --mode simulation -- cargo codspeed run -p sngram-benches
+```
+
+Python binding benches, from `crates/python`:
+
+```sh
+RUSTFLAGS="" uv sync
+RUSTFLAGS="" codspeed run --mode simulation -- uv run --no-sync pytest benchmarks --codspeed
 ```
 
 Report command lines with results. For hot-path claims, compare indexed `eg` against `eg --no-index` on the same corpus and output mode, and add `rg` when a real ripgrep binary is on PATH.

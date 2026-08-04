@@ -1,0 +1,60 @@
+name: codspeed
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets CodSpeed trigger backtest runs to seed the baseline.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OpenID Connect authentication with CodSpeed
+
+env:
+  CARGO_TERM_COLOR: always
+  # Valgrind cannot execute the repo-local `target-cpu=native` codegen
+  RUSTFLAGS: ""
+
+jobs:
+  rust:
+    name: Rust benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup rust toolchain, cache and cargo-codspeed binary
+        uses: moonrepo/setup-rust@v0
+        with:
+          channel: stable
+          cache-target: release
+          bins: cargo-codspeed
+
+      - name: Build the benchmark targets
+        run: cargo codspeed build -p sngram-benches
+
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          run: cargo codspeed run -p sngram-benches
+
+  python:
+    name: Python benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Build the extension module and install dependencies
+        run: uv sync
+        working-directory: crates/python
+
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          working-directory: crates/python
+          run: uv run --no-sync pytest benchmarks --codspeed
