@@ -21,11 +21,12 @@ path = "src/counter.rs"
 harness = false
 
 [dependencies]
-sngram = { workspace = true, features = ["learn"] }
+sngram = { workspace = true, features = ["learn", "stream"] }
 sngram-types = { workspace = true }
 crc32fast = { workspace = true }
 rustc-hash = "2.1"
 divan = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true

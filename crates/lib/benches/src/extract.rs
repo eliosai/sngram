@@ -112,15 +112,59 @@ fn pipeline_code_keys(bencher: Bencher, size: usize) {
         .bench_local(|| pipeline_keys(&table, &data));
 }
 
+#[divan::bench(args = PIPELINE_SIZES)]
+fn pipeline_incremental_keys(bencher: Bencher, size: usize) {
+    let table = crc32_table();
+    let data = source_code(size);
+    bencher
+        .counter(BytesCount::new(size))
+        .bench_local(|| incremental_keys(&table, &data));
+}
+
+#[divan::bench(args = PIPELINE_SIZES)]
+fn pipeline_async_keys(bencher: Bencher, size: usize) {
+    let table = crc32_table();
+    let data = source_code(size);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("benchmark runtime");
+    bencher
+        .counter(BytesCount::new(size))
+        .bench_local(|| runtime.block_on(async_keys(&table, &data)));
+}
+
 fn pipeline_keys(table: &WeightTable, data: &[u8]) -> u64 {
     let mut keys = 0;
     sngram::scan(table, Cursor::new(data), |event| {
-        if let ScanEvent::Gram(gram) = event {
-            keys ^= gram.key.value();
-        }
+        fold_key(event, &mut keys);
     })
     .expect("scan succeeds");
     divan::black_box(keys)
+}
+
+fn incremental_keys(table: &WeightTable, data: &[u8]) -> u64 {
+    let mut keys = 0;
+    let mut scanner = sngram::TextScanner::new(table);
+    for chunk in data.chunks(8192) {
+        scanner.push(chunk, |event| fold_key(event, &mut keys));
+    }
+    scanner.finish(|event| fold_key(event, &mut keys));
+    divan::black_box(keys)
+}
+
+async fn async_keys(table: &WeightTable, data: &[u8]) -> u64 {
+    let reader = tokio::io::BufReader::with_capacity(8192, Cursor::new(data));
+    let mut keys = 0;
+    sngram::scan_async(table, reader, |event| fold_key(event, &mut keys))
+        .await
+        .expect("scan succeeds");
+    divan::black_box(keys)
+}
+
+const fn fold_key(event: ScanEvent<'_>, keys: &mut u64) {
+    if let ScanEvent::Gram(gram) = event {
+        *keys ^= gram.key.value();
+    }
 }
 
 fn report_density() {

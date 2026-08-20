@@ -1496,6 +1496,7 @@ dependencies = [
  "rustc-hash",
  "sngram",
  "sngram-types",
+ "tokio",
 ]
 
 [[package]]
