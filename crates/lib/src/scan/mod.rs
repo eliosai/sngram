@@ -13,6 +13,42 @@ use sngram_types::{ScanError, ScanEvent, WeightTable};
 #[cfg(feature = "stream")]
 use tokio::io::AsyncBufRead;
 
+/// Incremental scan for content classified by the caller as text
+pub struct TextScanner<'t> {
+    scanner: engine::DocumentScanner<'t>,
+    started: bool,
+}
+
+impl<'t> TextScanner<'t> {
+    /// Open an incremental text scan
+    #[must_use]
+    pub fn new(table: &'t WeightTable) -> Self {
+        Self {
+            scanner: engine::DocumentScanner::new(table),
+            started: false,
+        }
+    }
+
+    /// Scan one contiguous content chunk
+    pub fn push(&mut self, chunk: &[u8], mut emit: impl for<'event> FnMut(ScanEvent<'event>)) {
+        self.begin(&mut emit);
+        self.scanner.push_content(chunk, &mut emit);
+    }
+
+    /// Finish the content stream and emit its final facts
+    pub fn finish(mut self, mut emit: impl for<'event> FnMut(ScanEvent<'event>)) {
+        self.begin(&mut emit);
+        self.scanner.finish_document(&mut emit);
+    }
+
+    fn begin(&mut self, emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+        if !self.started {
+            self.scanner.begin_document(emit);
+            self.started = true;
+        }
+    }
+}
+
 /// Extract sparse n-grams and scan metadata from one byte stream.
 ///
 /// The scanner reads the input once, emits raw gram keys plus case-folded
@@ -126,6 +162,47 @@ mod tests {
         });
     }
 
+    #[test]
+    fn externally_classified_text_scans_incremental_chunks() {
+        let table = table();
+        let input = b"fn Max_file_size() -> u64 { 0 }\n";
+        let expected = collect_sync(input);
+        let mut grams = Vec::new();
+        let mut summary = None;
+        let mut scanner = super::TextScanner::new(&table);
+
+        scanner.push(&input[..7], |event| {
+            collect(event, &mut grams, &mut summary);
+        });
+        scanner.push(&input[7..], |event| {
+            collect(event, &mut grams, &mut summary);
+        });
+        scanner.finish(|event| collect(event, &mut grams, &mut summary));
+        grams.sort_unstable();
+
+        assert_eq!((grams, summary), expected);
+    }
+
+    #[test]
+    fn externally_classified_text_does_not_apply_binary_policy() {
+        let table = table();
+        let mut summary = None;
+        let mut scanner = super::TextScanner::new(&table);
+
+        scanner.push(b"text\0tail", |event| {
+            if let ScanEvent::Finish(done) = event {
+                summary = Some(*done);
+            }
+        });
+        scanner.finish(|event| {
+            if let ScanEvent::Finish(done) = event {
+                summary = Some(*done);
+            }
+        });
+
+        assert_eq!(summary.expect("scan summary").byte_len, 9);
+    }
+
     #[cfg(feature = "stream")]
     #[test]
     fn async_binary_input_is_rejected_before_any_event() {
@@ -181,7 +258,6 @@ mod tests {
         (grams, summary)
     }
 
-    #[cfg(feature = "stream")]
     fn collect_sync(input: &[u8]) -> (Vec<u64>, Option<ScanSummary>) {
         let table = table();
         let mut grams = Vec::new();
@@ -194,7 +270,6 @@ mod tests {
         (grams, summary)
     }
 
-    #[cfg(feature = "stream")]
     fn collect(event: ScanEvent<'_>, grams: &mut Vec<u64>, summary: &mut Option<ScanSummary>) {
         match event {
             ScanEvent::Gram(gram) => grams.push(gram.key.value()),

@@ -35,6 +35,7 @@ mod weights;
 pub mod learn;
 
 pub use query::query;
+pub use scan::TextScanner;
 pub use scan::scan;
 #[cfg(feature = "stream")]
 pub use scan::scan_async;

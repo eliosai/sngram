@@ -73,6 +73,16 @@ sngram::scan_async(&table, reader, emit).await?;
 callback order may differ with reader chunking; an inverted index treats
 the emitted keys as a set.
 
+Callers that already classify their own byte stream can feed its chunks
+through `TextScanner`. It does not apply binary policy, so the caller can
+keep reading after finding binary content and discard the provisional events.
+
+```rust,ignore
+let mut scanner = sngram::TextScanner::new(&table);
+scanner.push(chunk, emit);
+scanner.finish(emit);
+```
+
 ```rust,ignore
 pub enum PlanExpr {
     All,

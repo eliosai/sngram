@@ -64,6 +64,8 @@ Also:
 - The `stream` feature exposes `scan_async` for `AsyncBufRead` inputs. It
   emits the same key set and scan summary as synchronous `scan` without
   materializing the complete document.
+- `TextScanner` accepts externally classified chunks while preserving the
+  same gram and summary format, so storage engines can verify one stream pass.
 - Queries the index cannot express, an inverted match, `--passthru`, binary
   flags, a stdin pipe, or a pattern too broad to prefilter, now scan instead
   of exiting 2. Invalid patterns and missing paths still fail.
