@@ -21,6 +21,7 @@
 //! # API
 //!
 //! - [`scan`] extracts sparse n-grams and metadata from one byte stream.
+//! - `scan_async` extracts the same index format from an asynchronous stream.
 //! - [`query`] decomposes one regex pattern into a planned gram prefilter.
 //! - `weights` embeds the trained production weight table.
 //! - `learn` module (feature `learn`) trains fresh weight tables.
@@ -35,6 +36,8 @@ pub mod learn;
 
 pub use query::query;
 pub use scan::scan;
+#[cfg(feature = "stream")]
+pub use scan::scan_async;
 pub use sngram_types::{
     DfStats, GramKey, GramNeedle, LearnError, PlanExpr, QueryError, QueryPlan, ScanError,
     ScanEvent, ScanNeed, ScanSummary, ScannedGram, TableError, WeightTable,

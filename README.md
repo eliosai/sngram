@@ -94,6 +94,9 @@ sngram::scan(&table, reader, emit)?;   // index side: text to grams
 sngram::query(&table, pattern)?;       // query side: regex to a plan
 ```
 
+The `stream` feature adds `scan_async` for `AsyncBufRead` inputs and emits
+the same index key set and summary without buffering the complete document.
+
 `scan` streams a document and hands back the grams to store, keyed
 exactly as `query` will look them up. It runs at about 208 MiB/s on code.
 The README in [crates/lib](crates/lib) covers the plan structure, the

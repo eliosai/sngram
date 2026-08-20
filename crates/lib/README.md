@@ -62,6 +62,17 @@ pass. For valid patterns `query` is infallible: a pattern too broad to
 prefilter yields `PlanExpr::All` and an impossible one yields
 `PlanExpr::None`.
 
+Enable `stream` to scan an asynchronous buffered reader without first
+materializing the complete input:
+
+```rust,ignore
+sngram::scan_async(&table, reader, emit).await?;
+```
+
+`scan` and `scan_async` emit the same gram keys and final summary. Gram
+callback order may differ with reader chunking; an inverted index treats
+the emitted keys as a set.
+
 ```rust,ignore
 pub enum PlanExpr {
     All,
@@ -88,6 +99,7 @@ pattern you pass in.
 | feature | adds |
 |---|---|
 | `weights` | the embedded production weight table, loaded with `sngram::weights()` |
+| `stream` | `scan_async` over `tokio::io::AsyncBufRead` |
 | `learn` | `sngram::learn::BigramCounter`, the byte-pair counter that trains fresh tables |
 
 Count with `process` or `process_batch`, merge staging counters with

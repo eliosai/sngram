@@ -34,6 +34,7 @@ sngram-types = { workspace = true }
 crc32fast = { workspace = true }
 regex = { workspace = true }
 regex-lite = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true

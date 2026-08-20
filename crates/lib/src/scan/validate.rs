@@ -3,6 +3,8 @@
 use std::io::BufRead;
 
 use sngram_types::{Content, ScanError};
+#[cfg(feature = "stream")]
+use tokio::io::AsyncBufRead;
 
 const SNIFF_BYTES: usize = 8192;
 
@@ -50,6 +52,26 @@ where
         input.consume(take);
     }
 
+    let prefix = ValidatedPrefix { bytes };
+    validate(prefix.bytes())?;
+    Ok(ValidatedInput { prefix, input })
+}
+
+#[cfg(feature = "stream")]
+pub async fn read_async<R>(mut input: R) -> Result<ValidatedInput<R>, ScanError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::with_capacity(SNIFF_BYTES);
+    while bytes.len() < SNIFF_BYTES {
+        let chunk = tokio::io::AsyncBufReadExt::fill_buf(&mut input).await?;
+        if chunk.is_empty() {
+            break;
+        }
+        let take = chunk.len().min(SNIFF_BYTES - bytes.len());
+        bytes.extend_from_slice(&chunk[..take]);
+        tokio::io::AsyncBufReadExt::consume(&mut input, take);
+    }
     let prefix = ValidatedPrefix { bytes };
     validate(prefix.bytes())?;
     Ok(ValidatedInput { prefix, input })
