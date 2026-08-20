@@ -68,9 +68,8 @@ where
     R: BufRead,
 {
     let validated = validate::read(input)?;
-    let mut scanner = engine::DocumentScanner::new(table);
-    scanner.begin_document(&mut emit);
-    scanner.push_content(validated.prefix().bytes(), &mut emit);
+    let mut scanner = TextScanner::new(table);
+    scanner.push(validated.prefix().bytes(), &mut emit);
     let mut input = validated.into_input();
     loop {
         let chunk = input.fill_buf()?;
@@ -78,10 +77,10 @@ where
             break;
         }
         let len = chunk.len();
-        scanner.push_content(chunk, &mut emit);
+        scanner.push(chunk, &mut emit);
         input.consume(len);
     }
-    scanner.finish_document(&mut emit);
+    scanner.finish(&mut emit);
     Ok(())
 }
 
@@ -101,9 +100,8 @@ where
     R: AsyncBufRead + Unpin,
 {
     let validated = validate::read_async(input).await?;
-    let mut scanner = engine::DocumentScanner::new(table);
-    scanner.begin_document(&mut emit);
-    scanner.push_content(validated.prefix().bytes(), &mut emit);
+    let mut scanner = TextScanner::new(table);
+    scanner.push(validated.prefix().bytes(), &mut emit);
     let mut input = validated.into_input();
     loop {
         let chunk = tokio::io::AsyncBufReadExt::fill_buf(&mut input).await?;
@@ -111,10 +109,10 @@ where
             break;
         }
         let len = chunk.len();
-        scanner.push_content(chunk, &mut emit);
+        scanner.push(chunk, &mut emit);
         tokio::io::AsyncBufReadExt::consume(&mut input, len);
     }
-    scanner.finish_document(&mut emit);
+    scanner.finish(&mut emit);
     Ok(())
 }
 
