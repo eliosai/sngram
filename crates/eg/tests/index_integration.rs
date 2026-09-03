@@ -297,7 +297,6 @@ fn assert_bench_schema(report: &serde_json::Value) {
         "verified_files",
         "matched_files",
         "forced_candidate_files",
-        "held_candidate_files",
         "parent_restricted_candidates",
     ] {
         assert!(
@@ -321,7 +320,6 @@ fn assert_bench_schema(report: &serde_json::Value) {
         "index_table_bytes",
         "index_postings_bytes",
         "summary_bytes",
-        "verbatim_bytes",
         "manifest_bytes",
         "mmap_bytes",
         "bytes_verified",
@@ -2450,13 +2448,13 @@ fn indexed_search_finds_a_match_before_a_far_off_nul() {
     );
 }
 
-/// The scanner refuses a signed pre-NUL prefix, so the index holds it whole
+/// The bytes before a NUL are indexed, so a match there survives the index
 #[test]
-fn held_prefix_reports_the_match_the_scan_path_finds() {
+fn a_match_before_a_nul_is_reported_the_way_the_scan_path_reports_it() {
     let fixture = Fixture::new();
     fs::write(
-        fixture.path("held.png"),
-        b"\x89PNG\r\n\x1a\nheld needle here\0trailing\n".as_slice(),
+        fixture.path("signed.png"),
+        b"\x89PNG\r\n\x1a\nsigned needle here\0trailing\n".as_slice(),
     )
     .unwrap();
     fs::write(fixture.path("text.txt"), "plain text miss\n").unwrap();
@@ -2464,46 +2462,46 @@ fn held_prefix_reports_the_match_the_scan_path_finds() {
     let indexed = eg(&[
         "--index=auto",
         "--files-with-matches",
-        "held needle here",
+        "signed needle here",
         fixture.root.to_str().unwrap(),
     ]);
     let scanned = eg(&[
         "--no-index",
         "--files-with-matches",
-        "held needle here",
+        "signed needle here",
         fixture.root.to_str().unwrap(),
     ]);
     let scanned_stdout = String::from_utf8(scanned.stdout).unwrap();
 
     assert!(
-        scanned_stdout.contains("held.png"),
-        "fixture must reproduce a scan-path hit inside the held prefix: {scanned_stdout}"
+        scanned_stdout.contains("signed.png"),
+        "fixture must reproduce a scan-path hit before the NUL: {scanned_stdout}"
     );
     assert_eq!(
         scanned_stdout,
         String::from_utf8(indexed.stdout).unwrap(),
-        "a held prefix must not lose a match the scan path reports"
+        "a match before a NUL must survive the index"
     );
 }
 
-/// A held prefix that cannot match never reaches the verifier
+/// A signed prefix that cannot match is ruled out by its grams, not by verification
 #[test]
-fn held_prefix_that_cannot_match_is_not_a_candidate() {
+fn a_signed_prefix_that_cannot_match_is_not_a_candidate() {
     let fixture = Fixture::new();
     for i in 0..40 {
         fs::write(
-            fixture.path(format!("held_{i:02}.png")),
-            b"\x89PNG\r\n\x1a\n\0payload\n".as_slice(),
+            fixture.path(format!("signed_{i:02}.png")),
+            b"\x89PNG\r\n\x1a\0payload\n".as_slice(),
         )
         .unwrap();
     }
-    fs::write(fixture.path("hit.txt"), "unheld candidate needle\n").unwrap();
+    fs::write(fixture.path("hit.txt"), "lone candidate needle\n").unwrap();
 
     let output = eg(&[
         "--bench",
         "--index=auto",
         "--files-with-matches",
-        "unheld candidate needle",
+        "lone candidate needle",
         fixture.root.to_str().unwrap(),
     ]);
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -2511,9 +2509,110 @@ fn held_prefix_that_cannot_match_is_not_a_candidate() {
 
     assert_bench_schema(&report);
     assert_eq!(Some(0), report["counts"]["forced_candidate_files"].as_u64());
-    assert_eq!(Some(0), report["counts"]["held_candidate_files"].as_u64());
     assert_eq!(Some(1), report["counts"]["candidate_files"].as_u64());
-    assert!(report["bytes"]["verbatim_bytes"].as_u64().unwrap() > 0);
+}
+
+/// A NUL-free file the old signature sniff refused is gram-indexed now
+#[test]
+fn a_nul_free_signature_blob_is_gram_indexed_and_found() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.path("archive.bz2"),
+        b"BZh91AY&SY compressed needle here\n".as_slice(),
+    )
+    .unwrap();
+    for i in 0..40 {
+        fs::write(fixture.path(format!("filler_{i:02}.txt")), "unrelated\n").unwrap();
+    }
+
+    let output = eg(&[
+        "--bench",
+        "--index=auto",
+        "--files-with-matches",
+        "compressed needle here",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let report: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+
+    assert_eq!(
+        Some(0),
+        report["counts"]["forced_candidate_files"].as_u64(),
+        "a NUL-free signature blob is indexed for its grams, not forced: {report}"
+    );
+    assert_eq!(Some(1), report["counts"]["matched_files"].as_u64());
+}
+
+/// A control-heavy log the old density sniff refused is gram-indexed now
+#[test]
+fn a_control_heavy_log_is_gram_indexed_and_found() {
+    let fixture = Fixture::new();
+    let mut log = Vec::new();
+    let modules = ["parser", "scanner", "planner", "verifier", "daemon"];
+    for step in 0..200 {
+        let module = modules[step % modules.len()];
+        log.extend_from_slice(
+            format!("\x1b[2K\r\x1b[32m[ok]\x1b[0m compiled the {module} module\x07\n").as_bytes(),
+        );
+    }
+    log.extend_from_slice(b"escaped needle here\n");
+    fs::write(fixture.path("session.ansi"), &log).unwrap();
+    for i in 0..40 {
+        fs::write(fixture.path(format!("filler_{i:02}.txt")), "unrelated\n").unwrap();
+    }
+
+    let output = eg(&[
+        "--bench",
+        "--index=auto",
+        "--files-with-matches",
+        "escaped needle here",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let report: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+
+    assert_eq!(
+        Some(0),
+        report["counts"]["forced_candidate_files"].as_u64(),
+        "a control-heavy log is indexed for its grams, not forced: {report}"
+    );
+    assert_eq!(Some(1), report["counts"]["matched_files"].as_u64());
+}
+
+/// A NUL anywhere still makes the file binary to the output modes, past 8 KiB included
+#[test]
+fn a_nul_past_the_first_8_kib_still_makes_the_file_binary() {
+    let fixture = Fixture::new();
+    let mut late = vec![b'a'; 10 * 1024];
+    late.extend_from_slice(b"\nlate needle here\n");
+    fs::write(fixture.path("late.bin"), &late).unwrap();
+    let mut after = vec![b'a'; 10 * 1024];
+    after.extend_from_slice(b"\0late needle here\n");
+    fs::write(fixture.path("after.bin"), &after).unwrap();
+
+    let indexed = eg(&[
+        "--index=auto",
+        "--files-with-matches",
+        "late needle here",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let scanned = eg(&[
+        "--no-index",
+        "--files-with-matches",
+        "late needle here",
+        fixture.root.to_str().unwrap(),
+    ]);
+    let indexed_stdout = String::from_utf8(indexed.stdout).unwrap();
+
+    assert!(
+        indexed_stdout.contains("late.bin"),
+        "a NUL-free file past 8 KiB is named: {indexed_stdout}"
+    );
+    assert!(
+        !indexed_stdout.contains("after.bin"),
+        "a match after a NUL is not reported: {indexed_stdout}"
+    );
+    assert_eq!(indexed_stdout, String::from_utf8(scanned.stdout).unwrap());
 }
 
 #[test]
