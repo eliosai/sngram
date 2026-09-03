@@ -27,7 +27,7 @@ jobs:
         with:
           fetch-depth: 0
           ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
           toolchain: "1.97"
           components: clippy, rustfmt
@@ -35,11 +35,19 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - uses: taiki-e/install-action@v2
         with:
-          tool: just,cargo-nextest,cargo-semver-checks,git-cliff
+          tool: just,cargo-nextest,cargo-deny,cargo-semver-checks,git-cliff
       - name: check, clippy, fmt
         run: just check
       - name: tests
         run: just test-ci
+      - name: doc tests
+        run: just test-doc
+      - name: doc build
+        run: just doc-check
+      - name: package
+        run: just package-check
+      - name: audit
+        run: just audit
       - name: crates.io token
         id: crates
         uses: rust-lang/crates-io-auth-action@v1.0.5

@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: gate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -23,7 +26,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
           toolchain: "1.97"
           components: clippy, rustfmt
@@ -31,8 +34,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,cargo-nextest,cargo-deny
-      - name: agent layout
-        run: bash .github/scripts/check-agent-layout.sh
       - name: check, clippy, fmt
         run: just check
       - name: tests
@@ -52,12 +53,15 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
           toolchain: "1.96"
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - name: check on the minimum supported Rust version
-        run: cargo +1.96 check --workspace --all-targets --locked
+        run: just msrv
 
   py-lint:
     if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
@@ -78,7 +82,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
           toolchain: "1.97"
       - uses: Swatinem/rust-cache@v2
@@ -95,7 +99,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
           toolchain: "1.97"
       - uses: Swatinem/rust-cache@v2

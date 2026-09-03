@@ -18,13 +18,29 @@ published() {
     curl -sf "https://index.crates.io/$2" | grep -q "\"vers\":\"$1\""
 }
 
+# Both crates ship together, so a version is released only when both carry it
+fully_published() {
+    published "$1" sn/gr/sngram && published "$1" el/gr/elgrep
+}
+
+# The newest sngram release on crates.io, where the notes for an untagged release start
+last_published_version() {
+    curl -sf "https://index.crates.io/sn/gr/sngram" |
+        python3 -c 'import json, sys; print(max((json.loads(line)["vers"] for line in sys.stdin if line.strip()), key=lambda v: tuple(int(part) for part in v.split("."))))'
+}
+
+# The commit that set the last published version, so the first tagged release does not replay the whole history
+last_release_commit() {
+    git log -S"version = \"$(last_published_version)\"" --format=%H -- Cargo.toml | tail -1
+}
+
 # major when the API breaks or a subject carries `!`, minor for a feat, patch for a fix, perf or refactor
 bump_kind() {
     local subjects
     subjects=$(git log --format=%s "$last_tag..HEAD")
     if grep -qE '^[a-z]+(\([^)]*\))?!:' <<<"$subjects"; then
         echo major
-    elif ! cargo semver-checks -p sngram --all-features --baseline-rev "$last_tag" >/dev/null 2>&1; then
+    elif ! cargo semver-checks -p sngram --all-features --release-type minor --baseline-rev "$last_tag" >/dev/null 2>&1; then
         echo major
     elif grep -qE '^feat(\([^)]*\))?:' <<<"$subjects"; then
         echo minor
@@ -35,13 +51,12 @@ bump_kind() {
     fi
 }
 
-# a major bump before 1.0 moves the minor, the way cargo reads 0.x
 next_version() {
     local major minor patch
     IFS=. read -r major minor patch <<<"${last_tag#v}"
     case "$1" in
-        major) if ((major == 0)); then echo "0.$((minor + 1)).0"; else echo "$((major + 1)).0.0"; fi ;;
-        minor) if ((major == 0)); then echo "0.$((minor + 1)).0"; else echo "$major.$((minor + 1)).0"; fi ;;
+        major) echo "$((major + 1)).0.0" ;;
+        minor) echo "$major.$((minor + 1)).0" ;;
         patch) echo "$major.$minor.$((patch + 1))" ;;
     esac
 }
@@ -53,9 +68,9 @@ newer() {
 if [[ -z "$last_tag" ]]; then
     next=$current
     reason="first tagged release, from Cargo.toml"
-elif [[ "v$current" == "$last_tag" ]] && ! published "$current" sn/gr/sngram; then
+elif [[ "v$current" == "$last_tag" ]] && ! fully_published "$current"; then
     next=$current
-    reason="tagged but not on crates.io"
+    reason="tagged but not published by both crates"
 elif [[ "v$current" != "$last_tag" ]]; then
     if ! newer "$current" "${last_tag#v}"; then
         echo "Cargo.toml says $current but $last_tag is already released" >&2
@@ -83,18 +98,23 @@ if [[ "$next" != "$current" ]]; then
     sed -i "s/^sngram = { version = \"$current\", path = \"crates\/lib\" }$/sngram = { version = \"$next\", path = \"crates\/lib\" }/" Cargo.toml
     sed -i "s/^version = \"$current\"$/version = \"$next\"/" crates/python/pyproject.toml
     sed -i "s/^__version__ = \"$current\"$/__version__ = \"$next\"/" crates/python/sngram/__init__.py
+    sed -i "s/^version = \".*\"$/version = \"$next\"/" train/pyproject.toml
     cargo update --workspace
     (cd crates/python && uv lock -q)
     (cd train && uv lock -q)
 fi
 
 notes=$(mktemp)
-git-cliff --tag "v$next" --unreleased --strip all >"$notes"
-git-cliff --tag "v$next" --unreleased --prepend CHANGELOG.md
+range=()
+if [[ -z "$last_tag" ]]; then
+    range=("$(last_release_commit)..HEAD")
+fi
+git-cliff --tag "v$next" --unreleased --strip all "${range[@]}" >"$notes"
+git-cliff --tag "v$next" --unreleased --prepend CHANGELOG.md "${range[@]}"
 
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-git add Cargo.toml Cargo.lock CHANGELOG.md crates/python/pyproject.toml crates/python/sngram/__init__.py crates/python/uv.lock train/uv.lock
+git add Cargo.toml Cargo.lock CHANGELOG.md crates/python/pyproject.toml crates/python/sngram/__init__.py crates/python/uv.lock train/pyproject.toml train/uv.lock
 if ! git diff --cached --quiet; then
     git commit -m "chore(release): v$next"
 fi

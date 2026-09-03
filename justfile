@@ -9,14 +9,13 @@ default:
 
 # Scan docs and layout, then format-check, type-check and lint the workspace and both sngram feature sets
 check:
+    bash .github/scripts/check-agent-layout.sh
     bash scripts/doc-scan.sh
     bash scripts/layout-scan.sh
     cargo fmt --all -- --check
-    cargo check --workspace --all-targets
-    cargo check -p sngram --all-targets --all-features
+    cargo check --workspace --all-targets --all-features
     cargo check -p sngram --all-targets --no-default-features
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo clippy -p sngram --all-targets --all-features -- -D warnings
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo clippy -p sngram --all-targets --no-default-features -- -D warnings
 
 # Count the comments that still run past one line
@@ -61,9 +60,11 @@ docs-open:
 msrv:
     cargo +1.96 check --workspace --all-targets --locked
 
-# Compare the sngram API against the last release, or against the given revision
+# Report every sngram API break against the last release, or against the given revision
+# --release-type minor asks whether a minor release would be legal, so a major bump in the
+# manifest cannot mask the breakage the way a bare run does
 semver-check baseline="":
-    cargo semver-checks -p sngram --all-features {{ if baseline != "" { "--baseline-rev " + baseline } else { "" } }}
+    cargo semver-checks -p sngram --all-features --release-type minor {{ if baseline != "" { "--baseline-rev " + baseline } else { "" } }}
 
 # Build the crates.io packages and list what ships in them
 package-check:
@@ -74,10 +75,18 @@ package-check:
 audit:
     cargo deny check
 
-# Run the library benches the way CodSpeed does; the repo-local native codegen cannot run under valgrind
-bench:
+# Build the library benches; the repo-local native codegen cannot run under valgrind
+bench-build:
     RUSTFLAGS="" cargo codspeed build -p sngram-benches
+
+# Run the built library benches
+bench-run:
     RUSTFLAGS="" cargo codspeed run -p sngram-benches
+
+# Build and run the library benches the way CodSpeed does
+bench:
+    just bench-build
+    just bench-run
 
 # Lint the python package and the trainer with ruff
 py-lint:
@@ -99,6 +108,12 @@ wheel:
     cd crates/python && uvx maturin build --release --out ../../target/wheel-smoke
     bash scripts/wheel-smoke.sh
 
+# Enforce the reviewable diff budget, defaulting to this branch against main
+size:
+    BASE_SHA="${BASE_SHA:-$(git merge-base origin/main HEAD)}" \
+    HEAD_SHA="${HEAD_SHA:-HEAD}" \
+    bash scripts/pr-size-gate.sh
+
 # Install the git hooks
 hooks:
     prek install --hook-type pre-commit --hook-type pre-push
@@ -111,7 +126,7 @@ hooks-run:
 release-plan:
     bash scripts/release.sh --dry-run
 
-# Run everything the gate runs
+# Run every check the gate blocks on
 ci:
     just check
     just test-ci
@@ -119,9 +134,12 @@ ci:
     just doc-check
     just package-check
     just audit
+    just msrv
     just py-lint
     just py-test
     just wheel
+    just bench
+    rm -rf target/tmp
 
 # Remove every build artifact
 clean:
