@@ -139,6 +139,7 @@ ci:
     just py-test
     just wheel
     just bench
+    just py-bench
     rm -rf target/tmp
 
 # Remove every build artifact

@@ -52,5 +52,5 @@ unless the pull request carries the `semver-major` label. It runs `just semver-c
 whether a minor release would be legal rather than whether the manifest version is. The `size` check counts added lines
 outside `Cargo.lock`, the `uv.lock` files, `CHANGELOG.md`, `.agents/skills`, the `.tsv` fixtures
 and `crates/lib/data`, with a budget of 1000, 3000 under the `mechanical` label, and none under
-`size-exempt`. The `bench` workflow runs the library and python benches on CodSpeed for every pull
-request and push to `main`.
+`size-exempt`. The `bench` workflow runs the library and python benches on CodSpeed for every pull request and
+push to `main`. Every other job runs a `just` recipe, and `just ci` runs all of them together.

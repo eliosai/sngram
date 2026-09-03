@@ -33,10 +33,11 @@ the agent layout, the docs and the module layout, format-checks, then type-check
 workspace with every feature and the `sngram` crate with none, with warnings denied. `just test`
 runs nextest, `just test-doc` the doc examples, `just doc-check` the docs.rs build,
 `just package-check` the crates.io packages, `just msrv` the 1.96 build, `just audit` cargo-deny,
-`just bench` the library benches the way CodSpeed runs them, and `just py-lint`, `just py-test` and
-`just wheel` the Python side. `just ci` runs all of those in order and clears the test fixtures.
-Two recipes need a base revision and so stay out of `ci`: `just semver-check <rev>` compares the
-`sngram` API, and `just size` counts the added lines against `main`. `just hooks` installs the prek
+`just bench` and `just py-bench` the benches the way CodSpeed runs them, and `just py-lint`,
+`just py-test` and `just wheel` the Python side. `just ci` runs every one of those in order and
+clears the test fixtures, so a green `just ci` is a green gate. Only the two label-aware gates stay
+out, because a pull request may carry the label that accepts their failure: `just semver-check <rev>`
+compares the `sngram` API and `just size` counts the added lines. `just hooks` installs the prek
 hooks, so a commit runs `just check` and a push runs `just test`.
 
 ## The Index Never Misses
