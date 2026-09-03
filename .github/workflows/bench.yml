@@ -41,6 +41,26 @@ jobs:
         with:
           mode: simulation
           run: just bench-run
+  bench-walltime:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: codspeed-macro
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-codspeed
+      - name: build the benches
+        run: just bench-build
+      - name: run the benches on CodSpeed
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: walltime
+          run: just bench-run
 
   python:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
@@ -60,5 +80,25 @@ jobs:
         uses: CodSpeedHQ/action@v5
         with:
           mode: simulation
+          working-directory: crates/python
+          run: uv run --no-sync pytest benchmarks --codspeed
+  python-walltime:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: codspeed-macro
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - name: build the extension and install the benchmark dependencies
+        run: uv sync
+        working-directory: crates/python
+      - name: run the python benches on CodSpeed
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: walltime
           working-directory: crates/python
           run: uv run --no-sync pytest benchmarks --codspeed
