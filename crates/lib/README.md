@@ -104,24 +104,6 @@ pattern you pass in.
 | `weights` (default) | the embedded production weight table, `sngram::weights()` |
 | `learn` | `sngram::learn`: `BigramCounter`, the byte-pair counter that trains fresh tables, and `LearnError` |
 
-Count with `process` or `process_batch`, merge staging counters with
-`merge`, and serialize with `to_table_bytes` in the format
-`WeightTable::from_bytes` loads. Tables minted by the full pipeline carry
-a provenance record naming the corpus revision and counted totals; read
-it back with `table.provenance()`.
-
-## Compatibility
-
-1.0 folds `sngram-types` into this crate, takes `scan` over a byte slice,
-returns the summary instead of a `ScanEvent::Finish` event, and moves the
-binary rule into `is_binary`. Keys are unchanged, so an index built with
-0.6 still answers 1.0 queries; only the set of files it holds may differ
-under the new binary rule.
-
-0.6 changed index keys to the emitted `GramKey`, so reindex when
-upgrading from anything older: old index keys will not match new query
-keys.
-
 ## License
 
 [MIT](https://github.com/eliosai/sngram/blob/main/LICENSE)
