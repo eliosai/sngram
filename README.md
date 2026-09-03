@@ -91,7 +91,7 @@ cargo add sngram
 The crate embeds the trained production table. The whole API is four
 calls:
 
-```rust
+```text
 let table = sngram::weights();
 
 sngram::is_binary(bytes);                 // ripgrep's rule: a NUL in the first 8 KiB

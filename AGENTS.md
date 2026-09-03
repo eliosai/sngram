@@ -134,6 +134,7 @@ renames and deletes. Only a reviewer adds `size-exempt`.
 
 ## Enforcement
 
-`just check` runs `scripts/doc-scan.sh`, which fails on any Rust example the doc tests skip, and
-`scripts/layout-scan.sh`, which fails on scoped visibility or a module file paired with a directory.
+`just check` runs `scripts/doc-scan.sh`, which fails on a Rust block in a document rustdoc does not
+compile and on any the doc tests skip, and `scripts/layout-scan.sh`, which fails on scoped visibility
+or a module file paired with a directory.
 Fix a violation by deleting lines or renaming, never by rewording around the rule.
