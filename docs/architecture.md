@@ -10,8 +10,7 @@ engine. The index may return false positives. It must never miss a match.
 
 | crate | role |
 |---|---|
-| `crates/types` | shared data shapes: `WeightTable`, `GramKey`, `ScanEvent`, `QueryPlan`, `GramNeedle`, `ScanNeed` |
-| `crates/lib` | the public API: `sngram::scan`, `sngram::query`, the embedded production table behind `weights`, and training counters behind `learn` |
+| `crates/lib` | the public API: `sngram::scan`, `sngram::is_binary`, `sngram::query`, the embedded production table behind the default `weights` feature, and training counters behind `learn`; every public type lives at the crate root |
 | `crates/python` | the standalone `sngram` Python package: scan, query, weight tables, and GIL-free training counters |
 | `crates/eg` | the application: a ripgrep fork that prefilters through the index, plus the `eg-indexd` daemon |
 

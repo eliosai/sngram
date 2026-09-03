@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sngram"
-version = "0.7.0"
+version = "0.8.0"
 description = "A sparse ngram library with trained weight tables"
 readme = "README.md"
 requires-python = ">=3.10"

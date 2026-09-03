@@ -43,6 +43,15 @@ an archive where ripgrep reports nothing. On a django checkout that is
 The indexed and `--no-index` paths agree; the difference is against
 ripgrep, and it only ever adds files.
 
+## Upgrading to 0.8
+
+0.8 moves the postings schema from 21 to 22 and the tantivy schema from 6
+to 7. The index decides what is binary the way ripgrep does, a NUL byte in
+the first 8 KiB, instead of a signature list and a control-byte density
+sniff, so a file the old rule skipped may now be indexed and a file it
+indexed may now be skipped. The daemon rebuilds any index at an older
+schema on first contact.
+
 ## Upgrading to 0.7
 
 0.7 moves the postings schema from 16 to 21. The daemon rebuilds any

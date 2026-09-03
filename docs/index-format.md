@@ -4,7 +4,7 @@ The frozen on-disk format under `<root>/.eg/index/postings-v9/`. Five
 files: `table.bin`, `postings.bin`, `summaries.bin`, `manifest.bin`,
 `paths-v3.bin`. Format changes bump a version and rebuild destructively;
 there are no migration readers. The manifest carries a schema version of
-its own, 20 as of elgrep 0.7, and the daemon rebuilds any index whose
+its own, 22 as of elgrep 0.8, and the daemon rebuilds any index whose
 schema does not match.
 
 On the Linux kernel reference corpus (1.615GB text, 2026-07-26) the
