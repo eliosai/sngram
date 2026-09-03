@@ -54,7 +54,7 @@ impl<'a> CandidateQuery<'a> {
             report.set_index_bytes(&index_home);
             report.set_corpus_text_bytes(index.corpus_text_bytes());
         }
-        postings::query_index(&index, self.args, self.plan, self.bench.as_deref_mut())
+        postings::query_index(&index, self.plan, self.bench.as_deref_mut())
     }
 
     fn query_tantivy(&mut self) -> anyhow::Result<Option<BTreeSet<usize>>> {

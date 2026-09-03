@@ -36,7 +36,6 @@ use super::{
     executor::{self, PlanBackend, combine},
     manifest, merge,
     summary::{self, SummaryIndex, SummaryRecord},
-    verbatim::{self, HeldDocument, HeldIndex},
 };
 
 mod fast;
@@ -119,7 +118,6 @@ const MIN_SELECTIVITY_CEILING: u64 = 32;
 /// `None` means the plan is too unselective for the index — scan instead.
 pub fn query_index(
     index: &PostingsIndex,
-    args: &HiArgs,
     index_plan: &super::planner::IndexPlan,
     mut bench: Option<&mut bench::BenchReport>,
 ) -> anyhow::Result<Option<BTreeSet<usize>>> {
@@ -155,7 +153,6 @@ pub fn query_index(
     }
     let estimate = executor::estimate_candidates(index, &plan, &df)
         .saturating_add(u64::try_from(forced.len()).unwrap_or(u64::MAX))
-        .saturating_add(index.held_bound())
         .min(index.summaries.text_count() as u64);
     if estimate > ceiling {
         if !can_refine_estimate || estimate > selectivity_refinement_ceiling(ceiling, text_count) {
@@ -171,15 +168,9 @@ pub fn query_index(
         );
     }
     let lookup_started_at = Instant::now();
-    let held = index.held_candidates(args)?;
-    let held_count = u64::try_from(held.len()).unwrap_or(u64::MAX);
-    let candidates = combine::union_sorted(
-        execute_plan(index, &plan, index_plan.precision, &forced)?,
-        held,
-    );
+    let candidates = execute_plan(index, &plan, index_plan.precision, &forced)?;
     if let Some(report) = bench.as_deref_mut() {
         report.timing_mut().set_index_execute(lookup_started_at);
-        report.set_held_candidate_files(held_count);
     }
     if candidates.len() as u64 > ceiling {
         log::debug!(
@@ -461,10 +452,6 @@ fn build_files(
         progress.phase(BuildPhase::WritingSummary);
     }
     summary::write_records(&index_home.join(summary_name), &mut summaries)?;
-    verbatim::write_records(
-        &index_home.join(verbatim::FILE_NAME),
-        &mut stats.take_held(),
-    )?;
     timings.set_write_summary(summary_started_at);
     log::debug!("eg index build: scan phase done in {scan_elapsed:?}; merging {run_count} runs",);
     let merge_started_at = Instant::now();
@@ -594,12 +581,8 @@ fn scan_file_pairs(
             stats.runs.load(AtomicOrdering::Relaxed) as u64,
         );
     }
-    let mut document = super::document::scan(table, file, use_mmap)?;
+    let document = super::document::scan(table, file, use_mmap)?;
     stats.push_summary(document.summary);
-    if let Some(held) = document.held.take() {
-        stats.push_held(held);
-        return Ok(());
-    }
     if document.is_skipped() {
         return Ok(());
     }
@@ -700,7 +683,6 @@ fn count_plan_grams(plan: &QueryPlan) -> usize {
 pub struct PostingsIndex {
     base: Segment,
     summaries: SummaryIndex,
-    held: HeldIndex,
 }
 
 impl PostingsIndex {
@@ -737,32 +719,11 @@ impl PostingsIndex {
         let Some(summaries) = summaries else {
             return Ok(None);
         };
-        let Some(held) = HeldIndex::open(&index_home.join(verbatim::FILE_NAME))? else {
-            return Ok(None);
-        };
-        Ok(Some(Self {
-            base,
-            summaries,
-            held,
-        }))
+        Ok(Some(Self { base, summaries }))
     }
 
     pub fn corpus_text_bytes(&self) -> u64 {
         self.summaries.text_bytes()
-    }
-
-    /// Most candidates the held documents can contribute
-    fn held_bound(&self) -> u64 {
-        u64::try_from(self.held.len()).unwrap_or(u64::MAX)
-    }
-
-    /// Held documents whose stored content this invocation's pattern matches
-    fn held_candidates(&self, args: &HiArgs) -> anyhow::Result<Vec<usize>> {
-        if self.held.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut probe = crate::search::ContentProbe::new(args.matcher()?, args.searcher()?);
-        Ok(self.held.ordinals_accepted(|bytes| probe.matches(bytes)))
     }
 
     fn lookup(&self, hash: u64) -> anyhow::Result<Vec<executor::Posting>> {
@@ -1320,7 +1281,6 @@ struct BuildStats {
     runs: AtomicUsize,
     run_bytes: AtomicUsize,
     summaries: Mutex<Vec<SummaryRecord>>,
-    held: Mutex<Vec<HeldDocument>>,
     mask_freq: Mutex<Vec<u64>>,
 }
 
@@ -1330,22 +1290,6 @@ impl BuildStats {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(record);
-    }
-
-    fn push_held(&self, record: HeldDocument) {
-        self.held
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(record);
-    }
-
-    fn take_held(&self) -> Vec<HeldDocument> {
-        std::mem::take(
-            &mut *self
-                .held
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
     }
 
     fn add_mask_freq(&self, local: &[u64]) {

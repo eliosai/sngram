@@ -17,14 +17,12 @@ use super::{
     grams::{PackedGram, collapse},
     manifest::CurrentFile,
     summary::{SummaryRecord, SummaryStatus},
-    verbatim::HeldDocument,
 };
 
 pub struct IndexedDocument {
     pub ord: u32,
     pub path_hash: u64,
     pub forced_candidate: bool,
-    pub held: Option<HeldDocument>,
     pub hashes: Vec<PackedGram>,
     pub summary: SummaryRecord,
 }
@@ -32,15 +30,6 @@ pub struct IndexedDocument {
 impl IndexedDocument {
     pub const fn is_skipped(&self) -> bool {
         matches!(self.summary.status(), SummaryStatus::Skipped)
-    }
-
-    /// Decide this document from stored bytes instead of forcing it everywhere
-    fn hold(&mut self, prefix: &[u8]) {
-        let Some(held) = HeldDocument::new(self.ord, prefix) else {
-            return;
-        };
-        self.held = Some(held);
-        self.forced_candidate = false;
     }
 
     pub const fn emitted_grams(&self) -> usize {
@@ -101,12 +90,7 @@ pub fn scan(
             SummaryStatus::Skipped,
         ));
     }
-    let Some((hashes, summary)) = scan_bytes(table, prefix)? else {
-        let mut refused = document(ord, path_hash, true, Vec::new(), SummaryStatus::UnknownText);
-        refused.hold(prefix);
-        return Ok(refused);
-    };
-    let mut hashes = hashes;
+    let (mut hashes, summary) = scan_bytes(table, prefix);
     collapse(&mut hashes);
     let forced_candidate = super::classify::is_high_entropy(prefix.len(), hashes.len());
     if forced_candidate {
@@ -121,20 +105,15 @@ pub fn scan(
     ))
 }
 
-fn scan_bytes(
-    table: &WeightTable,
-    bytes: &[u8],
-) -> anyhow::Result<Option<(Vec<PackedGram>, ScanSummary)>> {
-    if sngram::is_binary(bytes) {
-        return Ok(None);
-    }
+/// Grams and summary of one searchable prefix, which carries no NUL and needs no binary policy
+fn scan_bytes(table: &WeightTable, bytes: &[u8]) -> (Vec<PackedGram>, ScanSummary) {
     let mut blocks = BlockMap::new(bytes);
     let mut hashes = Vec::with_capacity(bytes.len().min(MAX_GRAM_PREALLOC));
     let summary = sngram::scan(table, bytes, |gram| {
         let mask = blocks.mask(bytes, &gram.span);
         hashes.push(PackedGram::new(gram.key.value(), mask));
     });
-    Ok(Some((hashes, summary)))
+    (hashes, summary)
 }
 
 /// Maps content spans to five hashed line-bucket bits plus the line and
@@ -249,7 +228,6 @@ fn document(
         ord,
         path_hash,
         forced_candidate,
-        held: None,
         hashes,
         summary: SummaryRecord::new(ord, status),
     }
