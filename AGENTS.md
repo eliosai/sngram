@@ -20,9 +20,10 @@ is the `sngram` Python package and `crates/lib/benches` the bench crate; neither
 - `crates/python` is the maturin project: the pyo3 crate in `src`, the `sngram` package, its tests,
   and the CodSpeed benchmarks under `benchmarks`; `train/` is the separate `sngram-train` uv project
   that mints tables from the corpus
-- `docs/` explains what the code cannot: `architecture.md` the crates, `query-planning.md` the plan
-  algebra, `index-format.md` and `daemon.md` elgrep's index, `training.md` and `training-data.md` the
-  corpus, `benchmarking.md` the numbers, `releasing.md` the pipeline
+- `docs/` explains what the code cannot: `api.md` the public surface, `architecture.md` the crates,
+  `query-planning.md` the plan algebra, `index-format.md` and `daemon.md` elgrep's index,
+  `training.md` and `training-data.md` the corpus, `benchmarking.md` the numbers, `releasing.md` the
+  pipeline, `todo.md` the open work
 - `scripts/` holds the checks `just` runs, and `.github/workflows` runs the same recipes
 
 ## Commands
@@ -65,7 +66,7 @@ is a plain private `fn` unless another module needs it, and then it is `pub`. Ke
 whenever it still compiles. `pub use` lives only in `lib.rs`.
 
 The public surface of `sngram` is the crate root. Every module is private and the root re-exports
-what a caller may name. `ScanSummary`, `ScannedGram` and `ByteRange` are open records marked
+what a caller may name, and `docs/api.md` lists every public item. `ScanSummary`, `ScannedGram` and `ByteRange` are open records marked
 `#[non_exhaustive]`; every other public struct keeps its fields private behind accessors. The error
 enums are `#[non_exhaustive]`. `PlanExpr`, `GramNeedle` and `ScanNeed` are exhaustive on purpose:
 an executor must handle every variant, so a new variant is a breaking change and gets a major bump.

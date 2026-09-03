@@ -1,5 +1,9 @@
 # sngram
 
+[![crates.io](https://img.shields.io/crates/v/sngram.svg)](https://crates.io/crates/sngram)
+[![docs.rs](https://docs.rs/sngram/badge.svg)](https://docs.rs/sngram)
+[![MIT](https://img.shields.io/crates/l/sngram.svg)](https://github.com/eliosai/sngram/blob/main/LICENSE)
+
 Sparse n-gram extraction for regular-expression search indexing, and
 elgrep, an indexed ripgrep alternative built on it.
 

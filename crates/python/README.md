@@ -43,8 +43,9 @@ for zero-copy handoff, for example
 
 Store each key in your inverted index. The key is final: sentinel and
 case-folding details are already folded in, so query-side keys match
-scan-side keys exactly. `scan` rejects binary input by raising, which
-is the same gate the Rust scanner applies.
+scan-side keys exactly. `scan` raises `ValueError` on a buffer `sngram.is_binary` refuses: a
+NUL byte in the first 8 KiB, ripgrep's rule, so the index skips exactly
+the files the verifier would refuse.
 
 ## Query planning
 
