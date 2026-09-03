@@ -10,7 +10,7 @@ use std::fmt::Write;
 /// Generates just the numerical part of the version of ripgrep.
 ///
 /// This includes the git revision hash.
-pub(crate) fn generate_digits() -> String {
+pub fn generate_digits() -> String {
     let semver = option_env!("CARGO_PKG_VERSION").unwrap_or("N/A");
     format!(
         "{semver} (ripgrep {} rev {})",
@@ -20,7 +20,7 @@ pub(crate) fn generate_digits() -> String {
 }
 
 /// Generates a short version string of the form `elgrep (eg) x.y.z`.
-pub(crate) fn generate_short() -> String {
+pub fn generate_short() -> String {
     let digits = generate_digits();
     format!("elgrep (eg) {digits}")
 }
@@ -29,7 +29,7 @@ pub(crate) fn generate_short() -> String {
 ///
 /// This includes not only the version of ripgrep but some other information
 /// about its build. For example, SIMD support and PCRE2 support.
-pub(crate) fn generate_long() -> String {
+pub fn generate_long() -> String {
     let (compile, runtime) = (compile_cpu_features(), runtime_cpu_features());
 
     let mut out = String::new();
@@ -57,7 +57,7 @@ pub(crate) fn generate_long() -> String {
 ///
 /// This also returns whether PCRE2 is actually available in this build of
 /// ripgrep.
-pub(crate) fn generate_pcre2() -> (String, bool) {
+pub fn generate_pcre2() -> (String, bool) {
     let mut out = String::new();
 
     #[cfg(feature = "pcre2")]

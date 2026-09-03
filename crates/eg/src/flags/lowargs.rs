@@ -32,84 +32,84 @@ use crate::index::IndexConfig;
 /// Low level arguments are populated by the parser directly via the `update`
 /// method on the corresponding implementation of the `Flag` trait.
 #[derive(Debug, Default)]
-pub(crate) struct LowArgs {
+pub struct LowArgs {
     // Essential arguments.
-    pub(crate) special: Option<SpecialMode>,
-    pub(crate) mode: Mode,
-    pub(crate) positional: Vec<OsString>,
-    pub(crate) patterns: Vec<PatternSource>,
-    pub(crate) index: IndexConfig,
+    pub special: Option<SpecialMode>,
+    pub mode: Mode,
+    pub positional: Vec<OsString>,
+    pub patterns: Vec<PatternSource>,
+    pub index: IndexConfig,
     // Everything else, sorted lexicographically.
-    pub(crate) binary: BinaryMode,
-    pub(crate) boundary: Option<BoundaryMode>,
-    pub(crate) buffer: BufferMode,
-    pub(crate) byte_offset: bool,
-    pub(crate) case: CaseMode,
-    pub(crate) color: ColorChoice,
-    pub(crate) colors: Vec<UserColorSpec>,
-    pub(crate) column: Option<bool>,
-    pub(crate) context: ContextMode,
-    pub(crate) context_separator: ContextSeparator,
-    pub(crate) crlf: bool,
-    pub(crate) dfa_size_limit: Option<usize>,
-    pub(crate) encoding: EncodingMode,
-    pub(crate) engine: EngineChoice,
-    pub(crate) field_context_separator: FieldContextSeparator,
-    pub(crate) field_match_separator: FieldMatchSeparator,
-    pub(crate) fixed_strings: bool,
-    pub(crate) follow: bool,
-    pub(crate) glob_case_insensitive: bool,
-    pub(crate) globs: Vec<String>,
-    pub(crate) heading: Option<bool>,
-    pub(crate) hidden: bool,
-    pub(crate) hostname_bin: Option<PathBuf>,
-    pub(crate) hyperlink_format: HyperlinkFormat,
-    pub(crate) iglobs: Vec<String>,
-    pub(crate) ignore_file: Vec<PathBuf>,
-    pub(crate) ignore_file_case_insensitive: bool,
-    pub(crate) include_zero: bool,
-    pub(crate) invert_match: bool,
-    pub(crate) line_number: Option<bool>,
-    pub(crate) logging: Option<LoggingMode>,
-    pub(crate) max_columns: Option<u64>,
-    pub(crate) max_columns_preview: bool,
-    pub(crate) max_count: Option<u64>,
-    pub(crate) max_depth: Option<usize>,
-    pub(crate) max_filesize: Option<u64>,
-    pub(crate) mmap: MmapMode,
-    pub(crate) multiline: bool,
-    pub(crate) multiline_dotall: bool,
-    pub(crate) no_config: bool,
-    pub(crate) no_ignore_dot: bool,
-    pub(crate) no_ignore_exclude: bool,
-    pub(crate) no_ignore_files: bool,
-    pub(crate) no_ignore_global: bool,
-    pub(crate) no_ignore_messages: bool,
-    pub(crate) no_ignore_parent: bool,
-    pub(crate) no_ignore_vcs: bool,
-    pub(crate) no_messages: bool,
-    pub(crate) no_require_git: bool,
-    pub(crate) no_unicode: bool,
-    pub(crate) null: bool,
-    pub(crate) null_data: bool,
-    pub(crate) one_file_system: bool,
-    pub(crate) only_matching: bool,
-    pub(crate) path_separator: Option<u8>,
-    pub(crate) pre: Option<PathBuf>,
-    pub(crate) pre_glob: Vec<String>,
-    pub(crate) quiet: bool,
-    pub(crate) regex_size_limit: Option<usize>,
-    pub(crate) replace: Option<BString>,
-    pub(crate) search_zip: bool,
-    pub(crate) sort: Option<SortMode>,
-    pub(crate) stats: bool,
-    pub(crate) stop_on_nonmatch: bool,
-    pub(crate) threads: Option<usize>,
-    pub(crate) trim: bool,
-    pub(crate) type_changes: Vec<TypeChange>,
-    pub(crate) unrestricted: usize,
-    pub(crate) vimgrep: bool,
-    pub(crate) with_filename: Option<bool>,
+    pub binary: BinaryMode,
+    pub boundary: Option<BoundaryMode>,
+    pub buffer: BufferMode,
+    pub byte_offset: bool,
+    pub case: CaseMode,
+    pub color: ColorChoice,
+    pub colors: Vec<UserColorSpec>,
+    pub column: Option<bool>,
+    pub context: ContextMode,
+    pub context_separator: ContextSeparator,
+    pub crlf: bool,
+    pub dfa_size_limit: Option<usize>,
+    pub encoding: EncodingMode,
+    pub engine: EngineChoice,
+    pub field_context_separator: FieldContextSeparator,
+    pub field_match_separator: FieldMatchSeparator,
+    pub fixed_strings: bool,
+    pub follow: bool,
+    pub glob_case_insensitive: bool,
+    pub globs: Vec<String>,
+    pub heading: Option<bool>,
+    pub hidden: bool,
+    pub hostname_bin: Option<PathBuf>,
+    pub hyperlink_format: HyperlinkFormat,
+    pub iglobs: Vec<String>,
+    pub ignore_file: Vec<PathBuf>,
+    pub ignore_file_case_insensitive: bool,
+    pub include_zero: bool,
+    pub invert_match: bool,
+    pub line_number: Option<bool>,
+    pub logging: Option<LoggingMode>,
+    pub max_columns: Option<u64>,
+    pub max_columns_preview: bool,
+    pub max_count: Option<u64>,
+    pub max_depth: Option<usize>,
+    pub max_filesize: Option<u64>,
+    pub mmap: MmapMode,
+    pub multiline: bool,
+    pub multiline_dotall: bool,
+    pub no_config: bool,
+    pub no_ignore_dot: bool,
+    pub no_ignore_exclude: bool,
+    pub no_ignore_files: bool,
+    pub no_ignore_global: bool,
+    pub no_ignore_messages: bool,
+    pub no_ignore_parent: bool,
+    pub no_ignore_vcs: bool,
+    pub no_messages: bool,
+    pub no_require_git: bool,
+    pub no_unicode: bool,
+    pub null: bool,
+    pub null_data: bool,
+    pub one_file_system: bool,
+    pub only_matching: bool,
+    pub path_separator: Option<u8>,
+    pub pre: Option<PathBuf>,
+    pub pre_glob: Vec<String>,
+    pub quiet: bool,
+    pub regex_size_limit: Option<usize>,
+    pub replace: Option<BString>,
+    pub search_zip: bool,
+    pub sort: Option<SortMode>,
+    pub stats: bool,
+    pub stop_on_nonmatch: bool,
+    pub threads: Option<usize>,
+    pub trim: bool,
+    pub type_changes: Vec<TypeChange>,
+    pub unrestricted: usize,
+    pub vimgrep: bool,
+    pub with_filename: Option<bool>,
 }
 
 /// A "special" mode that supercedes everything else.
@@ -122,7 +122,7 @@ pub(crate) struct LowArgs {
 /// the corresponding arguments from the CLI command.) This is overall a hedge
 /// to ensure that version and help information are basically always available.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SpecialMode {
+pub enum SpecialMode {
     /// Show a condensed version of "help" output. Generally speaking, this
     /// shows each flag and an extremely terse description of that flag on
     /// a single line. This corresponds to the `-h` flag.
@@ -153,7 +153,7 @@ pub(crate) enum SpecialMode {
 /// in the command line. They are treated as "special" modes that short-circuit
 /// ripgrep's usual flow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Mode {
+pub enum Mode {
     /// ripgrep will execute a search of some kind.
     Search(SearchMode),
     /// Show the files that *would* be searched, but don't actually search
@@ -176,7 +176,7 @@ impl Mode {
     /// Update this mode to the new mode while implementing various override
     /// semantics. For example, a search mode cannot override a non-search
     /// mode.
-    pub(crate) fn update(&mut self, new: Mode) {
+    pub fn update(&mut self, new: Mode) {
         match *self {
             // If we're in a search mode, then anything can override it.
             Mode::Search(_) => *self = new,
@@ -194,7 +194,7 @@ impl Mode {
 
 /// The kind of search that ripgrep is going to perform.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SearchMode {
+pub enum SearchMode {
     /// The default standard mode of operation. ripgrep looks for matches and
     /// prints them when found.
     ///
@@ -218,7 +218,7 @@ pub(crate) enum SearchMode {
 
 /// The thing to generate via the --generate flag.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GenerateMode {
+pub enum GenerateMode {
     /// Generate the raw roff used for the man page.
     Man,
     /// Completions for bash.
@@ -233,7 +233,7 @@ pub(crate) enum GenerateMode {
 
 /// Indicates how ripgrep should treat binary data.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum BinaryMode {
+pub enum BinaryMode {
     /// Automatically determine the binary mode to use. Essentially, when
     /// a file is searched explicitly, then it will be searched using the
     /// `SearchAndSuppress` strategy. Otherwise, it will be searched in a way
@@ -257,7 +257,7 @@ pub(crate) enum BinaryMode {
 
 /// Indicates what kind of boundary mode to use (line or word).
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum BoundaryMode {
+pub enum BoundaryMode {
     /// Only allow matches when surrounded by line bounaries.
     Line,
     /// Only allow matches when surrounded by word bounaries.
@@ -268,7 +268,7 @@ pub(crate) enum BoundaryMode {
 ///
 /// The default is `Auto`.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(crate) enum BufferMode {
+pub enum BufferMode {
     /// Select the buffer mode, 'line' or 'block', automatically based on
     /// whether stdout is connected to a tty.
     #[default]
@@ -290,7 +290,7 @@ pub(crate) enum BufferMode {
 ///
 /// The default is `Sensitive`.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(crate) enum CaseMode {
+pub enum CaseMode {
     /// Patterns are matched case sensitively. i.e., `a` does not match `A`.
     #[default]
     Sensitive,
@@ -306,7 +306,7 @@ pub(crate) enum CaseMode {
 ///
 /// The default is `Auto`.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(crate) enum ColorChoice {
+pub enum ColorChoice {
     /// Color and hyperlinks will never be used.
     Never,
     /// Color and hyperlinks will be used only when stdout is connected to a
@@ -326,7 +326,7 @@ pub(crate) enum ColorChoice {
 
 impl ColorChoice {
     /// Convert this color choice to the corresponding termcolor type.
-    pub(crate) fn to_termcolor(&self) -> termcolor::ColorChoice {
+    pub fn to_termcolor(&self) -> termcolor::ColorChoice {
         match *self {
             ColorChoice::Never => termcolor::ColorChoice::Never,
             ColorChoice::Auto => termcolor::ColorChoice::Auto,
@@ -340,7 +340,7 @@ impl ColorChoice {
 ///
 /// The default is no context at all.
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum ContextMode {
+pub enum ContextMode {
     /// All lines will be printed. That is, the context is unbounded.
     Passthru,
     /// Only show a certain number of lines before and after each match.
@@ -359,7 +359,7 @@ impl ContextMode {
     /// If this was set to "passthru" context, then it is overridden in favor
     /// of limited context with the given value for "before" and `0` for
     /// "after."
-    pub(crate) fn set_before(&mut self, lines: usize) {
+    pub fn set_before(&mut self, lines: usize) {
         match *self {
             ContextMode::Passthru => {
                 *self = ContextMode::Limited(ContextModeLimited {
@@ -379,7 +379,7 @@ impl ContextMode {
     /// If this was set to "passthru" context, then it is overridden in favor
     /// of limited context with the given value for "after" and `0` for
     /// "before."
-    pub(crate) fn set_after(&mut self, lines: usize) {
+    pub fn set_after(&mut self, lines: usize) {
         match *self {
             ContextMode::Passthru => {
                 *self = ContextMode::Limited(ContextModeLimited {
@@ -397,7 +397,7 @@ impl ContextMode {
     /// If this was set to "passthru" context, then it is overridden in favor
     /// of limited context with the given value for "both" and `None` for
     /// "before" and "after".
-    pub(crate) fn set_both(&mut self, lines: usize) {
+    pub fn set_both(&mut self, lines: usize) {
         match *self {
             ContextMode::Passthru => {
                 *self = ContextMode::Limited(ContextModeLimited {
@@ -425,7 +425,7 @@ impl ContextMode {
 /// settings always take precedent over the -C/--context setting, regardless of
 /// order. Thus, we need to keep track of them separately.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(crate) struct ContextModeLimited {
+pub struct ContextModeLimited {
     before: Option<usize>,
     after: Option<usize>,
     both: Option<usize>,
@@ -437,7 +437,7 @@ impl ContextModeLimited {
     /// that `before` and `after` both partially override `both` in all cases.
     ///
     /// By default, this returns `(0, 0)`.
-    pub(crate) fn get(&self) -> (usize, usize) {
+    pub fn get(&self) -> (usize, usize) {
         let (mut before, mut after) = self.both.map(|lines| (lines, lines)).unwrap_or((0, 0));
         // --before and --after always override --context, regardless
         // of where they appear relative to each other.
@@ -456,7 +456,7 @@ impl ContextModeLimited {
 ///
 /// The default is `--`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ContextSeparator(Option<BString>);
+pub struct ContextSeparator(Option<BString>);
 
 impl Default for ContextSeparator {
     fn default() -> ContextSeparator {
@@ -467,7 +467,7 @@ impl Default for ContextSeparator {
 impl ContextSeparator {
     /// Create a new context separator from the user provided argument. This
     /// handles unescaping.
-    pub(crate) fn new(os: &OsStr) -> anyhow::Result<ContextSeparator> {
+    pub fn new(os: &OsStr) -> anyhow::Result<ContextSeparator> {
         let Some(string) = os.to_str() else {
             anyhow::bail!(
                 "separator must be valid UTF-8 (use escape sequences \
@@ -479,7 +479,7 @@ impl ContextSeparator {
 
     /// Creates a new separator that intructs the printer to disable contextual
     /// separators entirely.
-    pub(crate) fn disabled() -> ContextSeparator {
+    pub fn disabled() -> ContextSeparator {
         ContextSeparator(None)
     }
 
@@ -488,7 +488,7 @@ impl ContextSeparator {
     /// If context separators were disabled, then this returns `None`.
     ///
     /// Note that this may return a `Some` variant with zero bytes.
-    pub(crate) fn into_bytes(self) -> Option<Vec<u8>> {
+    pub fn into_bytes(self) -> Option<Vec<u8>> {
         self.0.map(|sep| sep.into())
     }
 }
@@ -497,7 +497,7 @@ impl ContextSeparator {
 ///
 /// The default is `Auto`.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(crate) enum EncodingMode {
+pub enum EncodingMode {
     /// Use only BOM sniffing to auto-detect an encoding.
     #[default]
     Auto,
@@ -513,7 +513,7 @@ pub(crate) enum EncodingMode {
 ///
 /// The default is `Default`.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(crate) enum EngineChoice {
+pub enum EngineChoice {
     /// Uses the default regex engine: Rust's `regex` crate.
     ///
     /// (Well, technically it uses `regex-automata`, but `regex-automata` is
@@ -534,7 +534,7 @@ pub(crate) enum EngineChoice {
 ///
 /// The default is `-`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct FieldContextSeparator(BString);
+pub struct FieldContextSeparator(BString);
 
 impl Default for FieldContextSeparator {
     fn default() -> FieldContextSeparator {
@@ -545,7 +545,7 @@ impl Default for FieldContextSeparator {
 impl FieldContextSeparator {
     /// Create a new separator from the given argument value provided by the
     /// user. Unescaping it automatically handled.
-    pub(crate) fn new(os: &OsStr) -> anyhow::Result<FieldContextSeparator> {
+    pub fn new(os: &OsStr) -> anyhow::Result<FieldContextSeparator> {
         let Some(string) = os.to_str() else {
             anyhow::bail!(
                 "separator must be valid UTF-8 (use escape sequences \
@@ -558,7 +558,7 @@ impl FieldContextSeparator {
     /// Return the raw bytes of this separator.
     ///
     /// Note that this may return an empty `Vec`.
-    pub(crate) fn into_bytes(self) -> Vec<u8> {
+    pub fn into_bytes(self) -> Vec<u8> {
         self.0.into()
     }
 }
@@ -568,7 +568,7 @@ impl FieldContextSeparator {
 ///
 /// The default is `:`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct FieldMatchSeparator(BString);
+pub struct FieldMatchSeparator(BString);
 
 impl Default for FieldMatchSeparator {
     fn default() -> FieldMatchSeparator {
@@ -579,7 +579,7 @@ impl Default for FieldMatchSeparator {
 impl FieldMatchSeparator {
     /// Create a new separator from the given argument value provided by the
     /// user. Unescaping it automatically handled.
-    pub(crate) fn new(os: &OsStr) -> anyhow::Result<FieldMatchSeparator> {
+    pub fn new(os: &OsStr) -> anyhow::Result<FieldMatchSeparator> {
         let Some(string) = os.to_str() else {
             anyhow::bail!(
                 "separator must be valid UTF-8 (use escape sequences \
@@ -592,7 +592,7 @@ impl FieldMatchSeparator {
     /// Return the raw bytes of this separator.
     ///
     /// Note that this may return an empty `Vec`.
-    pub(crate) fn into_bytes(self) -> Vec<u8> {
+    pub fn into_bytes(self) -> Vec<u8> {
         self.0.into()
     }
 }
@@ -600,7 +600,7 @@ impl FieldMatchSeparator {
 /// The type of logging to do. `Debug` emits some details while `Trace` emits
 /// much more.
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum LoggingMode {
+pub enum LoggingMode {
     Debug,
     Trace,
 }
@@ -609,7 +609,7 @@ pub(crate) enum LoggingMode {
 ///
 /// The default is `Auto`.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(crate) enum MmapMode {
+pub enum MmapMode {
     /// This instructs ripgrep to use heuristics for selecting when to and not
     /// to use memory maps for searching.
     #[default]
@@ -629,7 +629,7 @@ pub(crate) enum MmapMode {
 /// The reason to unify these is so that we can retain the order of `-f/--flag`
 /// and `-e/--regexp` flags relative to one another.
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum PatternSource {
+pub enum PatternSource {
     /// Comes from the `-e/--regexp` flag.
     Regexp(String),
     /// Comes from the `-f/--file` flag.
@@ -638,16 +638,16 @@ pub(crate) enum PatternSource {
 
 /// The sort criteria, if present.
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct SortMode {
+pub struct SortMode {
     /// Whether to reverse the sort criteria (i.e., descending order).
-    pub(crate) reverse: bool,
+    pub reverse: bool,
     /// The actual sorting criteria.
-    pub(crate) kind: SortModeKind,
+    pub kind: SortModeKind,
 }
 
 /// The criteria to use for sorting.
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum SortModeKind {
+pub enum SortModeKind {
     /// Sort by path.
     Path,
     /// Sort by last modified time.
@@ -661,7 +661,7 @@ pub(crate) enum SortModeKind {
 impl SortMode {
     /// Checks whether the selected sort mode is supported. If it isn't, an
     /// error (hopefully explaining why) is returned.
-    pub(crate) fn supported(&self) -> anyhow::Result<()> {
+    pub fn supported(&self) -> anyhow::Result<()> {
         match self.kind {
             SortModeKind::Path => Ok(()),
             SortModeKind::LastModified => {
@@ -692,7 +692,7 @@ impl SortMode {
 /// A single instance of either a change or a selection of one ripgrep's
 /// file types.
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum TypeChange {
+pub enum TypeChange {
     /// Clear the given type from ripgrep.
     Clear { name: String },
     /// Add the given type definition (name and glob) to ripgrep.

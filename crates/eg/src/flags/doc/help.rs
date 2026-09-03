@@ -21,7 +21,7 @@ macro_rules! write {
 }
 
 /// Generate short documentation, i.e., for `-h`.
-pub(crate) fn generate_short() -> String {
+pub fn generate_short() -> String {
     let mut cats: BTreeMap<Category, (Vec<String>, Vec<String>)> = BTreeMap::new();
     let (mut maxcol1, mut maxcol2) = (0, 0);
     for flag in FLAGS.iter().copied() {
@@ -107,7 +107,7 @@ fn format_short_columns(
 }
 
 /// Generate long documentation, i.e., for `--help`.
-pub(crate) fn generate_long() -> String {
+pub fn generate_long() -> String {
     let mut cats = BTreeMap::new();
     for flag in FLAGS.iter().copied() {
         let mut cat = cats.entry(flag.doc_category()).or_insert(String::new());

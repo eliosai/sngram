@@ -24,7 +24,7 @@ use crate::flags::{
 /// ripgrep's configuration and converting low level arguments into a higher
 /// level representation.
 #[derive(Debug)]
-pub(crate) enum ParseResult<T> {
+pub enum ParseResult<T> {
     Special(SpecialMode),
     Ok(T),
     Err(anyhow::Error),
@@ -43,7 +43,7 @@ impl<T> ParseResult<T> {
 }
 
 /// Parse CLI arguments and convert then to their high level representation.
-pub(crate) fn parse() -> ParseResult<HiArgs> {
+pub fn parse() -> ParseResult<HiArgs> {
     parse_low().and_then(|low| match HiArgs::from_low_args(low) {
         Ok(hi) => ParseResult::Ok(hi),
         Err(err) => ParseResult::Err(err),
@@ -121,11 +121,11 @@ fn set_log_levels(low: &LowArgs) {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
+pub mod test_support {
     use super::*;
 
     /// Parse CLI arguments into low-level arguments without logging or config.
-    pub(crate) fn parse_low_raw(
+    pub fn parse_low_raw(
         rawargs: impl IntoIterator<Item = impl Into<OsString>>,
     ) -> anyhow::Result<LowArgs> {
         let mut args = LowArgs::default();
@@ -135,7 +135,7 @@ pub(crate) mod test_support {
 }
 
 /// Return the metadata for the flag of the given name.
-pub(super) fn lookup(name: &str) -> Option<&'static dyn Flag> {
+pub fn lookup(name: &str) -> Option<&'static dyn Flag> {
     // N.B. Creating a new parser might look expensive, but it only builds
     // the lookup trie exactly once. That is, we get a `&'static Parser` from
     // `Parser::new()`.

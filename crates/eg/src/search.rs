@@ -42,7 +42,7 @@ impl Default for Config {
 
 /// A builder for configuring and constructing a search worker.
 #[derive(Clone, Debug)]
-pub(crate) struct SearchWorkerBuilder {
+pub struct SearchWorkerBuilder {
     config: Config,
     command_builder: grep::cli::CommandReaderBuilder,
 }
@@ -55,7 +55,7 @@ impl Default for SearchWorkerBuilder {
 
 impl SearchWorkerBuilder {
     /// Create a new builder for configuring and constructing a search worker.
-    pub(crate) fn new() -> SearchWorkerBuilder {
+    pub fn new() -> SearchWorkerBuilder {
         let mut command_builder = grep::cli::CommandReaderBuilder::new();
         command_builder.async_stderr(true);
 
@@ -67,7 +67,7 @@ impl SearchWorkerBuilder {
 
     /// Create a new search worker using the given searcher, matcher and
     /// printer.
-    pub(crate) fn build<W: WriteColor>(
+    pub fn build<W: WriteColor>(
         &self,
         matcher: PatternMatcher,
         searcher: grep::searcher::Searcher,
@@ -95,7 +95,7 @@ impl SearchWorkerBuilder {
     /// When this is set, instead of searching files directly, the given
     /// command will be run with the file path as the first argument, and the
     /// output of that command will be searched instead.
-    pub(crate) fn preprocessor(
+    pub fn preprocessor(
         &mut self,
         cmd: Option<std::path::PathBuf>,
     ) -> anyhow::Result<&mut SearchWorkerBuilder> {
@@ -111,7 +111,7 @@ impl SearchWorkerBuilder {
     /// Set the globs for determining which files should be run through the
     /// preprocessor. By default, with no globs and a preprocessor specified,
     /// every file is run through the preprocessor.
-    pub(crate) fn preprocessor_globs(
+    pub fn preprocessor_globs(
         &mut self,
         globs: ignore::overrides::Override,
     ) -> &mut SearchWorkerBuilder {
@@ -126,7 +126,7 @@ impl SearchWorkerBuilder {
     ///
     /// Note that if a preprocessor command is set, then it overrides this
     /// setting.
-    pub(crate) fn search_zip(&mut self, yes: bool) -> &mut SearchWorkerBuilder {
+    pub fn search_zip(&mut self, yes: bool) -> &mut SearchWorkerBuilder {
         self.config.search_zip = yes;
         self
     }
@@ -139,7 +139,7 @@ impl SearchWorkerBuilder {
     /// completely.
     ///
     /// By default, no binary detection is performed.
-    pub(crate) fn binary_detection_implicit(
+    pub fn binary_detection_implicit(
         &mut self,
         detection: grep::searcher::BinaryDetection,
     ) -> &mut SearchWorkerBuilder {
@@ -155,7 +155,7 @@ impl SearchWorkerBuilder {
     /// automatically filter files supplied by the end user.
     ///
     /// By default, no binary detection is performed.
-    pub(crate) fn binary_detection_explicit(
+    pub fn binary_detection_explicit(
         &mut self,
         detection: grep::searcher::BinaryDetection,
     ) -> &mut SearchWorkerBuilder {
@@ -177,14 +177,14 @@ impl SearchWorkerBuilder {
 /// every search also has some aggregate statistics or meta data that may be
 /// useful to higher level routines.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SearchResult {
+pub struct SearchResult {
     has_match: bool,
     stats: Option<grep::printer::Stats>,
 }
 
 impl SearchResult {
     /// Whether the search found a match or not.
-    pub(crate) fn has_match(&self) -> bool {
+    pub fn has_match(&self) -> bool {
         self.has_match
     }
 
@@ -192,14 +192,14 @@ impl SearchResult {
     ///
     /// It can be expensive to compute statistics, so these are only present
     /// if explicitly enabled in the printer provided by the caller.
-    pub(crate) fn stats(&self) -> Option<&grep::printer::Stats> {
+    pub fn stats(&self) -> Option<&grep::printer::Stats> {
         self.stats.as_ref()
     }
 }
 
 /// The pattern matcher used by a search worker.
 #[derive(Clone, Debug)]
-pub(crate) enum PatternMatcher {
+pub enum PatternMatcher {
     RustRegex(grep::regex::RegexMatcher),
     #[cfg(feature = "pcre2")]
     PCRE2(grep::pcre2::RegexMatcher),
@@ -209,7 +209,7 @@ pub(crate) enum PatternMatcher {
 ///
 /// The `W` type parameter refers to the type of the underlying writer.
 #[derive(Clone, Debug)]
-pub(crate) enum Printer<W> {
+pub enum Printer<W> {
     /// Use the standard printer, which supports the classic grep-like format.
     Standard(grep::printer::Standard<W>),
     /// Use the summary printer, which supports aggregate displays of search
@@ -221,7 +221,7 @@ pub(crate) enum Printer<W> {
 
 impl<W: WriteColor> Printer<W> {
     /// Return a mutable reference to the underlying printer's writer.
-    pub(crate) fn get_mut(&mut self) -> &mut W {
+    pub fn get_mut(&mut self) -> &mut W {
         match *self {
             Printer::Standard(ref mut p) => p.get_mut(),
             Printer::Summary(ref mut p) => p.get_mut(),
@@ -236,7 +236,7 @@ impl<W: WriteColor> Printer<W> {
 /// generally intended to be used from a single thread. When searching using
 /// multiple threads, it is better to create a new worker for each thread.
 #[derive(Clone, Debug)]
-pub(crate) struct SearchWorker<W> {
+pub struct SearchWorker<W> {
     config: Config,
     command_builder: grep::cli::CommandReaderBuilder,
     /// This is `None` when `search_zip` is not enabled, since in this case it
@@ -251,10 +251,7 @@ pub(crate) struct SearchWorker<W> {
 
 impl<W: WriteColor> SearchWorker<W> {
     /// Execute a search over the given haystack.
-    pub(crate) fn search(
-        &mut self,
-        haystack: &crate::haystack::Haystack,
-    ) -> io::Result<SearchResult> {
+    pub fn search(&mut self, haystack: &crate::haystack::Haystack) -> io::Result<SearchResult> {
         let bin = if haystack.is_explicit() {
             self.config.binary_explicit.clone()
         } else {
@@ -295,12 +292,12 @@ impl<W: WriteColor> SearchWorker<W> {
     /// Indexed search knows, by soundness, that a file the index ruled out has
     /// no matches. Searching an empty reader drives the printer to produce the
     /// exact zero-count or without-match output for that path, at no I/O cost.
-    pub(crate) fn search_absent(&mut self, path: &Path) -> io::Result<SearchResult> {
+    pub fn search_absent(&mut self, path: &Path) -> io::Result<SearchResult> {
         self.search_reader(path, &mut io::empty())
     }
 
     /// Return a mutable reference to the underlying printer.
-    pub(crate) fn printer(&mut self) -> &mut Printer<W> {
+    pub fn printer(&mut self) -> &mut Printer<W> {
         &mut self.printer
     }
 

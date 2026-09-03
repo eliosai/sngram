@@ -24,7 +24,7 @@ macro_rules! writeln {
 
 /// Returns a `roff` formatted string corresponding to ripgrep's entire man
 /// page.
-pub(crate) fn generate() -> String {
+pub fn generate() -> String {
     let mut cats = BTreeMap::new();
     for flag in FLAGS.iter().copied() {
         let mut cat = cats.entry(flag.doc_category()).or_insert(String::new());
