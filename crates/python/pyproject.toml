@@ -46,6 +46,7 @@ dev = [
     "numpy>=2",
     "maturin>=1.7",
     "pyarrow>=17",
+    "pytest-codspeed>=4",
 ]
 
 [tool.pytest.ini_options]

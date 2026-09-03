@@ -3,6 +3,7 @@ name = "sngram-benches"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+license.workspace = true
 publish = false
 
 [[bench]]

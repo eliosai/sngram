@@ -11,8 +11,9 @@ __pycache__/
 .venv/
 .pytest_cache/
 
-# editors and agents
-.claude/
+# editors and agents; local agent state stays out, the skills link is tracked
+.claude/*
+!.claude/skills
 .mcp.json
 .idea/
 .vscode/
