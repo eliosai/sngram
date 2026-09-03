@@ -75,13 +75,13 @@ package-check:
 audit:
     cargo deny check
 
-# Build the library benches; the repo-local native codegen cannot run under valgrind
-bench-build:
-    RUSTFLAGS="" cargo codspeed build -p sngram-benches
+# Build the library benches with one CodSpeed instrument; the repo-local native codegen cannot run under valgrind
+bench-build mode="simulation":
+    RUSTFLAGS="" cargo codspeed build -m {{mode}} -p sngram-benches
 
 # Run the built library benches
-bench-run:
-    RUSTFLAGS="" cargo codspeed run -p sngram-benches
+bench-run mode="simulation":
+    RUSTFLAGS="" cargo codspeed run -m {{mode}} -p sngram-benches
 
 # Build and run the library benches the way CodSpeed does
 bench:

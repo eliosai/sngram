@@ -55,12 +55,12 @@ jobs:
         with:
           tool: just,cargo-codspeed
       - name: build the benches
-        run: just bench-build
+        run: just bench-build walltime
       - name: run the benches on CodSpeed
         uses: CodSpeedHQ/action@v5
         with:
           mode: walltime
-          run: just bench-run
+          run: just bench-run walltime
 
   python:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
