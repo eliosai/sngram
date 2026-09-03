@@ -1,113 +1,107 @@
-//! Query planning types.
+//! The plan a regex folds into
 
 use crate::{ByteSet256, EdgeBytes, GramKey, SaturatingByteCounts256, ScanSummary};
 
 mod display;
 mod tune;
 
-/// Errors from parsing query patterns.
-///
-/// Analysis itself is infallible: every valid pattern yields a
-/// [`QueryPlan`], so these errors arise only when building the pattern.
+/// Why a pattern yields no plan, since the analysis of a valid pattern never fails
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum QueryError {
-    /// Input pattern exceeds size limit.
+    /// The pattern is longer than the planner accepts
     #[error("pattern length {len} exceeds maximum {max}")]
     PatternTooLong {
-        /// Actual length.
+        /// The pattern length
         len: usize,
-        /// Limit.
+        /// The longest pattern the planner accepts
         max: usize,
     },
 
-    /// Invalid regex syntax.
+    /// The regex parser rejected the pattern
     #[error("invalid regex: {0}")]
     InvalidRegex(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
-/// A conservative candidate plan over gram keys and scan-derived metadata.
-///
-/// Every indexed text entry matched by the source regex satisfies this plan.
-/// The plan admits non-matches; the exact regex verifier removes those later.
+/// A candidate plan every document the regex matches satisfies, which the verifier narrows
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryPlan {
     root: PlanExpr,
 }
 
 impl QueryPlan {
-    /// Build a query plan from its expression tree.
+    /// A plan from its expression tree
     #[must_use]
     pub const fn new(root: PlanExpr) -> Self {
         Self { root }
     }
 
-    /// The root expression for this plan.
+    /// The root expression
     #[must_use]
     pub const fn root(&self) -> &PlanExpr {
         &self.root
     }
 
-    /// True when the index cannot narrow this query.
+    /// True when the index cannot narrow this query
     #[must_use]
     pub const fn is_all(&self) -> bool {
         matches!(self.root, PlanExpr::All)
     }
 
-    /// True when the query is provably empty.
+    /// True when no document can match
     #[must_use]
     pub const fn is_none(&self) -> bool {
         matches!(self.root, PlanExpr::None)
     }
 
-    /// Total gram needles in the plan tree.
+    /// The gram needles in the whole tree
     #[must_use]
     pub fn gram_count(&self) -> usize {
         self.root.gram_count()
     }
 }
 
-/// Boolean candidate expression.
+/// One node of a plan, exhaustive because an executor must handle every variant
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanExpr {
-    /// No constraint: the index cannot narrow this query.
+    /// No constraint, the index cannot narrow this query
     All,
-    /// Provably empty: no indexed text entry can match.
+    /// No document can match
     None,
-    /// Every gram, scan need, and child must hold.
+    /// Every gram, need and child must hold
     AllOf {
-        /// Gram-key requirements.
+        /// The grams that must all be present
         grams: Vec<GramNeedle>,
-        /// Scan-summary requirements.
+        /// The summary conditions that must all hold
         needs: Vec<ScanNeed>,
-        /// Nested expressions that must also hold.
+        /// The nested expressions that must all hold
         children: Vec<Self>,
     },
-    /// At least one gram, scan need, or child must hold.
+    /// At least one gram, need or child must hold
     AnyOf {
-        /// Gram-key alternatives.
+        /// The grams of which one must be present
         grams: Vec<GramNeedle>,
-        /// Scan-summary alternatives.
+        /// The summary conditions of which one must hold
         needs: Vec<ScanNeed>,
-        /// Nested alternatives.
+        /// The nested expressions of which one must hold
         children: Vec<Self>,
     },
 }
 
 impl PlanExpr {
-    /// True when the index cannot narrow this expression.
+    /// True when the index cannot narrow this expression
     #[must_use]
     pub const fn is_all(&self) -> bool {
         matches!(self, Self::All)
     }
 
-    /// True when this expression is provably empty.
+    /// True when no document can match this expression
     #[must_use]
     pub const fn is_none(&self) -> bool {
         matches!(self, Self::None)
     }
 
-    /// Total gram needles in this expression tree.
+    /// The gram needles in this tree
     #[must_use]
     pub fn gram_count(&self) -> usize {
         match self {
@@ -122,37 +116,37 @@ impl PlanExpr {
     }
 }
 
-/// One logical gram requirement, already lowered to final index keys.
+/// One gram requirement lowered to index keys, exhaustive because an executor must handle every variant
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GramNeedle {
-    /// One required key.
+    /// One required key
     Key(GramKey),
-    /// Any one of these keys satisfies the gram requirement.
+    /// Any one of these keys satisfies the requirement
     AnyKey(Vec<GramKey>),
-    /// Any one key, with occurrences required at word edges.
+    /// Any one key, with an occurrence required at a word edge
     AtWordEdge {
-        /// Alternative keys for the gram.
+        /// The keys of which one must be present
         keys: Vec<GramKey>,
-        /// A non-word byte or text start must precede some occurrence.
+        /// A non-word byte or the text start must precede some occurrence
         starts: bool,
-        /// A non-word byte or text end must follow some occurrence.
+        /// A non-word byte or the text end must follow some occurrence
         ends: bool,
-        /// One single occurrence must carry both word edges at once.
+        /// One occurrence must carry both word edges at once
         whole: bool,
     },
-    /// Any one key, with occurrences required at line edges.
+    /// Any one key, with an occurrence required at a line edge
     AtLineEdge {
-        /// Alternative keys for the gram.
+        /// The keys of which one must be present
         keys: Vec<GramKey>,
-        /// A line terminator or text start must precede some occurrence.
+        /// A line break or the text start must precede some occurrence
         starts: bool,
-        /// A line terminator or text end must follow some occurrence.
+        /// A line break or the text end must follow some occurrence
         ends: bool,
     },
 }
 
 impl GramNeedle {
-    /// Iterate all concrete keys this logical needle may match.
+    /// Every key this needle may match
     pub fn keys(&self) -> impl Iterator<Item = GramKey> + '_ {
         match self {
             Self::Key(key) => core::slice::from_ref(key).iter(),
@@ -164,29 +158,37 @@ impl GramNeedle {
     }
 }
 
-/// A necessary condition over [`ScanSummary`].
+/// The document-frequency statistics an index feeds [`QueryPlan::tune`]
+pub trait DfStats {
+    /// Entries the index holds for one key
+    fn entry_count(&self, key: GramKey) -> u64;
+    /// Entries the index holds in all
+    fn total_entries(&self) -> u64;
+}
+
+/// One condition over a [`ScanSummary`] every match needs, exhaustive because an executor must handle every variant
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanNeed {
-    /// Content length must be at least this many bytes.
+    /// The content holds at least this many bytes
     MinByteLen(u64),
-    /// Longest line must be at least this many bytes.
+    /// The longest line holds at least this many bytes
     MinLongestLineLen(u32),
-    /// At least one byte in the set must occur somewhere.
+    /// At least one byte of the set occurs
     ContainsAnyByte(ByteSet256),
-    /// Byte counts must meet these saturating minima.
+    /// Every byte count meets these saturating minima
     MinByteCounts(Box<SaturatingByteCounts256>),
-    /// At least one line must start with a byte in the set.
+    /// Some line starts with a byte of the set
     LineStartsWithAnyByte(ByteSet256),
-    /// At least one line must end with a byte in the set.
+    /// Some line ends with a byte of the set
     LineEndsWithAnyByte(ByteSet256),
-    /// Content must start with these bytes.
+    /// The content starts with these bytes
     StartsWith(EdgeBytes),
-    /// Content must end with these bytes.
+    /// The content ends with these bytes
     EndsWith(EdgeBytes),
 }
 
 impl ScanNeed {
-    /// True when a scan summary satisfies this necessary condition.
+    /// True when the summary satisfies this condition
     #[must_use]
     pub fn satisfied_by(&self, summary: &ScanSummary) -> bool {
         match self {
@@ -220,14 +222,6 @@ impl ScanNeed {
         }
         set
     }
-}
-
-/// Document-frequency statistics a deployment feeds the planner.
-pub trait DfStats {
-    /// Estimated entries containing this concrete gram key.
-    fn entry_count(&self, key: GramKey) -> u64;
-    /// Total indexed text entries.
-    fn total_entries(&self) -> u64;
 }
 
 #[cfg(test)]

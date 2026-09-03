@@ -1,6 +1,7 @@
 # The public API
 
-Every public item lives at the crate root, and `learn` is the one public module.
+The crate root holds the four functions, every type they take or return, and `DfStats`, the trait
+`QueryPlan::tune` reads. `learn` is the one public module, for the counter that trains a table.
 cargo-semver-checks compares each release against the one before it, and a breaking change bumps
 the major, which before 1.0 moves the minor.
 
@@ -95,8 +96,8 @@ and `EndsWith(EdgeBytes)`. `satisfied_by(&summary)` evaluates it. `Debug`, `Clon
 
 ## `DfStats`
 
-The trait a deployment implements so `tune` sees its index: `entry_count(&self, key: GramKey) ->
-u64` and `total_entries(&self) -> u64`.
+The trait an index implements so `QueryPlan::tune` sees its document frequencies:
+`entry_count(&self, key: GramKey) -> u64` and `total_entries(&self) -> u64`.
 
 ## `QueryError`
 
@@ -113,10 +114,10 @@ u64` and `total_entries(&self) -> u64`.
 a counter that has seen nothing, and `to_table_bytes()` in the `SPNG` format
 `WeightTable::from_bytes` loads.
 
-`LearnError` is `InvalidSnapshotLen { expected, actual }` or `NotFresh`. The enum is
+`learn::LearnError` is `InvalidSnapshotLen { expected, actual }` or `NotFresh`. The enum is
 `#[non_exhaustive]`, `Debug`, `PartialEq`, `Eq` and `std::error::Error`.
 
 ## Features
 
 `weights` (on by default) embeds the production table behind `weights()`. `learn` adds the
-`learn` module and `LearnError`.
+`learn` module.

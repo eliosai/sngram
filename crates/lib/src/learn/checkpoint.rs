@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::LearnError;
+use super::LearnError;
 
 use super::{BigramCounter, LearnSettings};
 
@@ -15,11 +15,7 @@ impl BigramCounter {
         out
     }
 
-    /// Restore a checkpoint into a fresh counter
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LearnError`] for an invalid snapshot or non-fresh counter
+    /// Restore a checkpoint into a counter that has seen nothing
     pub fn restore(
         &self,
         snapshot: &[u8],

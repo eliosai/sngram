@@ -1,4 +1,4 @@
-//! Weight table type.
+//! The weight table and its `SPNG` binary
 
 pub mod error;
 mod spng;
@@ -6,7 +6,7 @@ mod spng;
 use error::TableError;
 use spng::{TableParts, WeightTableSettings, fingerprint_bytes, verify_checksum, write_weights};
 
-/// 256x256 character-pair weight table.
+/// The 256 by 256 grid of byte-pair weights
 #[derive(Debug, Clone)]
 pub struct WeightTable {
     weights: Box<[u32; WeightTableSettings::WEIGHTS_COUNT]>,
@@ -16,7 +16,7 @@ pub struct WeightTable {
 }
 
 impl WeightTable {
-    /// Build a table from a function over every byte pair.
+    /// A table from a function over every byte pair
     #[must_use]
     pub fn from_weight_fn(mut weight: impl FnMut(u8, u8) -> u32) -> Self {
         let mut table = Self {
@@ -29,10 +29,7 @@ impl WeightTable {
         table
     }
 
-    /// # Errors
-    ///
-    /// Returns `TableError` on malformed data, an unknown version, or a
-    /// checksum mismatch.
+    /// A table from its `SPNG` binary, with the checksum verified
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, TableError> {
         let parts = TableParts::parse(bytes)?;
         verify_checksum(parts.expected_crc, parts.body)?;
@@ -53,9 +50,7 @@ impl WeightTable {
         }
     }
 
-    /// Return a copy of this table in the `SPNG` binary format.
-    ///
-    /// The returned bytes are accepted by [`WeightTable::from_bytes`].
+    /// The table in the `SPNG` binary format that [`WeightTable::from_bytes`] loads
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0u8; WeightTableSettings::TABLE_BINARY_SIZE];
@@ -77,21 +72,13 @@ impl WeightTable {
         buf
     }
 
-    /// Deterministic table identity for manifests and cache keys.
-    ///
-    /// This is not a cryptographic authenticity check; table payload integrity
-    /// is validated by [`WeightTable::from_bytes`].
+    /// The FNV-1a identity of the table bytes, for manifests and cache keys, not an authenticity check
     #[must_use]
     pub const fn fingerprint(&self) -> u64 {
         self.fingerprint
     }
 
-    /// Return this table with an embedded provenance record.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TableError::InvalidProvenance`] when the provenance record is
-    /// too large for this table format.
+    /// The table stamped with a provenance record of at most 1024 bytes
     pub fn with_provenance(mut self, provenance: impl Into<String>) -> Result<Self, TableError> {
         let provenance = provenance.into();
         if provenance.len() > WeightTableSettings::PROVENANCE_MAX {
@@ -103,25 +90,25 @@ impl WeightTable {
         Ok(self)
     }
 
-    /// Format version the table was minted with.
+    /// The format version the table was minted with
     #[must_use]
     pub const fn version(&self) -> u32 {
         self.version
     }
 
-    /// Provenance record minted with the table; v1 tables carry none.
+    /// The provenance record minted with the table, which a v1 table lacks
     #[must_use]
     pub fn provenance(&self) -> Option<&str> {
         self.provenance.as_deref()
     }
 
-    /// The weight of one byte pair.
+    /// The weight of one byte pair
     #[must_use]
     pub fn weight(&self, c1: u8, c2: u8) -> u32 {
         self.weights[usize::from(c1) << 8 | usize::from(c2)]
     }
 
-    /// Full 256x256 weight matrix as a fixed-size array reference.
+    /// The whole grid, indexed by `c1 << 8 | c2`
     #[must_use]
     pub fn matrix(&self) -> &[u32; WeightTableSettings::WEIGHTS_COUNT] {
         &self.weights

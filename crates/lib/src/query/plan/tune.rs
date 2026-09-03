@@ -1,9 +1,9 @@
-//! Df-driven query plan tuning.
+//! Plan tuning by document frequency
 
 use super::{DfStats, GramNeedle, PlanExpr, QueryPlan};
 
 impl QueryPlan {
-    /// Reorder and thin the plan by df
+    /// Reorder the alternatives by document frequency and drop the bags too common to narrow anything
     pub fn tune(&mut self, df: &dyn DfStats, stop_df: u64) {
         self.root.tune(df, stop_df);
     }

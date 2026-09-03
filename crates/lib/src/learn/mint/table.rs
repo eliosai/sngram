@@ -21,10 +21,6 @@ impl BigramCounter {
     }
 
     /// Serialize a tuned table with test provenance
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for invalid provenance
     #[cfg(test)]
     pub fn mint_table_bytes(
         &self,

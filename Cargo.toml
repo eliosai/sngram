@@ -65,7 +65,8 @@ too_many_arguments = "warn"
 
 # API design
 must_use_candidate = "warn"
-missing_errors_doc = "warn"
+# every doc is one line, so an errors section never appears
+missing_errors_doc = "allow"
 missing_const_for_fn = "warn"
 wildcard_imports = "warn"
 

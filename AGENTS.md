@@ -65,8 +65,9 @@ Never write `pub(crate)`, `pub(super)`, `pub(in path)`, or any other restricted 
 is a plain private `fn` unless another module needs it, and then it is `pub`. Keep the private form
 whenever it still compiles. `pub use` lives only in `lib.rs`.
 
-The public surface of `sngram` is the crate root. Every module is private and the root re-exports
-what a caller may name, and `docs/api.md` lists every public item. `ScanSummary`, `ScannedGram` and `ByteRange` are open records marked
+The public surface of `sngram` is the crate root: the four functions, every type they take or
+return, and `DfStats`. `learn` is the one public module, for what only the trainer needs, and
+`docs/api.md` lists every public item. `ScanSummary`, `ScannedGram` and `ByteRange` are open records marked
 `#[non_exhaustive]`; every other public struct keeps its fields private behind accessors. The error
 enums are `#[non_exhaustive]`. `PlanExpr`, `GramNeedle` and `ScanNeed` are exhaustive on purpose:
 an executor must handle every variant, so a new variant is a breaking change and gets a major bump.

@@ -27,11 +27,14 @@ Every emission carries the gram's 64-bit rolling hash, computed in
 constant time from prefix hashes maintained during the scan, so the
 inverted-index key costs nothing extra.
 
-Querying folds a regex into a `QueryPlan`, a conservative boolean query
-over gram presence. It follows Russ Cox's Google Code Search analysis
-with sparse covering in place of trigram extraction. The plan matches a
-superset of what the regex matches, so a candidate prefilter built from
-it never misses a match. The real regex then verifies the candidates.
+Querying folds a regex into a `QueryPlan`, a boolean query over gram
+presence and document facts. The regex is analyzed bottom-up: each literal
+covers to the grams the scanner is guaranteed to emit for it, a maximal
+cover for a lone literal and a minimal one per branch of a wide
+alternation, and the byte counts, edges and lengths a match needs join
+the plan as summary conditions. The plan matches a superset of what the
+regex matches, so a candidate prefilter built from it never misses a
+match. The real regex then verifies the candidates.
 
 ## API
 
@@ -83,8 +86,8 @@ up the same keys `scan` emitted. `ScanNeed` stores document-level
 requirements that evaluate against the scan summary. The structure maps
 onto an integer-array index directly: an `AllOf` gram bag is intersection
 and an `AnyOf` gram bag is union. Once the index knows document
-frequencies, `QueryPlan::tune` reorders alternatives by selectivity and
-drops bags too common to narrow anything.
+frequencies through `DfStats`, `QueryPlan::tune` reorders alternatives by
+selectivity and drops bags too common to narrow anything.
 
 `PlanExpr`, `GramNeedle` and `ScanNeed` are exhaustive on purpose. An
 executor must handle every variant, so a new variant is a breaking change.
@@ -98,7 +101,7 @@ pattern you pass in.
 | feature | adds |
 |---|---|
 | `weights` (default) | the embedded production weight table, `sngram::weights()` |
-| `learn` | `sngram::learn::BigramCounter`, the byte-pair counter that trains fresh tables |
+| `learn` | `sngram::learn`: `BigramCounter`, the byte-pair counter that trains fresh tables, and `LearnError` |
 
 Count with `process` or `process_batch`, merge staging counters with
 `merge`, and serialize with `to_table_bytes` in the format

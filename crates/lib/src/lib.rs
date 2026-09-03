@@ -12,8 +12,6 @@ mod weights;
 pub mod learn;
 
 pub use bytes::{ByteSet256, EdgeBytes, SaturatingByteCounts256};
-#[cfg(feature = "learn")]
-pub use learn::error::LearnError;
 pub use query::plan::{DfStats, GramNeedle, PlanExpr, QueryError, QueryPlan, ScanNeed};
 pub use query::query;
 pub use scan::binary::is_binary;
