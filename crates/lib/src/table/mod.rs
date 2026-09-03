@@ -36,11 +36,6 @@ impl WeightTable {
         Ok(Self::from_parts(parts, fingerprint_bytes(bytes)))
     }
 
-    #[doc(hidden)]
-    pub fn from_prevalidated_bytes(bytes: &[u8], fingerprint: u64) -> Result<Self, TableError> {
-        Ok(Self::from_parts(TableParts::parse(bytes)?, fingerprint))
-    }
-
     fn from_parts(parts: TableParts<'_>, fingerprint: u64) -> Self {
         Self {
             weights: spng::parse_weights(parts.data),
