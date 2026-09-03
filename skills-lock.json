@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "gh-stack": {
+      "source": "github/gh-stack",
+      "sourceType": "github",
+      "skillPath": "skills/gh-stack/SKILL.md",
+      "computedHash": "213d3fe0b3dc87b453912b5a5947fd189a884e4a82ce41fe8ce6c16fb93cd8b3"
+    },
+    "prek": {
+      "source": "j178/prek",
+      "sourceType": "github",
+      "skillPath": "skills/prek/SKILL.md",
+      "computedHash": "16b0fbe40b33dafb56a7ed4faec28329ffea373ee466e5bbe50866a36d9adeae"
+    },
+    "thermo-nuclear-code-quality-review": {
+      "source": "cursor/plugins",
+      "sourceType": "github",
+      "skillPath": "cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md",
+      "computedHash": "9052b01b46b1d8dbf94c45f9313ec1983443f9a460e83d49cdc7fe0f640ca476"
+    }
+  }
+}
