@@ -15,7 +15,7 @@ engine. The index may return false positives. It must never miss a match.
 | `crates/eg` | the application: a ripgrep fork that prefilters through the index, plus the `eg-indexd` daemon |
 
 The training pipeline lives outside the workspace in `train/`, a uv
-project that depends on the Python package. It streams The Stack v3
+project that depends on the Python package. It streams the blend corpus
 parquet shards from the Hugging Face Hub, reads file content inline out
 of each shard, and mints the production weight table.
 
@@ -27,7 +27,8 @@ valley rule), plus all trigrams. Weights come from a trained 256×256
 byte-pair table, so gram borders land on rare byte pairs and the kept
 grams are selective. The algorithm was differentially verified against
 danlark1/sparse_ngrams, the reference implementation of the Google/GitHub
-rule: 1905 cases with exact gram-set equality.
+rule: 1696 cases, each asserting the scanner emits every gram the
+reference emits.
 
 Two properties make the scheme sound for search. A gram's emission depends
 only on the bytes inside its span, so every gram the scanner emits for a

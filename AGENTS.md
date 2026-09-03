@@ -44,9 +44,9 @@ and `precision.rs` prove that against a regex oracle, `differential.rs` proves `
 a reference scanner emits, and `scan_bit_identity` pins the scanner to a frozen copy of itself byte
 for byte. Change a scan or plan rule with its test first, then the code that makes the test pass.
 
-Binary detection is ripgrep's rule, a NUL byte in the first 8 KiB, exposed as `is_binary`. `scan`
-applies no policy. The index skips what `is_binary` refuses, which is exactly what the verifier would
-refuse, and a NUL past the window leaves the file indexed for the verifier to judge.
+`scan` applies no binary policy. The library offers one, `is_binary`, true for a NUL byte in the
+first 8 KiB, which is a prefix of the rule ripgrep's verifier quits on. elgrep needs no policy: it
+indexes the bytes before the first NUL, the only bytes its verifier can report a match in.
 
 ## Comments And Prose
 

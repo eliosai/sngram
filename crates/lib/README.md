@@ -66,12 +66,13 @@ metadata mined in the same pass, while the callback receives each
 document with NUL bytes scans like any other.
 
 `is_binary` is the policy: true when a NUL byte sits in the first 8 KiB.
-That is the rule ripgrep's binary detection quits on, so an index that
-skips what `is_binary` refuses skips exactly the files the verifier would
-refuse, and a NUL past the window leaves the file indexed for the verifier
-to judge. The index only ever adds candidates.
+ripgrep's binary detection quits at a NUL anywhere, so an index that skips
+what `is_binary` refuses skips files the verifier would refuse too, and a
+NUL past the window leaves the file indexed for the verifier to judge. An
+indexer that would rather keep those files can index the bytes before the
+first NUL instead, which is what elgrep does.
 
-For valid patterns `query` is infallible: a pattern too broad to prefilter
+Within the length limit `query` is infallible: a pattern too broad to prefilter
 yields `PlanExpr::All` and an impossible one yields `PlanExpr::None`.
 
 ```text

@@ -55,7 +55,7 @@ the detailed phase bar only shows on a first build.
 
 Churning path: a compatible generation exists but no proof does, because
 the corpus moved under it. The query registers its wake so the daemon
-rebuilds, waits out a 250 ms grace for a rebuild that is nearly done
+rebuilds, waits out a 100 ms grace for a rebuild that is nearly done
 (`EG_INDEX_CHURN_WAIT_MS` overrides it), and otherwise answers from the
 exact unindexed scan. That answer is complete by construction: it is the
 same walk and the same search workers `--no-index` uses, so no match can

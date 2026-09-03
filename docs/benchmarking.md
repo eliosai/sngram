@@ -84,7 +84,7 @@ reported with their command lines.
 
 ## Library benches
 
-Criterion microbenches for the scan and query hot paths, from the
+Divan microbenches for the scan and query hot paths, from the
 `sngram-benches` crate at `crates/lib/benches`:
 
 ```sh
@@ -97,7 +97,7 @@ Pass `-- --test` to run each case once and check it still works without
 paying for a full measurement. `scan` measures about 208 MiB/s on code
 and the worst plan in the query set builds in 4.4 ms.
 
-The `eg` end-to-end bench is Divan, not Criterion:
+The `eg` end-to-end bench is Divan too:
 
 ```sh
 just eg bench       # cargo bench -p elgrep --bench index

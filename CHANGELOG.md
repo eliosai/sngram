@@ -52,8 +52,6 @@ Also:
 - `-w` and `-x` under `--crlf` asked for a line ending in the last pattern
   byte while the verifier saw the carriage return.
 - Anchored patterns carry line-start and line-end requirements into the plan.
-- Tiny binary prefixes are decided from bytes held in the index rather than
-  forced into every candidate set.
 - A sorted indexed search doubled every block separator: `--` between context
   blocks, a blank line between `--heading` blocks. Sorting runs single
   threaded, where the standard printer owns the separator, but the indexed
