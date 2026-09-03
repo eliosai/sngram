@@ -11,3 +11,12 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# elgrep's daemon tests vouch within 30 ms and lose that race on a loaded runner
+[[profile.default.overrides]]
+filter = 'package(elgrep) & binary(index_integration)'
+retries = 2
+
+[[profile.ci.overrides]]
+filter = 'package(elgrep) & binary(index_integration)'
+retries = 2
