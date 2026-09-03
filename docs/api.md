@@ -3,12 +3,13 @@
 The crate root holds the four functions, every type they take or return, and `DfStats`, the trait
 `QueryPlan::tune` reads. `learn` is the one public module, for the counter that trains a table.
 cargo-semver-checks compares each release against the one before it, and a breaking change bumps
-the major, which before 1.0 moves the minor.
+the major.
 
 ## Functions
 
 - `weights() -> &'static WeightTable` returns the embedded production table, parsed and
-  checksummed on first use (feature `weights`, on by default)
+  checksummed on first use, and panics when the embedded bytes are corrupt (feature `weights`, on
+  by default)
 - `is_binary(content: &[u8]) -> bool` is true when a NUL byte sits in the first 8 KiB, the rule
   ripgrep's binary detection quits on
 - `scan(table: &WeightTable, content: &[u8], emit: impl FnMut(ScannedGram)) -> ScanSummary` hands

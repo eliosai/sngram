@@ -2,7 +2,7 @@
 
 Only unfinished work belongs here. Git history carries completed plans and measurements.
 
-## Before 1.0
+## 1.x
 
 - gate the one-line comment rule: `just comment-scan` counts 508 comments over one line, 181 in
   `crates/lib` and 327 in `crates/eg`, and each needs a rewrite that keeps its facts

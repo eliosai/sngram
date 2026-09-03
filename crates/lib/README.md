@@ -112,10 +112,10 @@ it back with `table.provenance()`.
 
 ## Compatibility
 
-0.8 folds `sngram-types` into this crate, takes `scan` over a byte slice,
+1.0 folds `sngram-types` into this crate, takes `scan` over a byte slice,
 returns the summary instead of a `ScanEvent::Finish` event, and moves the
 binary rule into `is_binary`. Keys are unchanged, so an index built with
-0.7 still answers 0.8 queries; only the set of files it holds may differ
+0.6 still answers 1.0 queries; only the set of files it holds may differ
 under the new binary rule.
 
 0.6 changed index keys to the emitted `GramKey`, so reindex when
