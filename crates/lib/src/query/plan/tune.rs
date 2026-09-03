@@ -153,7 +153,7 @@ mod tests {
     }
 
     fn key(value: u64) -> GramKey {
-        GramKey(value)
+        GramKey::new(value)
     }
 
     #[test]

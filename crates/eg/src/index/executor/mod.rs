@@ -486,9 +486,9 @@ mod tests {
 
     #[test]
     fn all_of_intersects_grams_and_scan_needs() {
-        let backend = fake_backend(&[(GramKey(1), full(&[0, 1]))], Vec::new());
+        let backend = fake_backend(&[(GramKey::new(1), full(&[0, 1]))], Vec::new());
         let plan = QueryPlan::new(PlanExpr::AllOf {
-            grams: vec![GramNeedle::Key(GramKey(1))],
+            grams: vec![GramNeedle::Key(GramKey::new(1))],
             needs: vec![ScanNeed::MinByteLen(2)],
             children: vec![],
         });
@@ -500,13 +500,16 @@ mod tests {
     fn all_of_rejects_disjoint_block_masks() {
         let backend = fake_backend(
             &[
-                (GramKey(1), masked(&[(1, 0b0000_0001)])),
-                (GramKey(2), masked(&[(1, 0b1000_0000)])),
+                (GramKey::new(1), masked(&[(1, 0b0000_0001)])),
+                (GramKey::new(2), masked(&[(1, 0b1000_0000)])),
             ],
             Vec::new(),
         );
         let plan = QueryPlan::new(PlanExpr::AllOf {
-            grams: vec![GramNeedle::Key(GramKey(1)), GramNeedle::Key(GramKey(2))],
+            grams: vec![
+                GramNeedle::Key(GramKey::new(1)),
+                GramNeedle::Key(GramKey::new(2)),
+            ],
             needs: vec![],
             children: vec![],
         });
@@ -518,13 +521,16 @@ mod tests {
     fn all_of_keeps_overlapping_block_masks() {
         let backend = fake_backend(
             &[
-                (GramKey(1), masked(&[(1, 0b0000_0011)])),
-                (GramKey(2), masked(&[(1, 0b0000_0010)])),
+                (GramKey::new(1), masked(&[(1, 0b0000_0011)])),
+                (GramKey::new(2), masked(&[(1, 0b0000_0010)])),
             ],
             Vec::new(),
         );
         let plan = QueryPlan::new(PlanExpr::AllOf {
-            grams: vec![GramNeedle::Key(GramKey(1)), GramNeedle::Key(GramKey(2))],
+            grams: vec![
+                GramNeedle::Key(GramKey::new(1)),
+                GramNeedle::Key(GramKey::new(2)),
+            ],
             needs: vec![],
             children: vec![],
         });
@@ -536,13 +542,16 @@ mod tests {
     fn doc_precision_ignores_block_masks() {
         let backend = fake_backend(
             &[
-                (GramKey(1), masked(&[(1, 0b0000_0001)])),
-                (GramKey(2), masked(&[(1, 0b1000_0000)])),
+                (GramKey::new(1), masked(&[(1, 0b0000_0001)])),
+                (GramKey::new(2), masked(&[(1, 0b1000_0000)])),
             ],
             Vec::new(),
         );
         let plan = QueryPlan::new(PlanExpr::AllOf {
-            grams: vec![GramNeedle::Key(GramKey(1)), GramNeedle::Key(GramKey(2))],
+            grams: vec![
+                GramNeedle::Key(GramKey::new(1)),
+                GramNeedle::Key(GramKey::new(2)),
+            ],
             needs: vec![],
             children: vec![],
         });
@@ -554,17 +563,20 @@ mod tests {
     fn any_of_child_masks_flow_into_parent_intersection() {
         let backend = fake_backend(
             &[
-                (GramKey(1), masked(&[(1, 0b0000_0001)])),
-                (GramKey(2), masked(&[(1, 0b0000_0010)])),
-                (GramKey(3), masked(&[(1, 0b0000_0001)])),
+                (GramKey::new(1), masked(&[(1, 0b0000_0001)])),
+                (GramKey::new(2), masked(&[(1, 0b0000_0010)])),
+                (GramKey::new(3), masked(&[(1, 0b0000_0001)])),
             ],
             Vec::new(),
         );
         let plan = QueryPlan::new(PlanExpr::AllOf {
-            grams: vec![GramNeedle::Key(GramKey(3))],
+            grams: vec![GramNeedle::Key(GramKey::new(3))],
             needs: vec![],
             children: vec![PlanExpr::AnyOf {
-                grams: vec![GramNeedle::Key(GramKey(1)), GramNeedle::Key(GramKey(2))],
+                grams: vec![
+                    GramNeedle::Key(GramKey::new(1)),
+                    GramNeedle::Key(GramKey::new(2)),
+                ],
                 needs: vec![],
                 children: vec![],
             }],
@@ -575,9 +587,9 @@ mod tests {
 
     #[test]
     fn any_of_unions_scan_needs_and_grams() {
-        let backend = fake_backend(&[(GramKey(7), full(&[2]))], Vec::new());
+        let backend = fake_backend(&[(GramKey::new(7), full(&[2]))], Vec::new());
         let plan = QueryPlan::new(PlanExpr::AnyOf {
-            grams: vec![GramNeedle::Key(GramKey(7))],
+            grams: vec![GramNeedle::Key(GramKey::new(7))],
             needs: vec![ScanNeed::MinByteLen(2)],
             children: vec![],
         });
@@ -589,7 +601,7 @@ mod tests {
     fn forced_candidates_with_unknown_summary_are_retained_for_soundness() {
         let backend = fake_backend(&[], vec![2]);
         let plan = QueryPlan::new(PlanExpr::AllOf {
-            grams: vec![GramNeedle::Key(GramKey(99))],
+            grams: vec![GramNeedle::Key(GramKey::new(99))],
             needs: vec![ScanNeed::MinByteLen(9)],
             children: vec![],
         });
@@ -601,7 +613,7 @@ mod tests {
     fn forced_candidates_with_known_summary_must_satisfy_needs() {
         let backend = fake_backend(&[], vec![0, 1, 2]);
         let plan = QueryPlan::new(PlanExpr::AllOf {
-            grams: vec![GramNeedle::Key(GramKey(99))],
+            grams: vec![GramNeedle::Key(GramKey::new(99))],
             needs: vec![ScanNeed::MinByteLen(2)],
             children: vec![],
         });
@@ -613,7 +625,7 @@ mod tests {
     fn forced_candidate_estimate_uses_execution_summary_filter() {
         let backend = fake_backend(&[], vec![0, 1, 2]);
         let plan = QueryPlan::new(PlanExpr::AllOf {
-            grams: vec![GramNeedle::Key(GramKey(99))],
+            grams: vec![GramNeedle::Key(GramKey::new(99))],
             needs: vec![ScanNeed::MinByteLen(2)],
             children: vec![],
         });
@@ -632,7 +644,7 @@ mod tests {
         let anchored = LINE_START_BIT | LINE_END_BIT | BLOCK_BITS;
         let backend = fake_backend(
             &[(
-                GramKey(1),
+                GramKey::new(1),
                 masked(&[(0, anchored), (1, LINE_START_BIT | BLOCK_BITS)]),
             )],
             Vec::new(),
@@ -640,7 +652,7 @@ mod tests {
         let plan = |starts, ends| {
             QueryPlan::new(PlanExpr::AllOf {
                 grams: vec![GramNeedle::AtLineEdge {
-                    keys: vec![GramKey(1)],
+                    keys: vec![GramKey::new(1)],
                     starts,
                     ends,
                 }],
@@ -682,11 +694,14 @@ mod tests {
     #[test]
     fn any_key_uses_one_lookup_per_key() {
         let backend = fake_backend(
-            &[(GramKey(1), full(&[0, 2])), (GramKey(2), full(&[1, 2]))],
+            &[
+                (GramKey::new(1), full(&[0, 2])),
+                (GramKey::new(2), full(&[1, 2])),
+            ],
             Vec::new(),
         );
         let plan = QueryPlan::new(PlanExpr::AllOf {
-            grams: vec![GramNeedle::AnyKey(vec![GramKey(1), GramKey(2)])],
+            grams: vec![GramNeedle::AnyKey(vec![GramKey::new(1), GramKey::new(2)])],
             needs: vec![],
             children: vec![],
         });
@@ -765,38 +780,30 @@ mod tests {
     }
 
     fn summary(lines: u32) -> ScanSummary {
-        ScanSummary {
-            byte_len: u64::from(lines),
-            line_count: lines,
-            empty_line_count: 0,
-            longest_line_len: lines,
-            gram_count: 0,
-            flags: ScanFlags::default(),
-            byte_counts: SaturatingByteCounts256::default(),
-            line_start_bytes: ByteSet256::default(),
-            line_end_bytes: ByteSet256::default(),
-            prefix: EdgeBytes::default(),
-            suffix: EdgeBytes::default(),
-        }
+        let mut summary = ScanSummary::default();
+        summary.byte_len = u64::from(lines);
+        summary.line_count = lines;
+        summary.longest_line_len = lines;
+        summary
     }
 
     fn rich_summary() -> ScanSummary {
-        ScanSummary {
-            byte_len: 6,
-            line_count: 2,
-            empty_line_count: 1,
-            longest_line_len: 4,
-            gram_count: 3,
-            flags: ScanFlags::default()
-                .with_ascii_lower()
-                .with_ascii_digit()
-                .with_lf(),
-            byte_counts: byte_counts(b"aa11\n\n"),
-            line_start_bytes: byte_set(b"a"),
-            line_end_bytes: byte_set(b"1"),
-            prefix: EdgeBytes::from_slice(b"aa11"),
-            suffix: EdgeBytes::from_slice(b"11"),
-        }
+        let mut summary = ScanSummary::default();
+        summary.byte_len = 6;
+        summary.line_count = 2;
+        summary.empty_line_count = 1;
+        summary.longest_line_len = 4;
+        summary.gram_count = 3;
+        summary.flags = ScanFlags::default()
+            .with_ascii_lower()
+            .with_ascii_digit()
+            .with_lf();
+        summary.byte_counts = byte_counts(b"aa11\n\n");
+        summary.line_start_bytes = byte_set(b"a");
+        summary.line_end_bytes = byte_set(b"1");
+        summary.prefix = EdgeBytes::from_slice(b"aa11");
+        summary.suffix = EdgeBytes::from_slice(b"11");
+        summary
     }
 
     fn byte_set(bytes: &[u8]) -> ByteSet256 {

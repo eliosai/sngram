@@ -1,111 +1,45 @@
 //! Bit-identity tests: production `scan` against the frozen baseline scanner.
 //!
-//! Every test asserts the full event sequence matches exactly: keys, spans,
-//! event order, and the final summary, over the same reader chunking.
+//! Every test asserts the grams match exactly, keys, spans and order, and that
+//! the final summary matches.
 #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used)]
 
 mod frozen;
 
-use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
 
-use sngram::{ScanError, ScanEvent, ScanSummary, ScannedGram, WeightTable};
+use sngram::{ScanSummary, ScannedGram, WeightTable};
 
-#[derive(Debug, Clone, PartialEq)]
-enum OwnedEvent {
-    Gram(ScannedGram),
-    Finish(Box<ScanSummary>),
+type Scan = (Vec<ScannedGram>, ScanSummary);
+
+fn production_scan(table: &WeightTable, data: &[u8]) -> Scan {
+    let mut grams = Vec::new();
+    let summary = sngram::scan(table, data, |gram| grams.push(gram));
+    (grams, summary)
 }
 
-type ScanOutcome = Result<Vec<OwnedEvent>, u8>;
-
-const fn error_code(err: &ScanError) -> u8 {
-    match err {
-        ScanError::Io(_) => 0,
-        ScanError::Binary => 1,
-        _ => 2,
-    }
+fn frozen_scan(table: &WeightTable, data: &[u8]) -> Scan {
+    let mut grams = Vec::new();
+    let summary = frozen::scan(table, data, |gram| grams.push(gram));
+    (grams, summary)
 }
 
-fn own(event: ScanEvent<'_>) -> OwnedEvent {
-    match event {
-        ScanEvent::Gram(gram) => OwnedEvent::Gram(gram),
-        ScanEvent::Finish(summary) => OwnedEvent::Finish(Box::new(*summary)),
-    }
+fn assert_identical(name: &str, table: &WeightTable, data: &[u8]) {
+    let (expected, expected_summary) = frozen_scan(table, data);
+    let (got, got_summary) = production_scan(table, data);
+    assert_grams_match(name, &expected, &got);
+    assert_eq!(expected_summary, got_summary, "summary differs on {name}");
 }
 
-fn production_events(table: &WeightTable, data: &[u8], cap: Option<usize>) -> ScanOutcome {
-    let mut events = Vec::new();
-    let result = match cap {
-        None => sngram::scan(table, Cursor::new(data), |event| events.push(own(event))),
-        Some(cap) => sngram::scan(
-            table,
-            BufReader::with_capacity(cap, Cursor::new(data)),
-            |event| events.push(own(event)),
-        ),
-    };
-    result.map_err(|err| error_code(&err)).map(|()| events)
-}
-
-fn frozen_events(table: &WeightTable, data: &[u8], cap: Option<usize>) -> ScanOutcome {
-    let mut events = Vec::new();
-    let result = match cap {
-        None => frozen::scan(table, Cursor::new(data), |event| events.push(own(event))),
-        Some(cap) => frozen::scan(
-            table,
-            BufReader::with_capacity(cap, Cursor::new(data)),
-            |event| events.push(own(event)),
-        ),
-    };
-    result.map_err(|err| error_code(&err)).map(|()| events)
-}
-
-fn assert_identical(name: &str, table: &WeightTable, data: &[u8], cap: Option<usize>) {
-    let expected = frozen_events(table, data, cap);
-    let got = production_events(table, data, cap);
-    match (&expected, &got) {
-        (Ok(expected_events), Ok(got_events)) => {
-            assert_events_match(name, cap, expected_events, got_events);
-        },
-        _ => assert_eq!(expected, got, "outcome mismatch on {name} cap={cap:?}"),
-    }
-}
-
-fn assert_events_match(
-    name: &str,
-    cap: Option<usize>,
-    expected: &[OwnedEvent],
-    got: &[OwnedEvent],
-) {
+fn assert_grams_match(name: &str, expected: &[ScannedGram], got: &[ScannedGram]) {
     let first_diff = expected
         .iter()
         .zip(got)
-        .position(|(expected_event, got_event)| expected_event != got_event);
+        .position(|(expected_gram, got_gram)| expected_gram != got_gram);
     if let Some(at) = first_diff {
-        assert_eq!(
-            expected[at], got[at],
-            "event {at} differs on {name} cap={cap:?}"
-        );
+        assert_eq!(expected[at], got[at], "gram {at} differs on {name}");
     }
-    assert_eq!(
-        expected.len(),
-        got.len(),
-        "event count differs on {name} cap={cap:?}"
-    );
-}
-
-fn assert_identical_all_caps(name: &str, table: &WeightTable, data: &[u8]) {
-    for cap in [
-        None,
-        Some(1),
-        Some(2),
-        Some(3),
-        Some(17),
-        Some(64),
-        Some(8192),
-    ] {
-        assert_identical(name, table, data, cap);
-    }
+    assert_eq!(expected.len(), got.len(), "gram count differs on {name}");
 }
 
 /// Deterministic LCG so failures reproduce exactly
@@ -162,8 +96,8 @@ fn tiny_inputs_of_every_length_match() {
         for len in 0..64usize {
             let text: Vec<u8> = (0..len).map(|_| rng.next_text_byte()).collect();
             let raw: Vec<u8> = (0..len).map(|_| rng.next_byte()).collect();
-            assert_identical_all_caps(&format!("{tname}/tiny_text_{len}"), &table, &text);
-            assert_identical_all_caps(&format!("{tname}/tiny_raw_{len}"), &table, &raw);
+            assert_identical(&format!("{tname}/tiny_text_{len}"), &table, &text);
+            assert_identical(&format!("{tname}/tiny_raw_{len}"), &table, &raw);
         }
     }
 }
@@ -223,7 +157,7 @@ fn periodic_inputs() -> Vec<(String, Vec<u8>)> {
 fn adversarial_inputs_match() {
     for (tname, table) in tables() {
         for (iname, data) in adversarial_inputs() {
-            assert_identical_all_caps(&format!("{tname}/{iname}"), &table, &data);
+            assert_identical(&format!("{tname}/{iname}"), &table, &data);
         }
     }
 }
@@ -240,13 +174,7 @@ fn random_fuzz_inputs_match() {
             (0..len).map(|_| rng.next_text_byte()).collect()
         };
         let (tname, table) = &tables[round % tables.len()];
-        let cap = match rng.next_u32() % 4 {
-            0 => None,
-            1 => Some(1 + (rng.next_u32() as usize) % 7),
-            2 => Some(64),
-            _ => Some(1 + (rng.next_u32() as usize) % 2000),
-        };
-        assert_identical(&format!("{tname}/fuzz_{round}_{len}"), table, &data, cap);
+        assert_identical(&format!("{tname}/fuzz_{round}_{len}"), table, &data);
     }
 }
 
@@ -275,13 +203,11 @@ fn own_source_corpus_matches() {
     let table = WeightTable::from_weight_fn(|a, b| crc32fast::hash(&[a, b]));
     let mut files = Vec::new();
     source_files(&manifest.join("src"), "rs", &mut files);
-    source_files(&manifest.join("../types/src"), "rs", &mut files);
     assert!(files.len() > 10, "expected repo sources as fixtures");
     for path in files {
         let data = std::fs::read(&path).expect("read source fixture");
         let name = path.display().to_string();
-        assert_identical(&name, &table, &data, None);
-        assert_identical(&name, &table, &data, Some(4096));
+        assert_identical(&name, &table, &data);
     }
 }
 
@@ -316,7 +242,7 @@ fn compare_real_file(path: &Path, budget: &mut u64, table: &WeightTable, stats: 
     }
     *budget = budget.saturating_sub(data.len() as u64);
     let name = path.display().to_string();
-    assert_identical(&name, table, &data, None);
+    assert_identical(&name, table, &data);
     stats.0 += 1;
     stats.1 += data.len() as u64;
 }

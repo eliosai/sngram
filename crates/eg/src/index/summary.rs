@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
-use sngram::{ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanFlags, ScanNeed, ScanSummary};
+use sngram::{ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanNeed, ScanSummary};
 
 pub const SUMMARY_FILE_NAME: &str = "summaries.bin";
 
@@ -473,35 +473,27 @@ fn write_summary(out: &mut [u8], summary: ScanSummary) {
     write_u64(out, 1, summary.byte_len);
     write_u32(out, 9, summary.longest_line_len);
     write_nibble_counts(out, 13, &summary.byte_counts);
-    write_words(out, 141, summary.line_start_bytes.words);
-    write_words(out, 173, summary.line_end_bytes.words);
+    write_words(out, 141, summary.line_start_bytes.words());
+    write_words(out, 173, summary.line_end_bytes.words());
     write_edge(out, 205, 206, summary.prefix);
     write_edge(out, 222, 223, summary.suffix);
 }
 
 fn read_summary(bytes: &[u8]) -> Option<ScanSummary> {
-    Some(ScanSummary {
-        byte_len: read_u64(bytes, 1),
-        line_count: 0,
-        empty_line_count: 0,
-        longest_line_len: read_u32(bytes, 9),
-        gram_count: 0,
-        flags: ScanFlags::default(),
-        byte_counts: read_nibble_counts(bytes, 13)?,
-        line_start_bytes: ByteSet256 {
-            words: read_words(bytes, 141)?,
-        },
-        line_end_bytes: ByteSet256 {
-            words: read_words(bytes, 173)?,
-        },
-        prefix: read_edge(bytes, 205, 206)?,
-        suffix: read_edge(bytes, 222, 223)?,
-    })
+    let mut summary = ScanSummary::default();
+    summary.byte_len = read_u64(bytes, 1);
+    summary.longest_line_len = read_u32(bytes, 9);
+    summary.byte_counts = read_nibble_counts(bytes, 13)?;
+    summary.line_start_bytes = ByteSet256::from_words(read_words(bytes, 141)?);
+    summary.line_end_bytes = ByteSet256::from_words(read_words(bytes, 173)?);
+    summary.prefix = read_edge(bytes, 205, 206)?;
+    summary.suffix = read_edge(bytes, 222, 223)?;
+    Some(summary)
 }
 
 /// Four-bit saturating byte counts: 15 means fifteen or more
 fn write_nibble_counts(out: &mut [u8], offset: usize, counts: &SaturatingByteCounts256) {
-    for (idx, pair) in counts.counts.chunks_exact(2).enumerate() {
+    for (idx, pair) in counts.counts().chunks_exact(2).enumerate() {
         out[offset + idx] = pair[0].min(15) | (pair[1].min(15) << 4);
     }
 }
@@ -514,7 +506,7 @@ fn read_nibble_counts(bytes: &[u8], offset: usize) -> Option<SaturatingByteCount
         counts[idx * 2] = expand_nibble(byte & 0x0F);
         counts[idx * 2 + 1] = expand_nibble(byte >> 4);
     }
-    Some(SaturatingByteCounts256 { counts })
+    Some(SaturatingByteCounts256::from_counts(counts))
 }
 
 const fn expand_nibble(nibble: u8) -> u8 {
@@ -586,31 +578,14 @@ mod tests {
 
     #[test]
     fn summary_records_round_trip_persisted_fields() {
-        let summary = ScanSummary {
-            byte_len: 3,
-            line_count: 0,
-            empty_line_count: 0,
-            longest_line_len: 3,
-            gram_count: 0,
-            flags: ScanFlags::default(),
-            byte_counts: {
-                let mut counts = SaturatingByteCounts256::default();
-                counts.observe(b'a');
-                counts
-            },
-            line_start_bytes: {
-                let mut set = ByteSet256::default();
-                set.insert(b'a');
-                set
-            },
-            line_end_bytes: {
-                let mut set = ByteSet256::default();
-                set.insert(b'c');
-                set
-            },
-            prefix: EdgeBytes::from_slice(b"abc"),
-            suffix: EdgeBytes::from_slice(b"abc"),
-        };
+        let mut summary = ScanSummary::default();
+        summary.byte_len = 3;
+        summary.longest_line_len = 3;
+        summary.byte_counts.observe(b'a');
+        summary.line_start_bytes.insert(b'a');
+        summary.line_end_bytes.insert(b'c');
+        summary.prefix = EdgeBytes::from_slice(b"abc");
+        summary.suffix = EdgeBytes::from_slice(b"abc");
         let record = SummaryRecord::new(7, SummaryStatus::Known(summary));
 
         assert_eq!(decode_record(7, &encode_record(record)), Some(record));
@@ -629,9 +604,9 @@ mod tests {
         write_nibble_counts(&mut out, 13, &counts);
         let decoded = read_nibble_counts(&out, 13).unwrap();
 
-        assert_eq!(decoded.counts[usize::from(b'x')], 14);
-        assert_eq!(decoded.counts[usize::from(b'y')], u8::MAX);
-        assert_eq!(decoded.counts[usize::from(b'z')], 0);
+        assert_eq!(decoded.counts()[usize::from(b'x')], 14);
+        assert_eq!(decoded.counts()[usize::from(b'y')], u8::MAX);
+        assert_eq!(decoded.counts()[usize::from(b'z')], 0);
     }
 
     #[test]
@@ -719,18 +694,6 @@ mod tests {
     }
 
     fn empty_summary() -> ScanSummary {
-        ScanSummary {
-            byte_len: 0,
-            line_count: 0,
-            empty_line_count: 0,
-            longest_line_len: 0,
-            gram_count: 0,
-            flags: ScanFlags::default(),
-            byte_counts: SaturatingByteCounts256::default(),
-            line_start_bytes: ByteSet256::default(),
-            line_end_bytes: ByteSet256::default(),
-            prefix: EdgeBytes::default(),
-            suffix: EdgeBytes::default(),
-        }
+        ScanSummary::default()
     }
 }

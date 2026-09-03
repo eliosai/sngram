@@ -65,19 +65,19 @@ impl SummaryBuilder {
         let lines = self.line_summary();
         let line_end_bytes = self.line_end_bytes();
 
-        ScanSummary {
-            byte_len: self.byte_len,
-            line_count: lines.count,
-            empty_line_count: lines.empty_count,
-            longest_line_len: lines.longest_len,
-            gram_count,
-            flags,
-            byte_counts: self.byte_counts,
-            line_start_bytes: self.line_start_bytes,
-            line_end_bytes,
-            prefix: self.prefix,
-            suffix: self.suffix(),
-        }
+        let mut summary = ScanSummary::default();
+        summary.byte_len = self.byte_len;
+        summary.line_count = lines.count;
+        summary.empty_line_count = lines.empty_count;
+        summary.longest_line_len = lines.longest_len;
+        summary.gram_count = gram_count;
+        summary.flags = flags;
+        summary.byte_counts = self.byte_counts;
+        summary.line_start_bytes = self.line_start_bytes;
+        summary.line_end_bytes = line_end_bytes;
+        summary.prefix = self.prefix;
+        summary.suffix = self.suffix();
+        summary
     }
 
     fn finished_flags(&self) -> ScanFlags {

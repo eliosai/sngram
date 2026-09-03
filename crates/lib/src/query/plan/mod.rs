@@ -23,7 +23,7 @@ pub enum QueryError {
 
     /// Invalid regex syntax.
     #[error("invalid regex: {0}")]
-    InvalidRegex(#[from] Box<regex_syntax::Error>),
+    InvalidRegex(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 /// A conservative candidate plan over gram keys and scan-derived metadata.
@@ -211,7 +211,7 @@ impl ScanNeed {
 
     fn summary_byte_set(summary: &ScanSummary) -> ByteSet256 {
         let mut set = ByteSet256::default();
-        for (byte, &count) in summary.byte_counts.counts.iter().enumerate() {
+        for (byte, &count) in summary.byte_counts.counts().iter().enumerate() {
             if count > 0
                 && let Ok(byte) = u8::try_from(byte)
             {
@@ -243,15 +243,14 @@ mod tests {
         let summary = ScanSummary {
             byte_len: 2,
             line_count: 1,
-            empty_line_count: 0,
             longest_line_len: 2,
-            gram_count: 0,
             flags: ScanFlags::default().with_ascii_lower(),
             byte_counts: counts,
             line_start_bytes: one_byte(b'a'),
             line_end_bytes: one_byte(b'b'),
             prefix: edge(b"ab"),
             suffix: edge(b"ab"),
+            ..Default::default()
         };
 
         assert!(ScanNeed::ContainsAnyByte(one_byte(b'a')).satisfied_by(&summary));

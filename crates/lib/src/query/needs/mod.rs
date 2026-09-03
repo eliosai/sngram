@@ -76,10 +76,6 @@ mod tests {
         }
     }
 
-    fn set_has(set: &ByteSet256, byte: u8) -> bool {
-        set.words[usize::from(byte) / 64] >> (usize::from(byte) % 64) & 1 == 1
-    }
-
     fn any_byte_sets(needs: &[ScanNeed]) -> Vec<ByteSet256> {
         needs
             .iter()
@@ -96,7 +92,7 @@ mod tests {
         let sets = any_byte_sets(&needs);
         assert!(
             sets.iter()
-                .any(|set| set_has(set, 0xCE) && !set_has(set, b'a')),
+                .any(|set| set.contains(0xCE) && !set.contains(b'a')),
             "expected a Greek lead-byte set in {needs:?}"
         );
     }
@@ -107,7 +103,7 @@ mod tests {
         let sets = any_byte_sets(&needs);
         assert!(
             sets.iter()
-                .any(|set| set_has(set, b'0') && set_has(set, b'9') && !set_has(set, b'x'))
+                .any(|set| set.contains(b'0') && set.contains(b'9') && !set.contains(b'x'))
         );
     }
 
@@ -117,7 +113,7 @@ mod tests {
         let sets = any_byte_sets(&needs);
         assert!(
             sets.iter()
-                .any(|set| set_has(set, 0xCE) && set_has(set, b'5'))
+                .any(|set| set.contains(0xCE) && set.contains(b'5'))
         );
     }
 

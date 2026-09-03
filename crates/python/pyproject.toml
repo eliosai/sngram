@@ -23,6 +23,16 @@ dependencies = []
 [project.urls]
 Repository = "https://github.com/eliosai/sngram"
 
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "src/**/*.rs" },
+    { file = "../lib/Cargo.toml" },
+    { file = "../lib/src/**/*.rs" },
+    { file = "../lib/data/weights.bin" },
+]
+
 [tool.maturin]
 manifest-path = "Cargo.toml"
 module-name = "sngram._core"

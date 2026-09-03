@@ -34,6 +34,7 @@ from sngram._core import (
     ScanResult,
     ScanSummary,
     WeightTable,
+    is_binary,
     query,
     scan,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "ScanSummary",
     "WeightTable",
     "__version__",
+    "is_binary",
     "query",
     "scan",
     "weights",

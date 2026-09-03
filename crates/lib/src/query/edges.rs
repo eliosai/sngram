@@ -35,7 +35,7 @@ impl Edge {
 
 pub fn line_anchor_bytes(hir: &Hir, edge: Edge) -> Option<ByteSet256> {
     let set = anchored_edge_bytes(hir, edge)?;
-    (!set.is_empty() && !set_has(&set, b'\n')).then_some(set)
+    (!set.is_empty() && !set.contains(b'\n')).then_some(set)
 }
 
 fn anchored_edge_bytes(hir: &Hir, edge: Edge) -> Option<ByteSet256> {
@@ -45,7 +45,7 @@ fn anchored_edge_bytes(hir: &Hir, edge: Edge) -> Option<ByteSet256> {
         HirKind::Alternation(subs) => subs
             .iter()
             .map(|sub| anchored_edge_bytes(sub, edge))
-            .try_fold(ByteSet256::default(), |acc, set| Some(union(acc, set?))),
+            .try_fold(ByteSet256::default(), |acc, set| Some(acc.union(set?))),
         HirKind::Concat(subs) => anchored_concat_bytes(subs, edge),
         _ => None,
     }
@@ -60,7 +60,7 @@ fn anchored_concat_bytes(subs: &[Hir], edge: Edge) -> Option<ByteSet256> {
     let mut set = ByteSet256::default();
     for elem in elems {
         let bytes = edge_bytes(elem, edge);
-        set = union(set, bytes.set);
+        set = set.union(bytes.set);
         if !bytes.can_be_empty {
             return Some(set);
         }
@@ -122,7 +122,7 @@ fn concat_edge(subs: &[Hir], edge: Edge) -> EdgeByteSet {
     let mut set = ByteSet256::default();
     for elem in edge.ordered(subs) {
         let bytes = edge_bytes(elem, edge);
-        set = union(set, bytes.set);
+        set = set.union(bytes.set);
         if !bytes.can_be_empty {
             return EdgeByteSet {
                 set,
@@ -142,7 +142,7 @@ fn alternation_edge(subs: &[Hir], edge: Edge) -> EdgeByteSet {
         can_be_empty: false,
     };
     for bytes in subs.iter().map(|sub| edge_bytes(sub, edge)) {
-        acc.set = union(acc.set, bytes.set);
+        acc.set = acc.set.union(bytes.set);
         acc.can_be_empty = acc.can_be_empty || bytes.can_be_empty;
     }
     acc
@@ -218,21 +218,6 @@ fn insert_range(set: &mut ByteSet256, start: u8, end: u8) {
     }
 }
 
-pub fn union(mut left: ByteSet256, right: ByteSet256) -> ByteSet256 {
-    for (word, other) in left.words.iter_mut().zip(right.words) {
-        *word |= other;
-    }
-    left
-}
-
-pub fn set_len(set: &ByteSet256) -> u32 {
-    set.words.iter().map(|word| word.count_ones()).sum()
-}
-
-fn set_has(set: &ByteSet256, byte: u8) -> bool {
-    set.words[usize::from(byte) / 64] >> (usize::from(byte) % 64) & 1 == 1
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{ByteSet256, PlanExpr, ScanNeed, WeightTable};
@@ -249,10 +234,6 @@ mod tests {
             PlanExpr::AllOf { needs, .. } => needs.clone(),
             _ => Vec::new(),
         }
-    }
-
-    fn set_has(set: &ByteSet256, byte: u8) -> bool {
-        set.words[usize::from(byte) / 64] >> (usize::from(byte) % 64) & 1 == 1
     }
 
     fn line_start_set(needs: &[ScanNeed]) -> Option<ByteSet256> {
@@ -272,14 +253,14 @@ mod tests {
     #[test]
     fn line_start_anchor_emits_first_byte_set() {
         let set = line_start_set(&root_needs("^kfree")).expect("line-start need");
-        assert!(set_has(&set, b'k'));
-        assert!(!set_has(&set, b'f'));
+        assert!(set.contains(b'k'));
+        assert!(!set.contains(b'f'));
     }
 
     #[test]
     fn anchored_alternation_unions_first_bytes() {
         let set = line_start_set(&root_needs("^int|^long")).expect("line-start need");
-        assert!(set_has(&set, b'i') && set_has(&set, b'l'));
+        assert!(set.contains(b'i') && set.contains(b'l'));
     }
 
     #[test]
@@ -290,7 +271,7 @@ mod tests {
     #[test]
     fn anchored_leading_class_contributes_all_first_bytes() {
         let set = line_start_set(&root_needs("^[ \t]+return")).expect("line-start need");
-        assert!(set_has(&set, b' ') && set_has(&set, b'\t'));
+        assert!(set.contains(b' ') && set.contains(b'\t'));
     }
 
     #[test]
@@ -301,14 +282,14 @@ mod tests {
     #[test]
     fn line_end_anchor_emits_last_byte_set() {
         let set = line_end_set(&root_needs("foo_bar$")).expect("line-end need");
-        assert!(set_has(&set, b'r'));
-        assert!(!set_has(&set, b'o'));
+        assert!(set.contains(b'r'));
+        assert!(!set.contains(b'o'));
     }
 
     #[test]
     fn optional_tail_widens_line_end_set() {
         let set = line_end_set(&root_needs("foo;?$")).expect("line-end need");
-        assert!(set_has(&set, b';') && set_has(&set, b'o'));
+        assert!(set.contains(b';') && set.contains(b'o'));
     }
 
     #[test]

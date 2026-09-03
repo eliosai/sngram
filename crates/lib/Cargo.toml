@@ -13,10 +13,8 @@ publish = true
 exclude = ["data/.checkpoint"]
 
 [features]
-# stream reserves async integration dependencies without changing the sync scan core
-stream = ["dep:tokio"]
-# learn adds the bigram counters used to train weight tables; off by default
-# because it is useless without a training pipeline driving it
+default = ["weights"]
+# learn adds the bigram counters that train weight tables
 learn = []
 # weights embeds the trained production weight table
 weights = []
@@ -25,12 +23,10 @@ weights = []
 crc32fast = { workspace = true }
 regex-syntax = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, optional = true, features = ["io-util"] }
 
 [dev-dependencies]
 regex = { workspace = true }
 regex-lite = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true

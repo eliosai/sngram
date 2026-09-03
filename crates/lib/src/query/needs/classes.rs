@@ -1,7 +1,7 @@
 use crate::ByteSet256;
 use regex_syntax::hir::{Hir, HirKind};
 
-use crate::query::edges::{class_lead_bytes, set_len, union};
+use crate::query::edges::class_lead_bytes;
 
 const MAX_ANY_BYTE_SETS: usize = 4;
 const MAX_ANY_BYTE_SET_LEN: u32 = 128;
@@ -9,10 +9,10 @@ const MAX_ANY_BYTE_SET_LEN: u32 = 128;
 pub fn required(hir: &Hir) -> Vec<ByteSet256> {
     let mut sets = collect(hir);
     sets.retain(|set| {
-        let len = set_len(set);
+        let len = set.len();
         len > 0 && len <= MAX_ANY_BYTE_SET_LEN
     });
-    sets.sort_by_key(set_len);
+    sets.sort_by_key(|set| set.len());
     sets.dedup();
     sets.truncate(MAX_ANY_BYTE_SETS);
     sets
@@ -34,14 +34,14 @@ fn collect(hir: &Hir) -> Vec<ByteSet256> {
 fn union_branches(subs: &[Hir]) -> Vec<ByteSet256> {
     let mut branches: Vec<Vec<ByteSet256>> = subs.iter().map(collect).collect();
     for branch in &mut branches {
-        branch.sort_by_key(set_len);
+        branch.sort_by_key(|set| set.len());
     }
     let shortest = branches.iter().map(Vec::len).min().unwrap_or(0);
     (0..shortest)
         .map(|i| {
             branches
                 .iter()
-                .fold(ByteSet256::default(), |acc, branch| union(acc, branch[i]))
+                .fold(ByteSet256::default(), |acc, branch| acc.union(branch[i]))
         })
         .collect()
 }

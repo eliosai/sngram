@@ -31,9 +31,6 @@ regex-lite = "0.1"
 # Benchmarking
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
 
-# Async
-tokio = { version = "1.52", default-features = false }
-
 # Utilities
 thiserror = "2.0"
 

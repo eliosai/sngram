@@ -2,13 +2,12 @@
 
 use std::{
     fs::{self, File},
-    io::Cursor,
     path::Path,
 };
 
 use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
-use sngram::{ScanError, ScanEvent, ScanSummary, WeightTable};
+use sngram::{ScanSummary, WeightTable};
 
 use super::executor::{
     BLOCK_BITS, LINE_END_BIT, LINE_START_BIT, WORD_BOTH_BIT, WORD_END_BIT, WORD_START_BIT,
@@ -126,21 +125,15 @@ fn scan_bytes(
     table: &WeightTable,
     bytes: &[u8],
 ) -> anyhow::Result<Option<(Vec<PackedGram>, ScanSummary)>> {
-    let mut blocks = BlockMap::new(bytes);
-    let mut hashes = Vec::with_capacity(bytes.len().min(MAX_GRAM_PREALLOC));
-    let mut summary = None;
-    let scan = sngram::scan(table, Cursor::new(bytes), |event| match event {
-        ScanEvent::Gram(gram) => {
-            let mask = blocks.mask(bytes, &gram.span);
-            hashes.push(PackedGram::new(gram.key.value(), mask));
-        },
-        ScanEvent::Finish(facts) => summary = Some(*facts),
-    });
-    if matches!(scan, Err(ScanError::Binary)) {
+    if sngram::is_binary(bytes) {
         return Ok(None);
     }
-    scan?;
-    let summary = summary.context("scanner finished without emitting a summary")?;
+    let mut blocks = BlockMap::new(bytes);
+    let mut hashes = Vec::with_capacity(bytes.len().min(MAX_GRAM_PREALLOC));
+    let summary = sngram::scan(table, bytes, |gram| {
+        let mask = blocks.mask(bytes, &gram.span);
+        hashes.push(PackedGram::new(gram.key.value(), mask));
+    });
     Ok(Some((hashes, summary)))
 }
 

@@ -1,12 +1,10 @@
 //! Scan bindings: sparse grams and per-entry summaries
 
-use std::io::Cursor;
-
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use sngram::{ScanEvent, ScanSummary};
+use sngram::ScanSummary;
 
 use crate::table::PyWeightTable;
 
@@ -110,29 +108,35 @@ impl PyScanResult {
 /// Sparse grams of `data` as `(content_start, content_end, key)` plus a summary
 #[pyfunction]
 pub fn scan(py: Python<'_>, table: &PyWeightTable, data: &[u8]) -> PyResult<PyScanResult> {
-    let (grams, summary) = collect_scan(py, table, data)?;
+    if sngram::is_binary(data) {
+        return Err(PyValueError::new_err(
+            "binary content: a NUL byte sits in the first 8 KiB",
+        ));
+    }
+    let (grams, summary) = collect_scan(py, table, data);
     Ok(PyScanResult {
         grams,
         summary: Py::new(py, PyScanSummary { inner: summary })?,
     })
 }
 
+/// True when a NUL byte sits in the first 8 KiB, the rule the index shares with ripgrep
+#[pyfunction]
+pub fn is_binary(data: &[u8]) -> bool {
+    sngram::is_binary(data)
+}
+
 fn collect_scan(
     py: Python<'_>,
     table: &PyWeightTable,
     data: &[u8],
-) -> PyResult<(Vec<GramTriple>, ScanSummary)> {
+) -> (Vec<GramTriple>, ScanSummary) {
     let table = table.inner();
     py.detach(|| {
         let mut grams = Vec::new();
-        let mut summary = None;
-        sngram::scan(table, Cursor::new(data), |event| match event {
-            ScanEvent::Gram(gram) => grams.push((gram.span.start, gram.span.end, gram.key.value())),
-            ScanEvent::Finish(finish) => summary = Some(*finish),
-        })
-        .map_err(|e| PyRuntimeError::new_err(format!("scan failed: {e}")))?;
-        summary
-            .map(|summary| (grams, summary))
-            .ok_or_else(|| PyRuntimeError::new_err("scan emitted no summary"))
+        let summary = sngram::scan(table, data, |gram| {
+            grams.push((gram.span.start, gram.span.end, gram.key.value()));
+        });
+        (grams, summary)
     })
 }

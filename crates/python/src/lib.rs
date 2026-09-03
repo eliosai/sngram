@@ -24,6 +24,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<plan::PyScanNeed>()?;
     m.add_class::<counter::PyBigramCounter>()?;
     m.add_function(wrap_pyfunction!(scanning::scan, m)?)?;
+    m.add_function(wrap_pyfunction!(scanning::is_binary, m)?)?;
     m.add_function(wrap_pyfunction!(plan::query, m)?)?;
     #[cfg(feature = "weights")]
     m.add_function(wrap_pyfunction!(table::weights, m)?)?;

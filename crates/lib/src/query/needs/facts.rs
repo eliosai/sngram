@@ -5,9 +5,15 @@ pub fn byte_counts(hir: &Hir) -> Option<ScanNeed> {
     ByteCountNeed::from_hir(hir).into_scan_need()
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct ByteCountNeed {
-    counts: SaturatingByteCounts256,
+    counts: [u8; 256],
+}
+
+impl Default for ByteCountNeed {
+    fn default() -> Self {
+        Self { counts: [0; 256] }
+    }
 }
 
 impl ByteCountNeed {
@@ -25,7 +31,8 @@ impl ByteCountNeed {
     fn from_literal(bytes: &[u8]) -> Self {
         let mut need = Self::default();
         for &byte in bytes {
-            need.counts.observe(byte);
+            let slot = &mut need.counts[usize::from(byte)];
+            *slot = slot.saturating_add(1);
         }
         need
     }
@@ -51,26 +58,27 @@ impl ByteCountNeed {
     }
 
     fn repeated(mut self, min: u32) -> Self {
-        for count in &mut self.counts.counts {
+        for count in &mut self.counts {
             *count = repeat_count(*count, min);
         }
         self
     }
 
     fn add(&mut self, other: Self) {
-        for (left, right) in self.counts.counts.iter_mut().zip(other.counts.counts) {
+        for (left, right) in self.counts.iter_mut().zip(other.counts) {
             *left = left.saturating_add(right);
         }
     }
 
     fn keep_branch_min(&mut self, other: Self) {
-        for (left, right) in self.counts.counts.iter_mut().zip(other.counts.counts) {
+        for (left, right) in self.counts.iter_mut().zip(other.counts) {
             *left = (*left).min(right);
         }
     }
 
     fn into_scan_need(self) -> Option<ScanNeed> {
-        (!self.counts.is_empty()).then_some(ScanNeed::MinByteCounts(Box::new(self.counts)))
+        let counts = SaturatingByteCounts256::from_counts(self.counts);
+        (!counts.is_empty()).then_some(ScanNeed::MinByteCounts(Box::new(counts)))
     }
 }
 

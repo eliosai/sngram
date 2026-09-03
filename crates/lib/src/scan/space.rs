@@ -229,7 +229,7 @@ impl<'t> SpaceScanner<'t> {
         // ring slot 127 stays zero while a start-0 gram can still pass the length filter
         let before = self.ring[start.wrapping_sub(1) & ScanSettings::PREFIX_RING_MASK];
         emit(ScannedGram {
-            key: GramKey(self.key.hash_from_prefixes(edge.prefix, before, len)),
+            key: GramKey::new(self.key.hash_from_prefixes(edge.prefix, before, len)),
             span: ByteRange::new(
                 start.saturating_sub(self.span_sub).min(edge.content_bytes),
                 edge.end

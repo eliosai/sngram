@@ -297,10 +297,10 @@ impl<'t> SpaceScanner<'t> {
 
         let prefix_before_start = self.prefix_before(start);
         let span = map_span(start, end, content_bytes);
-        emit(ScannedGram {
-            key: self.gram_key(prefix_after_end, prefix_before_start, len),
+        emit(ScannedGram::new(
+            self.gram_key(prefix_after_end, prefix_before_start, len),
             span,
-        });
+        ));
     }
 
     const fn gram_key(
@@ -309,7 +309,7 @@ impl<'t> SpaceScanner<'t> {
         prefix_before_start: u64,
         len: usize,
     ) -> GramKey {
-        GramKey(
+        GramKey::new(
             self.key
                 .hash_from_prefixes(prefix_after_end, prefix_before_start, len),
         )

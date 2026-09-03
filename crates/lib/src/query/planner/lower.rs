@@ -75,13 +75,13 @@ fn public_children(children: Vec<Query>, fold: bool, edges: &EdgeShapes<'_>) -> 
 }
 
 fn needle_for(gram: &Gram, fold: bool, edges: &EdgeShapes<'_>) -> GramNeedle {
-    let raw = GramKey(HashKey::UNKEYED.hash_bytes(gram.as_bytes()));
+    let raw = GramKey::new(HashKey::UNKEYED.hash_bytes(gram.as_bytes()));
     let keys = if !fold || !gram.as_bytes().iter().any(u8::is_ascii_alphabetic) {
         vec![raw]
     } else {
         vec![
             raw,
-            GramKey(HashKey::UNKEYED.folded().hash_bytes(gram.as_bytes())),
+            GramKey::new(HashKey::UNKEYED.folded().hash_bytes(gram.as_bytes())),
         ]
     };
     if let Some(needle) = edge_needle(gram, edges.word, &keys) {

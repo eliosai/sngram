@@ -256,7 +256,7 @@ fn has_min_byte_count(expr: &PlanExpr, byte: u8, count: u8) -> bool {
                 matches!(
                     need,
                     ScanNeed::MinByteCounts(counts)
-                        if counts.counts[usize::from(byte)] >= count
+                        if counts.counts()[usize::from(byte)] >= count
                 )
             }) || children
                 .iter()
@@ -320,7 +320,7 @@ const fn key(bytes: &[u8]) -> GramKey {
         hash = (hash ^ bytes[i] as u64).wrapping_mul(0x0000_0100_0000_01b3);
         i += 1;
     }
-    GramKey(hash)
+    GramKey::new(hash)
 }
 
 const fn plan(expr: PlanExpr) -> QueryPlan {

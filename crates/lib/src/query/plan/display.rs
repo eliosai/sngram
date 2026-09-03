@@ -83,7 +83,7 @@ fn write_byte_counts(f: &mut fmt::Formatter<'_>, counts: &SaturatingByteCounts25
     f.write_str("MinByteCounts(")?;
     let mut first = true;
     for (byte, count) in counts
-        .counts
+        .counts()
         .iter()
         .enumerate()
         .filter(|&(_, &count)| count > 0)

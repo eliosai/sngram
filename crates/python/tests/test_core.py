@@ -152,5 +152,7 @@ def test_weight_table_provenance(table):
 
 
 def test_scan_rejects_binary_input(table):
-    with pytest.raises(RuntimeError, match="binary"):
+    with pytest.raises(ValueError, match="binary"):
         sngram.scan(table, b"\x00" * 64)
+    assert sngram.is_binary(b"\x00" * 64)
+    assert not sngram.is_binary(b"fn main() {}")
