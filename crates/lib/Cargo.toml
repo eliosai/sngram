@@ -17,21 +17,17 @@ exclude = ["data/.checkpoint"]
 stream = ["dep:tokio"]
 # learn adds the bigram counters used to train weight tables; off by default
 # because it is useless without a training pipeline driving it
-learn = ["dep:crc32fast"]
+learn = []
 # weights embeds the trained production weight table
 weights = []
 
 [dependencies]
-sngram-types = { workspace = true }
+crc32fast = { workspace = true }
 regex-syntax = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["io-util"] }
-crc32fast = { workspace = true, optional = true }
-
-[build-dependencies]
-sngram-types = { workspace = true }
 
 [dev-dependencies]
-crc32fast = { workspace = true }
 regex = { workspace = true }
 regex-lite = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }

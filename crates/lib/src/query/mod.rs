@@ -11,17 +11,19 @@ mod combine;
 mod covers;
 mod edges;
 mod flush;
+mod gram;
 mod info;
 mod needs;
 mod order;
 mod parser;
 mod pattern;
+pub mod plan;
 mod planner;
 mod settings;
 mod strings;
 mod validate;
 
-use sngram_types::{QueryError, QueryPlan, WeightTable};
+use crate::{QueryError, QueryPlan, WeightTable};
 
 /// Decompose one regex pattern into a sparse-gram query plan.
 ///

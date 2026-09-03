@@ -1,9 +1,10 @@
 //! Weight table type.
 
-use crate::error::TableError;
-use crate::spng::{
-    self, TableParts, WeightTableSettings, fingerprint_bytes, verify_checksum, write_weights,
-};
+pub mod error;
+mod spng;
+
+use error::TableError;
+use spng::{TableParts, WeightTableSettings, fingerprint_bytes, verify_checksum, write_weights};
 
 /// 256x256 character-pair weight table.
 #[derive(Debug, Clone)]

@@ -1,7 +1,7 @@
 //! Root scan-need derivation from regex HIR.
 
+use crate::{ByteSet256, EdgeBytes, ScanNeed};
 use regex_syntax::hir::Hir;
-use sngram_types::{ByteSet256, EdgeBytes, ScanNeed};
 
 use super::edges::{Edge, doc_edge_literal, line_anchor_bytes};
 
@@ -60,7 +60,7 @@ impl RootNeeds {
 
 #[cfg(test)]
 mod tests {
-    use sngram_types::{ByteSet256, PlanExpr, ScanNeed, WeightTable};
+    use crate::{ByteSet256, PlanExpr, ScanNeed, WeightTable};
 
     use crate::query::query;
 

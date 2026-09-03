@@ -1,4 +1,4 @@
-use sngram_types::WeightTable;
+use crate::WeightTable;
 
 #[cfg(test)]
 use super::MintOptions;
@@ -29,7 +29,7 @@ impl BigramCounter {
     pub fn mint_table_bytes(
         &self,
         options: &MintOptions<'_>,
-    ) -> Result<Vec<u8>, sngram_types::TableError> {
+    ) -> Result<Vec<u8>, crate::TableError> {
         Ok(self
             .weight_table(options.tuning)
             .with_provenance(options.provenance)?

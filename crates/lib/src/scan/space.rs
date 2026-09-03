@@ -1,6 +1,7 @@
 //! Monotonic-stack scanner over one gram key space.
 
-use sngram_types::{ByteRange, GramKey, HashKey, ScannedGram, WeightTable};
+use crate::hashing::HashKey;
+use crate::{ByteRange, GramKey, ScannedGram, WeightTable};
 
 use super::settings::ScanSettings;
 

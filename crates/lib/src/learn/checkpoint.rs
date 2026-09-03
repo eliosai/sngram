@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use sngram_types::LearnError;
+use crate::LearnError;
 
 use super::{BigramCounter, LearnSettings};
 

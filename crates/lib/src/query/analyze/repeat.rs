@@ -2,7 +2,7 @@
 
 use regex_syntax::hir::Repetition;
 
-use sngram_types::Gram;
+use crate::query::gram::Gram;
 
 use super::super::info::RegexpInfo;
 use super::super::order::Order;

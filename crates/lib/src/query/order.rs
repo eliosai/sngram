@@ -8,7 +8,7 @@
 
 use core::cmp::Ordering;
 
-use sngram_types::Gram;
+use crate::query::gram::Gram;
 
 /// Sort order for [`super::strings::StringSet::clean`] and friends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

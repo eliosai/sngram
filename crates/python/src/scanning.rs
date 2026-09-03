@@ -6,7 +6,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use sngram_types::{ScanEvent, ScanSummary};
+use sngram::{ScanEvent, ScanSummary};
 
 use crate::table::PyWeightTable;
 

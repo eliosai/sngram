@@ -10,7 +10,7 @@
 use std::fmt::{self, Display};
 
 use divan::Bencher;
-use sngram_types::WeightTable;
+use sngram::WeightTable;
 
 fn main() {
     divan::main();

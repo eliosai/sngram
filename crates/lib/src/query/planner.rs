@@ -1,7 +1,7 @@
 //! Query planning from regex HIR to public plans.
 
+use crate::{PlanExpr, QueryError, QueryPlan, ScanNeed, WeightTable};
 use regex_syntax::hir::Hir;
-use sngram_types::{PlanExpr, QueryError, QueryPlan, ScanNeed, WeightTable};
 
 use super::{
     analyze::{Analyzer, PlanContext},
@@ -79,7 +79,7 @@ fn append_root_needs(expr: PlanExpr, new_needs: Vec<ScanNeed>) -> PlanExpr {
 
 #[cfg(test)]
 mod tests {
-    use sngram_types::{GramNeedle, PlanExpr, WeightTable};
+    use crate::{GramNeedle, PlanExpr, WeightTable};
 
     use crate::query::query;
 

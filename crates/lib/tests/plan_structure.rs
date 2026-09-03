@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use sngram::query;
-use sngram_types::{
-    DfStats, GramKey, GramNeedle, HashKey, PlanExpr, QueryError, QueryPlan, ScanNeed, WeightTable,
+use sngram::{
+    DfStats, GramKey, GramNeedle, PlanExpr, QueryError, QueryPlan, ScanNeed, WeightTable,
 };
 
 fn table() -> WeightTable {
@@ -312,8 +312,15 @@ fn df_of(pairs: &[(&[u8], u64)], total: u64) -> MapDf {
     }
 }
 
+/// A test-local key: the plan and the df map only need to agree on one injective mapping
 const fn key(bytes: &[u8]) -> GramKey {
-    GramKey(HashKey::UNKEYED.hash_bytes(bytes))
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash = (hash ^ bytes[i] as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        i += 1;
+    }
+    GramKey(hash)
 }
 
 const fn plan(expr: PlanExpr) -> QueryPlan {

@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
-use sngram_types::{ScanError, ScanEvent, ScanSummary, WeightTable};
+use sngram::{ScanError, ScanEvent, ScanSummary, WeightTable};
 
 use super::executor::{
     BLOCK_BITS, LINE_END_BIT, LINE_START_BIT, WORD_BOTH_BIT, WORD_END_BIT, WORD_START_BIT,
@@ -171,7 +171,7 @@ impl BlockMap {
         }
     }
 
-    fn mask(&mut self, bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
+    fn mask(&mut self, bytes: &[u8], span: &sngram::ByteRange) -> u16 {
         let last = self.line_of_end(span.end.saturating_sub(1).max(span.start));
         let first = self.line_of_start(last, span.start);
         let mut mask = 0u16;
@@ -220,7 +220,7 @@ fn bucket_of(line: usize) -> u32 {
 /// Word and line edge bits for one occurrence, read from the two bytes
 /// bracketing the span; `\r\n` counts as a line end so a CRLF verifier never
 /// loses a line its anchors still match
-fn edge_bits(bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
+fn edge_bits(bytes: &[u8], span: &sngram::ByteRange) -> u16 {
     let before = span
         .start
         .checked_sub(1)
@@ -300,7 +300,7 @@ mod tests {
         BLOCK_BITS, BlockMap, LINE_END_BIT, LINE_START_BIT, WORD_BOTH_BIT, WORD_END_BIT,
         WORD_START_BIT, bucket_of, edge_bits,
     };
-    use sngram_types::ByteRange;
+    use sngram::ByteRange;
 
     const WORD_BITS: u16 = WORD_START_BIT | WORD_END_BIT | WORD_BOTH_BIT;
     const LINE_BITS: u16 = LINE_START_BIT | LINE_END_BIT;

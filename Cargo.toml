@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/types", "crates/lib", "crates/lib/benches", "crates/python", "crates/eg"]
+members = ["crates/lib", "crates/lib/benches", "crates/python", "crates/eg"]
 
 [workspace.package]
 version = "0.7.0"
@@ -18,7 +18,6 @@ strip = true
 
 [workspace.dependencies]
 # Internal
-sngram-types = { version = "0.7.0", path = "crates/types" }
 sngram = { version = "0.7.0", path = "crates/lib" }
 
 # Types / zero-copy

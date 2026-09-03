@@ -2,9 +2,10 @@
 
 use std::ops::Range;
 
-use sngram_types::{ByteRange, GramKey, HashKey, ScannedGram, WeightTable};
+use sngram::{ByteRange, GramKey, ScannedGram, WeightTable};
 
 use super::ScanSettings;
+use super::hashing::HashKey;
 
 /// Byte mapping applied to content before weighing and hashing
 #[derive(Debug, Clone, Copy)]

@@ -30,12 +30,6 @@ impl HashKey {
     /// The unkeyed space; hashes equal the pre-keying historical values.
     pub const UNKEYED: Self = Self(0);
 
-    /// Key from a deployment secret.
-    #[must_use]
-    pub const fn new(secret: u64) -> Self {
-        Self(secret)
-    }
-
     /// The folded-twin space of this key, tagging case-folded gram hashes.
     #[must_use]
     pub const fn folded(self) -> Self {
@@ -192,7 +186,7 @@ mod tests {
 
     #[test]
     fn keyed_prefix_identity_holds() {
-        let key = HashKey::new(0xDEAD_BEEF_CAFE_F00D);
+        let key = HashKey(0xDEAD_BEEF_CAFE_F00D);
         let doc = b"fn main() { let x = foo_bar(42); }";
         let prefix = prefixes_of(doc);
         for start in 0..doc.len() {
@@ -208,15 +202,15 @@ mod tests {
 
     #[test]
     fn distinct_keys_produce_distinct_spaces() {
-        let a = HashKey::new(1);
-        let b = HashKey::new(2);
+        let a = HashKey(1);
+        let b = HashKey(2);
         assert_ne!(a.hash_bytes(b"abc"), b.hash_bytes(b"abc"));
         assert_ne!(a.hash_bytes(b"abc"), HashKey::UNKEYED.hash_bytes(b"abc"));
     }
 
     #[test]
     fn folded_space_is_disjoint_per_key() {
-        let key = HashKey::new(7);
+        let key = HashKey(7);
         assert_ne!(key.hash_bytes(b"abc"), key.folded().hash_bytes(b"abc"));
         assert_ne!(
             HashKey::UNKEYED.hash_bytes(b"abc"),

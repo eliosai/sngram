@@ -53,30 +53,6 @@ impl<'a> Content<'a> {
         Self(bytes)
     }
 
-    /// The wrapped bytes.
-    #[must_use]
-    pub const fn as_bytes(&self) -> &'a [u8] {
-        self.0
-    }
-
-    /// Content length in bytes.
-    #[must_use]
-    pub const fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Whether the content is empty.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Whether the content is longer than `max_bytes`.
-    #[must_use]
-    pub const fn exceeds(&self, max_bytes: usize) -> bool {
-        self.0.len() > max_bytes
-    }
-
     /// Whether the content starts with a known binary file signature.
     #[must_use]
     pub fn has_binary_signature(&self) -> bool {
@@ -151,12 +127,5 @@ mod tests {
 
         assert!(!Content::new(&text).is_likely_binary());
         assert!(Content::new(&binary).is_likely_binary());
-    }
-
-    #[test]
-    fn exceeds_reports_correctly() {
-        let c = Content::new(&[0; 1000]);
-        assert!(c.exceeds(999));
-        assert!(!c.exceeds(1000));
     }
 }

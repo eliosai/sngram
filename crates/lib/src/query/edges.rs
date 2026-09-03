@@ -1,7 +1,7 @@
 //! Anchored edge-byte and edge-literal derivation from regex HIR.
 
+use crate::{ByteSet256, EdgeBytes};
 use regex_syntax::hir::{Class, Hir, HirKind, Look};
-use sngram_types::{ByteSet256, EdgeBytes};
 
 /// Which content edge an anchor binds.
 #[derive(Clone, Copy)]
@@ -235,7 +235,7 @@ fn set_has(set: &ByteSet256, byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use sngram_types::{ByteSet256, PlanExpr, ScanNeed, WeightTable};
+    use crate::{ByteSet256, PlanExpr, ScanNeed, WeightTable};
 
     use crate::query::query;
 

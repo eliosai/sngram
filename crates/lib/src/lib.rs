@@ -26,22 +26,29 @@
 //! - `weights` embeds the trained production weight table.
 //! - `learn` module (feature `learn`) trains fresh weight tables.
 
+mod bytes;
+mod hashing;
 mod query;
 mod scan;
+mod table;
 #[cfg(feature = "weights")]
 mod weights;
 
 #[cfg(feature = "learn")]
 pub mod learn;
 
+pub use bytes::{ByteSet256, EdgeBytes, SaturatingByteCounts256};
+#[cfg(feature = "learn")]
+pub use learn::error::LearnError;
+pub use query::plan::{DfStats, GramNeedle, PlanExpr, QueryError, QueryPlan, ScanNeed};
 pub use query::query;
 pub use scan::TextScanner;
+pub use scan::event::{ByteRange, GramKey, ScanError, ScanEvent, ScanSummary, ScannedGram};
+pub use scan::flags::ScanFlags;
 pub use scan::scan;
 #[cfg(feature = "stream")]
 pub use scan::scan_async;
-pub use sngram_types::{
-    DfStats, GramKey, GramNeedle, LearnError, PlanExpr, QueryError, QueryPlan, ScanError,
-    ScanEvent, ScanNeed, ScanSummary, ScannedGram, TableError, WeightTable,
-};
+pub use table::WeightTable;
+pub use table::error::TableError;
 #[cfg(feature = "weights")]
 pub use weights::weights;

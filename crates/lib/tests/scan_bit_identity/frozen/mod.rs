@@ -1,13 +1,17 @@
 //! Frozen copy of the baseline document scanner used as the identity oracle
 
+mod content;
 mod facts;
+mod hashing;
 mod space;
 
 use std::io::BufRead;
 
-use sngram_types::{Content, HashKey, ScanError, ScanEvent, WeightTable};
+use sngram::{ScanError, ScanEvent, WeightTable};
 
+use content::Content;
 use facts::SummaryBuilder;
+use hashing::HashKey;
 use space::{EmitPolicy, SpaceScanner, Transform};
 
 const SNIFF_BYTES: usize = 8192;

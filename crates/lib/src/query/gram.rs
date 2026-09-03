@@ -12,8 +12,6 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::ops::Deref;
 
-use crate::hashing::HashKey;
-
 struct GramSettings;
 
 impl GramSettings {
@@ -27,8 +25,6 @@ type InlineBuf = [u8; GramSettings::INLINE_CAP];
 /// A gram: a short byte string with inline storage.
 ///
 /// Dereferences to `[u8]`; compares, orders, and std-hashes by its bytes.
-/// [`Gram::hash`] is the 64-bit index key, identical to the hash emitted for
-/// the same bytes by the scanner.
 #[derive(Clone)]
 pub struct Gram(Repr);
 
@@ -77,12 +73,6 @@ impl Gram {
             Repr::Inline { len, buf } => &buf[..usize::from(*len)],
             Repr::Heap(b) => b,
         }
-    }
-
-    /// The gram's 64-bit index key.
-    #[must_use]
-    pub fn hash(&self) -> u64 {
-        HashKey::UNKEYED.hash_bytes(self.as_bytes())
     }
 }
 

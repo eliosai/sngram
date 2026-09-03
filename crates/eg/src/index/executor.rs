@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, rc::Rc};
 
-use sngram_types::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed};
+use sngram::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed};
 
 use super::summary::{SummaryIndex, SummaryStatus};
 use combine::{borrowed, intersect_all, union_all, union_sorted};
@@ -439,7 +439,7 @@ impl<B: PlanBackend> Executor<'_, B> {
 mod tests {
     use std::cell::RefCell;
 
-    use sngram_types::{
+    use sngram::{
         ByteSet256, EdgeBytes, GramKey, GramNeedle, PlanExpr, QueryPlan, SaturatingByteCounts256,
         ScanFlags, ScanNeed, ScanSummary,
     };

@@ -12,7 +12,7 @@
 use std::{collections::HashSet, io::Cursor};
 
 use divan::{Bencher, counter::BytesCount};
-use sngram_types::{ScanEvent, WeightTable};
+use sngram::{ScanEvent, WeightTable};
 
 const SIZES: &[usize] = &[64, 256, 1024, 4096, 16384, 65536, 262_144, 1_048_576];
 const SMALL: &[usize] = &[256, 4096, 65536];

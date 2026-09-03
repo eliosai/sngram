@@ -1,5 +1,7 @@
+use crate::hashing::HashKey;
+use crate::query::gram::Gram;
+use crate::{GramKey, GramNeedle, PlanExpr};
 use regex_syntax::hir::{Hir, HirKind, Look};
-use sngram_types::{Gram, GramKey, GramNeedle, HashKey, PlanExpr};
 
 use crate::query::{
     algebra::{Op, Query},

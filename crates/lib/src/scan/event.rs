@@ -4,9 +4,7 @@ use core::ops::Range;
 
 use crate::{ByteSet256, EdgeBytes, SaturatingByteCounts256};
 
-pub mod flags;
-
-use flags::ScanFlags;
+use super::flags::ScanFlags;
 
 /// Final sparse-gram index key emitted by the scanner.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

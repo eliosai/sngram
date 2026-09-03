@@ -11,7 +11,7 @@
 
 use std::{collections::HashSet, io::Cursor};
 
-use sngram_types::{ScanError, ScanEvent, WeightTable};
+use sngram::{ScanError, ScanEvent, WeightTable};
 
 // Frozen algorithm parameters; must mirror crates/lib/src/scan/settings.rs
 const MIN_LEN: usize = 3;

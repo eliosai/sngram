@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, fs, path::Path, sync::mpsc, thread};
 
 use anyhow::Context;
 use rayon::prelude::*;
-use sngram_types::{DfStats, GramKey, QueryPlan, WeightTable};
+use sngram::{DfStats, GramKey, QueryPlan, WeightTable};
 use tantivy::{
     DocId, Index, Score, Searcher, SegmentOrdinal, SegmentReader, TantivyDocument, Term,
     collector::{Collector, SegmentCollector},

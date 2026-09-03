@@ -14,7 +14,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 sngram = { workspace = true, features = ["learn"] }
-sngram-types = { workspace = true }
 
 pyo3 = { version = "0.28", features = ["abi3-py310"] }
 arrow-array = { version = "59", features = ["ffi"] }

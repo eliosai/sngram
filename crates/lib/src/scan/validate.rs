@@ -2,7 +2,8 @@
 
 use std::io::BufRead;
 
-use sngram_types::{Content, ScanError};
+use super::content::Content;
+use crate::ScanError;
 #[cfg(feature = "stream")]
 use tokio::io::AsyncBufRead;
 

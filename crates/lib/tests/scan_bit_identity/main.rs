@@ -9,7 +9,7 @@ mod frozen;
 use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
 
-use sngram_types::{ScanError, ScanEvent, ScanSummary, ScannedGram, WeightTable};
+use sngram::{ScanError, ScanEvent, ScanSummary, ScannedGram, WeightTable};
 
 #[derive(Debug, Clone, PartialEq)]
 enum OwnedEvent {

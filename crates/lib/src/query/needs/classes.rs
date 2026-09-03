@@ -1,5 +1,5 @@
+use crate::ByteSet256;
 use regex_syntax::hir::{Hir, HirKind};
-use sngram_types::ByteSet256;
 
 use crate::query::edges::{class_lead_bytes, set_len, union};
 

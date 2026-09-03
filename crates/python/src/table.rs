@@ -6,7 +6,7 @@ use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use sngram_types::WeightTable;
+use sngram::WeightTable;
 
 use crate::callback::PythonCallback;
 
@@ -111,5 +111,5 @@ impl PyWeightTable {
 #[cfg(feature = "weights")]
 #[pyfunction]
 pub fn weights() -> PyWeightTable {
-    PyWeightTable::new(sngram::weights())
+    PyWeightTable::new(sngram::weights().clone())
 }

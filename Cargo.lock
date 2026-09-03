@@ -536,7 +536,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sngram",
- "sngram-types",
  "tantivy",
  "tempfile",
  "termcolor",
@@ -1483,7 +1482,7 @@ dependencies = [
  "regex",
  "regex-lite",
  "regex-syntax",
- "sngram-types",
+ "thiserror",
  "tokio",
 ]
 
@@ -1495,7 +1494,6 @@ dependencies = [
  "crc32fast",
  "rustc-hash",
  "sngram",
- "sngram-types",
  "tokio",
 ]
 
@@ -1507,16 +1505,6 @@ dependencies = [
  "arrow-schema",
  "pyo3",
  "sngram",
- "sngram-types",
-]
-
-[[package]]
-name = "sngram-types"
-version = "0.7.0"
-dependencies = [
- "crc32fast",
- "regex-syntax",
- "thiserror",
 ]
 
 [[package]]

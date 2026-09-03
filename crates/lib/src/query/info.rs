@@ -8,7 +8,7 @@
 use super::algebra::Query;
 use super::strings::StringSet;
 
-use sngram_types::Gram;
+use crate::query::gram::Gram;
 
 /// What analysis knows about one subexpression.
 #[derive(Debug, Clone)]

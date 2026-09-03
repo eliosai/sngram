@@ -2,14 +2,17 @@
 
 use std::io::BufRead;
 
+mod content;
 pub mod cover;
 mod engine;
+pub mod event;
 mod facts;
+pub mod flags;
 pub mod settings;
 mod space;
 mod validate;
 
-use sngram_types::{ScanError, ScanEvent, WeightTable};
+use crate::{ScanError, ScanEvent, WeightTable};
 #[cfg(feature = "stream")]
 use tokio::io::AsyncBufRead;
 
@@ -126,7 +129,7 @@ mod tests {
     #[cfg(feature = "stream")]
     use std::task::{Context, Poll};
 
-    use sngram_types::{ScanError, ScanEvent, ScanSummary, WeightTable};
+    use crate::{ScanError, ScanEvent, ScanSummary, WeightTable};
 
     use super::scan;
 

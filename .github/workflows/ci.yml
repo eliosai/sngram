@@ -95,5 +95,5 @@ jobs:
       - name: cargo-semver-checks
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
-          package: sngram-types, sngram
+          package: sngram
           feature-group: default-features

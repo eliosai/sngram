@@ -265,7 +265,7 @@ fn shrink_seam(mut left: StringSet, mut right: StringSet) -> Option<(StringSet, 
 
 #[cfg(test)]
 mod tests {
-    use sngram_types::Gram;
+    use crate::query::gram::Gram;
 
     use super::*;
 

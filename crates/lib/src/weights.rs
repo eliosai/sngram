@@ -1,29 +1,31 @@
-//! The pre-trained weight table embedded behind the weights feature
+//! The trained production weight table embedded behind the weights feature
 
-use sngram_types::WeightTable;
+use std::sync::LazyLock;
 
-include!(concat!(env!("OUT_DIR"), "/weights.rs"));
+use crate::WeightTable;
 
 const BYTES: &[u8] = include_bytes!("../data/weights.bin");
 
-/// Load the embedded weight table
+static TABLE: LazyLock<WeightTable> = LazyLock::new(|| {
+    WeightTable::from_bytes(BYTES)
+        .unwrap_or_else(|err| unreachable!("the embedded weight table failed to parse: {err}"))
+});
+
+/// The embedded production weight table, parsed and checksummed on first use
 #[must_use]
-#[allow(
-    clippy::missing_panics_doc,
-    clippy::panic,
-    reason = "the build script validates the embedded table with the same parser"
-)]
-pub fn weights() -> WeightTable {
-    match WeightTable::from_prevalidated_bytes(BYTES, WEIGHTS_FINGERPRINT) {
-        Ok(table) => table,
-        Err(err) => unreachable!("build script validated embedded weight table: {err}"),
-    }
+pub fn weights() -> &'static WeightTable {
+    &TABLE
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{BYTES, weights};
+    use crate::WeightTable;
+
     #[test]
-    fn embedded_table_loads() {
-        assert_ne!(super::weights().fingerprint(), 0);
+    fn the_embedded_bytes_parse_with_their_checksum() {
+        let table = WeightTable::from_bytes(BYTES).expect("embedded table parses");
+        assert_eq!(table.fingerprint(), weights().fingerprint());
+        assert_ne!(table.fingerprint(), 0);
     }
 }

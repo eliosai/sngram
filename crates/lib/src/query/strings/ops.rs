@@ -1,4 +1,4 @@
-use sngram_types::Gram;
+use crate::query::gram::Gram;
 
 use super::StringSet;
 use crate::query::order::{Order, Shape, cmp_in};

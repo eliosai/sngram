@@ -1,6 +1,6 @@
 //! `SPNG` weight-table binary format.
 
-use crate::error::TableError;
+use super::error::TableError;
 
 /// Format constants for the `SPNG` table binary.
 pub struct WeightTableSettings;

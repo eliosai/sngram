@@ -9,9 +9,7 @@ use std::{
 
 use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
-use sngram_types::{
-    ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanFlags, ScanNeed, ScanSummary,
-};
+use sngram::{ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanFlags, ScanNeed, ScanSummary};
 
 pub const SUMMARY_FILE_NAME: &str = "summaries.bin";
 

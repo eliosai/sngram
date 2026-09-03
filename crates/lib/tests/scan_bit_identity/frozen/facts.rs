@@ -1,6 +1,6 @@
 //! Verbatim copy of the baseline streaming scan-summary collection
 
-use sngram_types::{ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanFlags, ScanSummary};
+use sngram::{ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanFlags, ScanSummary};
 
 const EDGE: usize = EdgeBytes::CAPACITY;
 

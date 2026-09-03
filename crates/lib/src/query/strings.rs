@@ -7,7 +7,7 @@
 //! A set remembers the order it was last sorted in, and truncation is monotone
 //! in both orders, so shortening a sorted set re-sorts nothing.
 
-use sngram_types::Gram;
+use crate::query::gram::Gram;
 
 use super::order::{Order, Shape, cmp_in, shared_in};
 

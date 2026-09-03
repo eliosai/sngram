@@ -72,7 +72,7 @@ fn compute_weight(total: u64, count: u64) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use sngram_types::WeightTable;
+    use crate::WeightTable;
 
     use super::*;
     use crate::learn::BigramCounter;

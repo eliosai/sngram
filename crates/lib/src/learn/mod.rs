@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod batch;
 mod checkpoint;
+pub mod error;
 mod mint;
 mod settings;
 
@@ -150,7 +151,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use sngram_types::{LearnError, WeightTable};
+    use crate::{LearnError, WeightTable};
 
     use super::*;
 

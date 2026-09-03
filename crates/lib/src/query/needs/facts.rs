@@ -1,5 +1,5 @@
+use crate::{SaturatingByteCounts256, ScanNeed};
 use regex_syntax::hir::{Class, Hir, HirKind};
-use sngram_types::{SaturatingByteCounts256, ScanNeed};
 
 pub fn byte_counts(hir: &Hir) -> Option<ScanNeed> {
     ByteCountNeed::from_hir(hir).into_scan_need()

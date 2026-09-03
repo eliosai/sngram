@@ -1,6 +1,7 @@
 //! Streaming sparse n-gram scanner.
 
-use sngram_types::{HashKey, ScanEvent, WeightTable};
+use crate::hashing::HashKey;
+use crate::{ScanEvent, WeightTable};
 
 use super::facts::SummaryBuilder;
 use super::settings::ScanSettings;
@@ -116,7 +117,8 @@ mod tests {
     use std::collections::HashSet;
     use std::io::Cursor;
 
-    use sngram_types::{ByteRange, GramKey, HashKey, ScanSummary, ScannedGram};
+    use crate::hashing::HashKey;
+    use crate::{ByteRange, GramKey, ScanSummary, ScannedGram};
 
     use super::*;
 

@@ -18,7 +18,7 @@ use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 
-use sngram_types::{DfStats, GramKey, QueryPlan, WeightTable};
+use sngram::{DfStats, GramKey, QueryPlan, WeightTable};
 
 use crate::flags::HiArgs;
 
