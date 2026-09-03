@@ -1,0 +1,34 @@
+name: semver
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: semver-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  semver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: compare the public API against the base branch
+        id: compare
+        continue-on-error: true
+        run: cargo semver-checks -p sngram --all-features --baseline-rev ${{ github.event.pull_request.base.sha }}
+      - name: require the semver-major label for a breaking change
+        if: ${{ steps.compare.outcome == 'failure' && !contains(github.event.pull_request.labels.*.name, 'semver-major') }}
+        run: |
+          echo "the public API breaks against the base branch; label the pull request semver-major to accept a major release"
+          exit 1

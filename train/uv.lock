@@ -427,6 +427,7 @@ dev = [
     { name = "numpy", specifier = ">=2" },
     { name = "pyarrow", specifier = ">=17" },
     { name = "pytest", specifier = ">=8" },
+    { name = "pytest-codspeed", specifier = ">=4" },
 ]
 
 [[package]]
