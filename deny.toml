@@ -1,5 +1,5 @@
 [graph]
-all-features = false
+all-features = true
 
 [advisories]
 version = 2

@@ -61,6 +61,7 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_eg"))
             .env("EG_INDEXD_RUNTIME_ROOT", &self.runtime)
             .env("XDG_RUNTIME_DIR", &self.runtime)
+            .env("EG_INDEX_DIRT_WAIT_MS", "2000")
             .args(args)
             .output()
             .unwrap()

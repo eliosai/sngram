@@ -10,7 +10,7 @@ LABELS="${LABELS:-}"
 
 EXCLUDES=(":(exclude)Cargo.lock" ":(exclude)**/uv.lock" ":(exclude).agents/skills/**" ":(exclude)CHANGELOG.md" ":(exclude)**/*.tsv" ":(exclude)crates/lib/data/**")
 
-added=$(git diff --numstat "$BASE_SHA" "$HEAD_SHA" -- . "${EXCLUDES[@]}" |
+added=$(git diff --numstat "$BASE_SHA...$HEAD_SHA" -- . "${EXCLUDES[@]}" |
     awk '$1 != "-" { sum += $1 } END { print sum + 0 }')
 
 budget=1000

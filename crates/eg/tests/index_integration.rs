@@ -93,6 +93,8 @@ fn eg_with_env_vars(args: &[&str], envs: &[(&str, &str)]) -> Output {
 fn eg_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_eg"));
     command.env("XDG_RUNTIME_DIR", isolated_runtime_dir());
+    // a loaded runner misses the 30 ms production rendezvous, which is a stall, not a wrong answer
+    command.env("EG_INDEX_DIRT_WAIT_MS", "2000");
     command
 }
 

@@ -29,13 +29,15 @@ is the `sngram` Python package and `crates/lib/benches` the bench crate; neither
 ## Commands
 
 Every task has a `just` recipe, and the gate runs nothing a recipe does not run. `just check` scans
-docs and layout, format-checks, then type-checks and lints the workspace, and the `sngram` crate with
-every feature and with none, with warnings denied. `just test` runs nextest, `just test-doc` the doc
-examples, `just doc-check` the docs.rs build, `just package-check` the crates.io packages,
-`just semver-check` the `sngram` API against a baseline, `just msrv` the 1.96 build, `just audit`
-cargo-deny, `just bench` the library benches the way CodSpeed runs them, `just py-lint`,
-`just py-test` and `just wheel` the Python side, and `just ci` all of it. `just hooks` installs the
-prek hooks, so a commit runs `just check` and a push runs `just test`.
+the agent layout, the docs and the module layout, format-checks, then type-checks and lints the
+workspace with every feature and the `sngram` crate with none, with warnings denied. `just test`
+runs nextest, `just test-doc` the doc examples, `just doc-check` the docs.rs build,
+`just package-check` the crates.io packages, `just msrv` the 1.96 build, `just audit` cargo-deny,
+`just bench` the library benches the way CodSpeed runs them, and `just py-lint`, `just py-test` and
+`just wheel` the Python side. `just ci` runs all of those in order and clears the test fixtures.
+Two recipes need a base revision and so stay out of `ci`: `just semver-check <rev>` compares the
+`sngram` API, and `just size` counts the added lines against `main`. `just hooks` installs the prek
+hooks, so a commit runs `just check` and a push runs `just test`.
 
 ## The Index Never Misses
 
@@ -103,8 +105,8 @@ and bare `eg --bench` runs the embedded 296-query suite; `docs/benchmarking.md` 
 ## Releases
 
 Every merge to `main` may release. The release workflow reads the commits since the last tag: a
-breaking `sngram` API change reported by cargo-semver-checks or a `!` subject bumps the major, which
-before 1.0 moves the minor, a `feat` the minor, a `fix`, `perf` or `refactor` the patch, and anything
+breaking `sngram` API change reported by cargo-semver-checks or a `!` subject bumps the major, a
+`feat` the minor, a `fix`, `perf` or `refactor` the patch, and anything
 else ships nothing. It publishes `sngram` and then `elgrep`. A breaking pull request carries the
 `semver-major` label or the semver gate fails it. `docs/releasing.md` has the rest.
 
