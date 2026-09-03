@@ -179,7 +179,7 @@ mod tests {
     use super::line_scoped;
 
     fn plan(pattern: &str) -> QueryPlan {
-        sngram::query(&sngram::weights(), pattern).expect("pattern plans")
+        sngram::query(sngram::weights(), pattern).expect("pattern plans")
     }
 
     fn all_needs(expr: &PlanExpr) -> Vec<ScanNeed> {

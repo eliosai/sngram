@@ -11,7 +11,7 @@ static TABLE: LazyLock<WeightTable> = LazyLock::new(|| {
         .unwrap_or_else(|err| unreachable!("the embedded weight table failed to parse: {err}"))
 });
 
-/// The embedded production weight table, parsed and checksummed on first use
+/// The embedded production weight table, parsed and checksummed on first use, panicking when it is corrupt
 #[must_use]
 pub fn weights() -> &'static WeightTable {
     &TABLE

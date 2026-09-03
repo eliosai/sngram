@@ -12,8 +12,7 @@
 
 use std::collections::HashSet;
 
-use sngram::{GramNeedle, PlanExpr, ScanSummary, WeightTable};
-use sngram::{query, scan};
+use sngram::{GramNeedle, PlanExpr, ScanSummary, WeightTable, query, scan};
 
 /// A deterministic weight table: each byte pair hashed to a varied weight, so
 /// the sparse hull is non-trivial.
