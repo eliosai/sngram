@@ -11,7 +11,7 @@ ddcd295afb28af7f	246	TODO|FIXME
 2cfc3085eea76568	452	#\[derive\(
 034ada1de2579a42	454	\.unwrap\(\)
 334df8ee648d1976	675	pub async fn
-70555865248918df	382	impl .* for
+70555865248918df	382	impl .* for 
 0536a92e6e7d6e14	591	return Err\(
 f6309980d6def3a0	664	use crate::
 7cd2d747a97386b1	5908	fn \w+\(
@@ -79,7 +79,7 @@ ccfd671b1e5c62f1	1294	(max|min)_file_size
 8cfb52018b9486cb	886	usb_submit_urb|kfree
 b9996520aaa055d6	1151	(kmalloc|kzalloc|kcalloc)
 29b397595bc1b526	719	EXPORT_SYMBOL|EXPORT_SYMBOL_GPL
-6422eae1e2d19edge	2754	((raw_)?spin|mutex)_lock
+6422eae1e2d19ede	2754	((raw_)?spin|mutex)_lock
 447fe1cae693172f	872	netif_(rx|tx)
 7af17fb45b600554	1165	[Kk]config|[Mm]akefile
 f04d8a07dd3c1b67	3217	(open|close|read|write|ioctl)_file
@@ -126,7 +126,7 @@ e4c79b6562342797	299	Björn
 b7177cb514f055c2	105	→
 acfe88c0373c4e4c	298	björn
 0ddf6eade70205fb	289	序列
-4867e5c3445f0a26	515	calf[éè]
+4867e5c3445f0a26	515	caf[éè]
 9113b0aa32a5b055	63	\\0
 ddcd295afb28af7f	246	TODO|FIXME
 460b136fd9841c04	1454	__attribute__\(\(packed\)\)
@@ -193,7 +193,7 @@ e1e30ca104aa0fb3	90	x{5}
 0deb15e98aee43e9	961	EXPORT_SYMBOL$
 28fa2e0c6d4d1dce	1056	^#define CONFIG
 edebaab42e7b2eef	4716	GFP_(KERNEL|ATOMIC|NOWAIT|NOFS|NOIO|USER)
-502930285dead183f	5779	IRQF_(SHARED|ONESHOT|TRIGGER_HIGH|TRIGGER_LOW|NO_SUSPEND)
+502930285ded183f	5779	IRQF_(SHARED|ONESHOT|TRIGGER_HIGH|TRIGGER_LOW|NO_SUSPEND)
 56d37eca78add5e6	2582	((un)?register|(de)?activate)_netdev
 56a00dfb981f852b	29704	int \(\*\w+\)\(
 638575d2e1e1e5ac	23561	static const struct \w+_operations
@@ -325,7 +325,7 @@ e43ca1c760d74855	373	^#endif
 3ed8e6c6d8db170f	793	compatible = "
 47148c785d266e84	845	status = "okay"
 85e5e87ddf90cc50	729	obj-\$\(CONFIG_
-af71784c860190ca	1
+af71784c860190ca	1	
 af71784c860190ca	1	()
 af71784c860190ca	1	a|
 af71784c860190ca	1	|a
@@ -447,7 +447,7 @@ f5277107a5a546ec	13	((?i:\x00abcdbar_bazab)|(?i:(?:\W){3}))
 dc73e29068af2e50	101	(((?i:aabcéMAX)|(?i:(?i:\s))|(?i:zµ(?m:$)))|(?:[A-Z]bar_baz){4,8}(日本|abcdMAX|.)(?m:^))
 af71184c86018698	1	\z[A-Za-z_]
 af71784c860190ca	1	(?:([a-z]|foo|-)){0,3}
-81ee59data35dce2b	96	\B(abc|[0-9]|  )$
+81ee59daa35dce2b	96	\B(abc|[0-9]|  )$
 af71784c860190ca	1	(?:(?:\A(?i:bar_bazab))??){2}
 2c0af66ae343cf18	105	\babc
 aac475a70667bd4c	469	(?:\n)??zMAXé 42
@@ -530,7 +530,7 @@ af71184c86018698	1	(?i::(?m:^))
 8ebfe7d9fa15c452	28096	(é_\z|abc\s|\d日本)abc((?:bar_bazab)??|(?i:[a-c0-2_])|bar_baz (?m:$))
 af71784c860190ca	1	(?i:(?:\):-a){0,3}(?m:$))
 d62de4311a28561a	79	[^a-z]\p{Greek}
-b9f4633d001197a1	436	(/0|日本42)\b
+b9f4633d001197a1	436	(/0|日本42)\b 
 af71784c860190ca	1	((\W-\w|(?i:bar_bazb)|\tab^)|(?:\B\p{Cyrillic})*?|(?i:\w\p{Greek}))
 6280e82d91afd7da	40819	(?:(?i:(?:é){4,8})){1,4}(?:((?i:\))|(ab|[A-Za-z_]|[0-9]))){0,3}
 351da1098b380b66	33	(?:MAX)*?
@@ -621,7 +621,7 @@ a600928104f9661e	718	bar_bazabcdabc
 d581379cbb9095a4	1212	(?i:42b_é\()
 f4f13107a5a26729	13	(\s-\B|^é42$)
 f4b7b107a59f2f0a	13	((?m:^)(?:.){3}(?m:^)|([0-9a-f](?m:$)|(foo|éa|[A-Za-z\p{Greek}])|.\B)$|(?i:\n\z\)_\z))
-553635d01c4328c8	537	日本日本
+553635d01c4328c8	537	日本日本 
 dad56b7ea35dea89	219	\B(?:42\n){3}
 af71184c86018698	1	(?m:$)b\( [A-Za-z\p{Greek}]\wabc(\p{Cyrillic}|\p{Cyrillic}|\t)
 af71784c860190ca	1	(((?:(\s|\S)){3}|((?:µ){0,3}|(\(|[\x00-\x1f]))|((.|\x00:)|(?i:impl)|(?::)?))|((?:zbar_baz){2,5}?|(_\.|ab|日本))\t[A-Z]abz\t[A-Za-z_]|((abc \(\n|b^|(\d|\w))|(?i:\x00ab(?m:^))|(?:(\.abc|[\x00-\x1f]))+?))

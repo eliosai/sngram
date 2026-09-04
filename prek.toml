@@ -37,10 +37,10 @@ hooks = [
     ], exclude = "\\.rs$" },
     { id = "end-of-file-fixer", stages = [
         "pre-commit",
-    ], exclude = "^(\\.agents/skills/|\\.claude/skills$|CHANGELOG\\.md$|train/bins/)" },
+    ], exclude = "^(\\.agents/skills/|\\.claude/skills$|CHANGELOG\\.md$|train/bins/|.*\\.tsv$)" },
     { id = "trailing-whitespace", stages = [
         "pre-commit",
-    ], exclude = "^(\\.agents/skills/|CHANGELOG\\.md$|train/bins/)" },
+    ], exclude = "^(\\.agents/skills/|CHANGELOG\\.md$|train/bins/|.*\\.tsv$)" },
 ]
 
 # A subject git-cliff cannot parse releases nothing and reaches no changelog, so the message is checked first
