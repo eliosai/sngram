@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 
 /// A builder for constructing things to search over.
 #[derive(Clone, Debug)]
-pub(crate) struct HaystackBuilder {
+pub struct HaystackBuilder {
     strip_dot_prefix: bool,
 }
 
 impl HaystackBuilder {
     /// Return a new haystack builder with a default configuration.
-    pub(crate) fn new() -> HaystackBuilder {
+    pub fn new() -> HaystackBuilder {
         HaystackBuilder {
             strip_dot_prefix: false,
         }
@@ -30,7 +30,7 @@ impl HaystackBuilder {
     /// If the directory entry isn't present, then the corresponding error is
     /// logged if messages have been configured. Otherwise, if the directory
     /// entry is deemed searchable, then it is returned as a haystack.
-    pub(crate) fn build_from_result(
+    pub fn build_from_result(
         &self,
         result: Result<ignore::DirEntry, ignore::Error>,
     ) -> Option<Haystack> {
@@ -81,7 +81,7 @@ impl HaystackBuilder {
     /// stripped.
     ///
     /// This is useful when implicitly searching the current working directory.
-    pub(crate) fn strip_dot_prefix(&mut self, yes: bool) -> &mut HaystackBuilder {
+    pub fn strip_dot_prefix(&mut self, yes: bool) -> &mut HaystackBuilder {
         self.strip_dot_prefix = yes;
         self
     }
@@ -91,7 +91,7 @@ impl HaystackBuilder {
 ///
 /// Generally, a haystack is either a file or stdin.
 #[derive(Clone, Debug)]
-pub(crate) struct Haystack {
+pub struct Haystack {
     kind: HaystackKind,
     strip_dot_prefix: bool,
 }
@@ -104,7 +104,7 @@ impl Haystack {
         }
     }
 
-    pub(crate) fn from_index_path(path: PathBuf, explicit: bool) -> Haystack {
+    pub fn from_index_path(path: PathBuf, explicit: bool) -> Haystack {
         Haystack {
             kind: HaystackKind::IndexedPath { path, explicit },
             strip_dot_prefix: false,
@@ -115,7 +115,7 @@ impl Haystack {
     ///
     /// If this haystack corresponds to stdin, then a special `<stdin>` path
     /// is returned instead.
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         match &self.kind {
             HaystackKind::DirEntry(dent) => {
                 if self.strip_dot_prefix && dent.path().starts_with("./") {
@@ -129,7 +129,7 @@ impl Haystack {
     }
 
     /// Returns true if and only if this entry corresponds to stdin.
-    pub(crate) fn is_stdin(&self) -> bool {
+    pub fn is_stdin(&self) -> bool {
         match &self.kind {
             HaystackKind::DirEntry(dent) => dent.is_stdin(),
             HaystackKind::IndexedPath { .. } => false,
@@ -146,7 +146,7 @@ impl Haystack {
     /// However, note that ripgrep does not see through shell globbing. e.g.,
     /// in `rg foo ./some-dir/*`, `./some-dir/some-other-file` will be treated
     /// as an explicit haystack.
-    pub(crate) fn is_explicit(&self) -> bool {
+    pub fn is_explicit(&self) -> bool {
         // stdin is obvious. When an entry has a depth of 0, that means it
         // was explicitly provided to our directory iterator, which means it
         // was in turn explicitly provided by the end user. The !is_dir check

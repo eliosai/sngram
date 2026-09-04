@@ -109,10 +109,6 @@ impl BenchReport {
         self.counts.forced_candidate_files = forced;
     }
 
-    pub fn set_held_candidate_files(&mut self, held: u64) {
-        self.counts.held_candidate_files = held;
-    }
-
     pub fn set_verification(&mut self, verified: usize, matched: usize, bytes_verified: u64) {
         self.counts.verified_files = verified as u64;
         self.counts.matched_files = matched as u64;
@@ -129,7 +125,6 @@ impl BenchReport {
         self.bytes.index_table_bytes = file_len(index_home.join("table.bin"));
         self.bytes.index_postings_bytes = file_len(index_home.join("postings.bin"));
         self.bytes.summary_bytes = file_len(index_home.join("summaries.bin"));
-        self.bytes.verbatim_bytes = file_len(index_home.join(super::verbatim::FILE_NAME));
         self.bytes.manifest_bytes = file_len(index_home.join("manifest.bin"))
             .saturating_add(file_len(index_home.join("manifest.json")));
         self.bytes.mmap_bytes = self
@@ -137,7 +132,6 @@ impl BenchReport {
             .index_table_bytes
             .saturating_add(self.bytes.index_postings_bytes)
             .saturating_add(self.bytes.summary_bytes)
-            .saturating_add(self.bytes.verbatim_bytes)
             .saturating_add(self.bytes.manifest_bytes);
     }
 
@@ -405,7 +399,6 @@ struct Counts {
     verified_files: u64,
     matched_files: u64,
     forced_candidate_files: u64,
-    held_candidate_files: u64,
     parent_restricted_candidates: u64,
 }
 
@@ -423,7 +416,6 @@ struct Bytes {
     index_table_bytes: u64,
     index_postings_bytes: u64,
     summary_bytes: u64,
-    verbatim_bytes: u64,
     manifest_bytes: u64,
     mmap_bytes: u64,
     corpus_text_bytes: u64,

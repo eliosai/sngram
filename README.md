@@ -1,5 +1,9 @@
 # sngram
 
+[![crates.io](https://img.shields.io/crates/v/sngram.svg)](https://crates.io/crates/sngram)
+[![docs.rs](https://docs.rs/sngram/badge.svg)](https://docs.rs/sngram)
+[![MIT](https://img.shields.io/crates/l/sngram.svg)](https://github.com/eliosai/sngram/blob/main/LICENSE)
+
 Sparse n-gram extraction for regular-expression search indexing, and
 elgrep, an indexed ripgrep alternative built on it.
 
@@ -81,27 +85,25 @@ and the benchmark modes.
 ## The Rust crate
 
 ```sh
-cargo add sngram --features weights
+cargo add sngram
 ```
 
-The `weights` feature embeds the trained production table. The whole API
-is two calls:
+The crate embeds the trained production table. The whole API is four
+calls:
 
-```rust
+```text
 let table = sngram::weights();
 
-sngram::scan(&table, reader, emit)?;   // index side: text to grams
-sngram::query(&table, pattern)?;       // query side: regex to a plan
+sngram::is_binary(bytes);                 // ripgrep's rule: a NUL in the first 8 KiB
+let summary = sngram::scan(table, bytes, emit);   // index side: text to grams
+let plan = sngram::query(table, pattern)?;        // query side: regex to a plan
 ```
 
-The `stream` feature adds `scan_async` for `AsyncBufRead` inputs and emits
-the same index as `scan`. `TextScanner` accepts incremental chunks when the
-caller owns text classification and stream verification.
-
-`scan` streams a document and hands back the grams to store, keyed
-exactly as `query` will look them up. It runs at about 208 MiB/s on code.
-The README in [crates/lib](crates/lib) covers the plan structure, the
-tuning hook, and training behind the `learn` feature.
+`scan` takes one document and hands back the grams to store, keyed
+exactly as `query` will look them up, and the summary mined in the same
+pass. It runs at about 208 MiB/s on code. The README in
+[crates/lib](crates/lib) covers the plan structure, the tuning hook, and
+training behind the `learn` feature.
 
 ## The Python package
 

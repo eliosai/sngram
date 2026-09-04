@@ -2,9 +2,9 @@
 Modules for generating documentation for ripgrep's flags.
 */
 
-pub(crate) mod help;
-pub(crate) mod man;
-pub(crate) mod version;
+pub mod help;
+pub mod man;
+pub mod version;
 
 /// elgrep's own author line, taken from the package manifest
 fn authors() -> String {
@@ -12,7 +12,7 @@ fn authors() -> String {
 }
 
 /// Rewrite copied ripgrep flag docs for elgrep's user-facing command identity.
-pub(crate) fn elgrep_user_doc(doc: &str) -> String {
+pub fn elgrep_user_doc(doc: &str) -> String {
     doc.replace("ripgrep (rg)", "elgrep (eg)")
         .replace("ripgrep's", "elgrep's")
         .replace("ripgrep", "elgrep")

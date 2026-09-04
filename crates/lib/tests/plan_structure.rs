@@ -1,13 +1,8 @@
-//! Structure tests for regex query planning: plan shapes, needles, and df
-//! tuning. End-to-end soundness lives in `soundness.rs`.
+//! Structure tests for regex query planning: plan shapes and needles.
+//! Tuning lives in `plan_tuning.rs` and end-to-end soundness in `soundness.rs`.
 #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::HashMap;
-
-use sngram::query;
-use sngram_types::{
-    DfStats, GramKey, GramNeedle, HashKey, PlanExpr, QueryError, QueryPlan, ScanNeed, WeightTable,
-};
+use sngram::{GramNeedle, PlanExpr, QueryError, QueryPlan, ScanNeed, WeightTable, query};
 
 fn table() -> WeightTable {
     WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))
@@ -256,7 +251,7 @@ fn has_min_byte_count(expr: &PlanExpr, byte: u8, count: u8) -> bool {
                 matches!(
                     need,
                     ScanNeed::MinByteCounts(counts)
-                        if counts.counts[usize::from(byte)] >= count
+                        if counts.counts()[usize::from(byte)] >= count
                 )
             }) || children
                 .iter()
@@ -288,87 +283,6 @@ fn display_matches_codesearch_string_forms() {
     assert_eq!(plan_of(".").to_string(), "MinByteLen(1)");
     assert_eq!(plan_of(r"[^\s\S]").to_string(), "-");
     assert!(plan_of("(a+hello|b+world)").to_string().contains('|'));
-}
-
-struct MapDf {
-    counts: HashMap<GramKey, u64>,
-    total: u64,
-}
-
-impl DfStats for MapDf {
-    fn entry_count(&self, key: GramKey) -> u64 {
-        self.counts.get(&key).copied().unwrap_or(0)
-    }
-
-    fn total_entries(&self) -> u64 {
-        self.total
-    }
-}
-
-fn df_of(pairs: &[(&[u8], u64)], total: u64) -> MapDf {
-    MapDf {
-        counts: pairs.iter().map(|(gram, n)| (key(gram), *n)).collect(),
-        total,
-    }
-}
-
-const fn key(bytes: &[u8]) -> GramKey {
-    GramKey(HashKey::UNKEYED.hash_bytes(bytes))
-}
-
-const fn plan(expr: PlanExpr) -> QueryPlan {
-    QueryPlan::new(expr)
-}
-
-#[test]
-fn tune_drops_stop_grams_but_keeps_a_discriminator() {
-    let df = df_of(&[(b"the", 990), (b"ing", 900), (b"zqx", 2)], 1000);
-    let mut plan = plan(PlanExpr::AllOf {
-        grams: vec![
-            GramNeedle::Key(key(b"the")),
-            GramNeedle::Key(key(b"zqx")),
-            GramNeedle::Key(key(b"ing")),
-        ],
-        needs: vec![],
-        children: vec![],
-    });
-    plan.tune(&df, 500);
-    let PlanExpr::AllOf { grams, .. } = plan.root() else {
-        panic!("tuned plan must stay AllOf");
-    };
-    assert_eq!(grams.len(), 1);
-    assert_eq!(grams[0], GramNeedle::Key(key(b"zqx")));
-}
-
-#[test]
-fn tune_keeps_the_rarest_stop_gram_when_all_are_stops() {
-    let df = df_of(&[(b"the", 990), (b"ing", 900)], 1000);
-    let mut plan = plan(PlanExpr::AllOf {
-        grams: vec![GramNeedle::Key(key(b"the")), GramNeedle::Key(key(b"ing"))],
-        needs: vec![],
-        children: vec![],
-    });
-    plan.tune(&df, 500);
-    let PlanExpr::AllOf { grams, .. } = plan.root() else {
-        panic!("tuned plan must stay AllOf");
-    };
-    assert_eq!(grams.len(), 1);
-    assert_eq!(grams[0], GramNeedle::Key(key(b"ing")));
-}
-
-#[test]
-fn tune_never_thins_or_bags() {
-    let df = df_of(&[(b"the", 990), (b"zqx", 2)], 1000);
-    let mut plan = plan(PlanExpr::AnyOf {
-        grams: vec![GramNeedle::Key(key(b"the")), GramNeedle::Key(key(b"zqx"))],
-        needs: vec![],
-        children: vec![],
-    });
-    plan.tune(&df, 500);
-    let PlanExpr::AnyOf { grams, .. } = plan.root() else {
-        panic!("tuned plan must stay AnyOf");
-    };
-    assert_eq!(grams.len(), 2);
 }
 
 #[test]

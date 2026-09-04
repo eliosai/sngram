@@ -34,6 +34,7 @@ from sngram._core import (
     ScanResult,
     ScanSummary,
     WeightTable,
+    is_binary,
     query,
     scan,
 )
@@ -47,7 +48,7 @@ except ImportError:  # built without the weights feature
         raise RuntimeError("this build of sngram embeds no weight table")
 
 
-__version__ = "0.5.0"
+__version__ = "1.0.0"
 
 __all__ = [
     "BigramCounter",
@@ -57,6 +58,7 @@ __all__ = [
     "ScanSummary",
     "WeightTable",
     "__version__",
+    "is_binary",
     "query",
     "scan",
     "weights",

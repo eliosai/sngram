@@ -13,7 +13,7 @@ use log::Log;
 /// This logger does no filtering. Instead, it relies on the `log` crates
 /// filtering via its global max_level setting.
 #[derive(Debug)]
-pub(crate) struct Logger(());
+pub struct Logger(());
 
 /// A singleton used as the target for an implementation of the `Log` trait.
 const LOGGER: &'static Logger = &Logger(());
@@ -22,7 +22,7 @@ impl Logger {
     /// Create a new logger that logs to stderr and initialize it as the
     /// global logger. If there was a problem setting the logger, then an
     /// error is returned.
-    pub(crate) fn init() -> Result<(), log::SetLoggerError> {
+    pub fn init() -> Result<(), log::SetLoggerError> {
         log::set_logger(LOGGER)
     }
 }

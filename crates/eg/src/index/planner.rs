@@ -1,7 +1,7 @@
 //! Query planning from eg patterns to public sparse-gram plans.
 
 use anyhow::{Context, bail};
-use sngram_types::{ByteSet256, PlanExpr, QueryError, QueryPlan, ScanNeed, WeightTable};
+use sngram::{ByteSet256, PlanExpr, QueryError, QueryPlan, ScanNeed, WeightTable};
 
 use crate::flags::HiArgs;
 
@@ -20,9 +20,10 @@ impl IndexPlan {
 
     pub fn has_root_gram_constraints(&self) -> bool {
         match self.plan.root() {
-            sngram_types::PlanExpr::All | sngram_types::PlanExpr::None => false,
-            sngram_types::PlanExpr::AllOf { grams, .. }
-            | sngram_types::PlanExpr::AnyOf { grams, .. } => !grams.is_empty(),
+            sngram::PlanExpr::All | sngram::PlanExpr::None => false,
+            sngram::PlanExpr::AllOf { grams, .. } | sngram::PlanExpr::AnyOf { grams, .. } => {
+                !grams.is_empty()
+            },
         }
     }
 }
@@ -173,12 +174,12 @@ fn edge_byte_need(byte: Option<&u8>, starts: bool) -> ScanNeed {
 
 #[cfg(test)]
 mod tests {
-    use sngram_types::{ByteSet256, PlanExpr, QueryPlan, ScanNeed};
+    use sngram::{ByteSet256, PlanExpr, QueryPlan, ScanNeed};
 
     use super::line_scoped;
 
     fn plan(pattern: &str) -> QueryPlan {
-        sngram::query(&sngram::weights(), pattern).expect("pattern plans")
+        sngram::query(sngram::weights(), pattern).expect("pattern plans")
     }
 
     fn all_needs(expr: &PlanExpr) -> Vec<ScanNeed> {

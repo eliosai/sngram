@@ -8,7 +8,7 @@
 
 use core::cmp::Ordering;
 
-use sngram_types::Gram;
+use crate::query::gram::Gram;
 
 use super::order::Order;
 use super::strings::StringSet;

@@ -11,7 +11,7 @@
 //! and prove the new plans are supersets of the old ones before doing so.
 #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used)]
 
-use sngram_types::WeightTable;
+use sngram::WeightTable;
 
 const PLANS: &str = include_str!("plans.tsv");
 

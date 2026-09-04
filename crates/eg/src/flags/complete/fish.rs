@@ -11,7 +11,7 @@ const TEMPLATE_NEGATED: &'static str =
 /// Generate completions for Fish.
 ///
 /// Reference: <https://fishshell.com/docs/current/completions.html>
-pub(crate) fn generate() -> String {
+pub fn generate() -> String {
     let mut out = String::new();
     out.push_str(include_str!("prelude.fish"));
     out.push('\n');

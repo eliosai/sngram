@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
-use sngram_types::WeightTable;
+use crate::WeightTable;
 
 use super::engine;
 use super::settings::ScanSettings;

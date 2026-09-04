@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, fs, path::Path, sync::mpsc, thread};
 
 use anyhow::Context;
 use rayon::prelude::*;
-use sngram_types::{DfStats, GramKey, QueryPlan, WeightTable};
+use sngram::{DfStats, GramKey, QueryPlan, WeightTable};
 use tantivy::{
     DocId, Index, Score, Searcher, SegmentOrdinal, SegmentReader, TantivyDocument, Term,
     collector::{Collector, SegmentCollector},
@@ -508,7 +508,7 @@ fn file_document(fields: IndexFields, file: &IndexedDocument) -> TantivyDocument
     let mut document = TantivyDocument::default();
     document.add_u64(fields.doc_ord, u64::from(file.ord));
     document.add_u64(fields.path_hash, file.path_hash);
-    if file.forced_candidate || file.held.is_some() {
+    if file.forced_candidate {
         document.add_u64(fields.forced_candidate, 1);
     }
     for gram in &file.hashes {

@@ -15,7 +15,7 @@ use std::{
     panic::{RefUnwindSafe, UnwindSafe},
 };
 
-pub(crate) use crate::flags::{
+pub use crate::flags::{
     complete::{
         bash::generate as generate_complete_bash, fish::generate as generate_complete_fish,
         powershell::generate as generate_complete_powershell,

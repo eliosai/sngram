@@ -1,0 +1,838 @@
+//! Complete execution of public sparse-query plans against an eg index.
+//!
+//! Mask bits run rarest-fact-highest so common masks varint to one byte
+
+use std::{collections::HashMap, rc::Rc};
+
+use sngram::{DfStats, GramKey, GramNeedle, PlanExpr, QueryPlan, ScanNeed};
+
+use super::summary::{SummaryIndex, SummaryStatus};
+use combine::{borrowed, intersect_all, union_all, union_sorted};
+
+pub mod combine;
+
+/// All buckets and all edge bits set: fully unconstrained
+pub const FULL_MASK: u16 =
+    BLOCK_BITS | LINE_START_BIT | LINE_END_BIT | WORD_BOTH_BIT | WORD_START_BIT | WORD_END_BIT;
+
+/// Low five mask bits: which hashed line buckets a gram touches
+pub const BLOCK_BITS: u16 = 0b0001_1111;
+
+/// Some occurrence is preceded by a non-word byte or text start
+pub const WORD_START_BIT: u16 = 1 << 5;
+
+/// Some occurrence is followed by a non-word byte or text end
+pub const WORD_END_BIT: u16 = 1 << 6;
+
+/// Some single occurrence carries both word edges at once
+pub const WORD_BOTH_BIT: u16 = 1 << 7;
+
+/// Some occurrence starts a line: a line terminator or text start precedes it
+pub const LINE_START_BIT: u16 = 1 << 8;
+
+/// Some occurrence ends a line: a line terminator or text end follows it
+pub const LINE_END_BIT: u16 = 1 << 9;
+
+/// One posting: a document ordinal and the line blocks the gram touches
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Posting {
+    pub ord: usize,
+    pub mask: u16,
+}
+
+impl Posting {
+    pub const fn full(ord: usize) -> Self {
+        Self {
+            ord,
+            mask: FULL_MASK,
+        }
+    }
+}
+
+/// Whether gram co-occurrence is required per line block or per document
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    Block,
+    Doc,
+}
+
+pub trait PlanBackend {
+    fn summaries(&self) -> &SummaryIndex;
+    fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<Posting>>;
+    fn forced_candidates(&self) -> anyhow::Result<Vec<usize>>;
+}
+
+pub fn execute<B: PlanBackend>(
+    backend: &B,
+    plan: &QueryPlan,
+    precision: Precision,
+) -> anyhow::Result<Vec<usize>> {
+    let mut executor = Executor {
+        backend,
+        precision,
+        cache: HashMap::new(),
+    };
+    let mut candidates = docs_of(executor.eval(plan.root())?);
+    if !plan.is_none() {
+        candidates = union_sorted(candidates, forced_candidates(backend, plan)?);
+    }
+    let summaries = backend.summaries();
+    let filter = SummaryFilter::new(plan.root());
+    candidates.retain(|&ord| filter.admits(summaries, ord));
+    Ok(candidates)
+}
+
+pub fn estimate_candidates<B: PlanBackend>(backend: &B, plan: &QueryPlan, df: &dyn DfStats) -> u64 {
+    estimate_expr(backend.summaries(), plan.root(), df)
+}
+
+pub fn estimate_forced_candidates<B: PlanBackend>(
+    backend: &B,
+    plan: &QueryPlan,
+) -> anyhow::Result<u64> {
+    let count = forced_candidates(backend, plan)?.len();
+    Ok(u64::try_from(count).unwrap_or(u64::MAX))
+}
+
+pub fn forced_candidates<B: PlanBackend>(
+    backend: &B,
+    plan: &QueryPlan,
+) -> anyhow::Result<Vec<usize>> {
+    if plan.is_none() {
+        return Ok(Vec::new());
+    }
+    let summaries = backend.summaries();
+    let filter = SummaryFilter::new(plan.root());
+    Ok(backend
+        .forced_candidates()?
+        .into_iter()
+        .filter(|&ord| filter.admits(summaries, ord))
+        .collect())
+}
+
+fn docs_of(postings: Vec<Posting>) -> Vec<usize> {
+    let mut docs: Vec<usize> = postings.into_iter().map(|posting| posting.ord).collect();
+    docs.dedup();
+    docs
+}
+
+fn full_postings(ords: Vec<usize>) -> Vec<Posting> {
+    ords.into_iter().map(Posting::full).collect()
+}
+
+fn estimate_expr(summaries: &SummaryIndex, expr: &PlanExpr, df: &dyn DfStats) -> u64 {
+    let total = df.total_entries();
+    match expr {
+        PlanExpr::All => total,
+        PlanExpr::None => 0,
+        PlanExpr::AllOf {
+            grams,
+            needs,
+            children,
+        } => estimate_all_of(summaries, grams, needs, children, df, total),
+        PlanExpr::AnyOf {
+            grams,
+            needs,
+            children,
+        } => estimate_any_of(summaries, grams, needs, children, df, total),
+    }
+}
+
+fn estimate_all_of(
+    summaries: &SummaryIndex,
+    grams: &[GramNeedle],
+    needs: &[ScanNeed],
+    children: &[PlanExpr],
+    df: &dyn DfStats,
+    total: u64,
+) -> u64 {
+    let mut estimate = total;
+    for needle in grams {
+        estimate = estimate.min(estimate_needle(needle, df, total));
+    }
+    for child in children {
+        estimate = estimate.min(estimate_expr(summaries, child, df));
+    }
+    if !grams.is_empty() || !children.is_empty() {
+        return estimate;
+    }
+    needs
+        .iter()
+        .map(|need| count_need(summaries, need))
+        .min()
+        .unwrap_or(total)
+}
+
+fn estimate_any_of(
+    summaries: &SummaryIndex,
+    grams: &[GramNeedle],
+    needs: &[ScanNeed],
+    children: &[PlanExpr],
+    df: &dyn DfStats,
+    total: u64,
+) -> u64 {
+    let gram_estimate = grams
+        .iter()
+        .map(|needle| estimate_needle(needle, df, total))
+        .fold(0u64, u64::saturating_add);
+    let need_estimate = needs
+        .iter()
+        .map(|need| count_need(summaries, need))
+        .fold(0u64, u64::saturating_add);
+    let child_estimate = children
+        .iter()
+        .map(|child| estimate_expr(summaries, child, df))
+        .fold(0u64, u64::saturating_add);
+    gram_estimate
+        .saturating_add(need_estimate)
+        .saturating_add(child_estimate)
+        .min(total)
+}
+
+fn estimate_needle(needle: &GramNeedle, df: &dyn DfStats, total: u64) -> u64 {
+    needle
+        .keys()
+        .map(|key| df.entry_count(key))
+        .fold(0u64, u64::saturating_add)
+        .min(total)
+}
+
+fn count_need(summaries: &SummaryIndex, need: &ScanNeed) -> u64 {
+    u64::try_from(summaries.count_satisfying(need)).unwrap_or(u64::MAX)
+}
+
+/// The summary-only filter one plan applies to every candidate ordinal
+struct SummaryFilter<'a> {
+    root: &'a PlanExpr,
+    verdict: Verdict,
+}
+
+impl<'a> SummaryFilter<'a> {
+    fn new(root: &'a PlanExpr) -> Self {
+        Self {
+            root,
+            verdict: verdict_of(root),
+        }
+    }
+
+    fn admits(&self, summaries: &SummaryIndex, ord: usize) -> bool {
+        match self.verdict {
+            Verdict::No => false,
+            Verdict::Yes => summaries.is_text(ord),
+            Verdict::Summary => {
+                summaries.is_text(ord) && shape_may_satisfy(self.root, &summaries.status(ord))
+            },
+        }
+    }
+}
+
+/// Whether a plan shape decides itself before any summary is read
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Yes,
+    No,
+    Summary,
+}
+
+fn verdict_of(expr: &PlanExpr) -> Verdict {
+    match expr {
+        PlanExpr::All => Verdict::Yes,
+        PlanExpr::None => Verdict::No,
+        PlanExpr::AllOf {
+            grams,
+            needs,
+            children,
+        } => all_of_verdict(grams, needs, children),
+        PlanExpr::AnyOf {
+            grams,
+            needs,
+            children,
+        } => any_of_verdict(grams, needs, children),
+    }
+}
+
+fn all_of_verdict(grams: &[GramNeedle], needs: &[ScanNeed], children: &[PlanExpr]) -> Verdict {
+    if !grams.iter().all(needle_may_match) {
+        return Verdict::No;
+    }
+    let children = children.iter().map(verdict_of).collect::<Vec<_>>();
+    if children.contains(&Verdict::No) {
+        return Verdict::No;
+    }
+    if needs.is_empty() && children.iter().all(|child| *child == Verdict::Yes) {
+        return Verdict::Yes;
+    }
+    Verdict::Summary
+}
+
+fn any_of_verdict(grams: &[GramNeedle], needs: &[ScanNeed], children: &[PlanExpr]) -> Verdict {
+    if grams.iter().any(needle_may_match) {
+        return Verdict::Yes;
+    }
+    let children = children.iter().map(verdict_of).collect::<Vec<_>>();
+    if children.contains(&Verdict::Yes) {
+        return Verdict::Yes;
+    }
+    if needs.is_empty() && children.iter().all(|child| *child == Verdict::No) {
+        return Verdict::No;
+    }
+    Verdict::Summary
+}
+
+/// Whether a plan shape can still hold once the document is known to be text
+fn shape_may_satisfy(expr: &PlanExpr, status: &SummaryStatus) -> bool {
+    match expr {
+        PlanExpr::All => true,
+        PlanExpr::None => false,
+        PlanExpr::AllOf {
+            grams,
+            needs,
+            children,
+        } => {
+            grams.iter().all(needle_may_match)
+                && needs.iter().all(|need| status.satisfies(need))
+                && children
+                    .iter()
+                    .all(|child| shape_may_satisfy(child, status))
+        },
+        PlanExpr::AnyOf {
+            grams,
+            needs,
+            children,
+        } => {
+            grams.iter().any(needle_may_match)
+                || needs.iter().any(|need| status.satisfies(need))
+                || children
+                    .iter()
+                    .any(|child| shape_may_satisfy(child, status))
+        },
+    }
+}
+
+fn needle_may_match(needle: &GramNeedle) -> bool {
+    match needle {
+        GramNeedle::Key(_) => true,
+        GramNeedle::AnyKey(keys)
+        | GramNeedle::AtWordEdge { keys, .. }
+        | GramNeedle::AtLineEdge { keys, .. } => !keys.is_empty(),
+    }
+}
+
+/// The context bits a needle demands on its postings
+pub fn required_edges(needle: &GramNeedle) -> u16 {
+    match needle {
+        GramNeedle::Key(_) | GramNeedle::AnyKey(_) => 0,
+        GramNeedle::AtWordEdge {
+            starts,
+            ends,
+            whole,
+            ..
+        } => {
+            if *whole {
+                return WORD_BOTH_BIT;
+            }
+            u16::from(*starts) * WORD_START_BIT | u16::from(*ends) * WORD_END_BIT
+        },
+        GramNeedle::AtLineEdge { starts, ends, .. } => {
+            u16::from(*starts) * LINE_START_BIT | u16::from(*ends) * LINE_END_BIT
+        },
+    }
+}
+
+struct Executor<'a, B> {
+    backend: &'a B,
+    precision: Precision,
+    cache: HashMap<GramKey, Rc<Vec<Posting>>>,
+}
+
+impl<B: PlanBackend> Executor<'_, B> {
+    fn eval(&mut self, expr: &PlanExpr) -> anyhow::Result<Vec<Posting>> {
+        match expr {
+            PlanExpr::All => Ok(full_postings(self.backend.summaries().text_ordinals())),
+            PlanExpr::None => Ok(Vec::new()),
+            PlanExpr::AllOf {
+                grams,
+                needs,
+                children,
+            } => self.eval_all_of(grams, needs, children),
+            PlanExpr::AnyOf {
+                grams,
+                needs,
+                children,
+            } => self.eval_any_of(grams, needs, children),
+        }
+    }
+
+    fn eval_all_of(
+        &mut self,
+        grams: &[GramNeedle],
+        needs: &[ScanNeed],
+        children: &[PlanExpr],
+    ) -> anyhow::Result<Vec<Posting>> {
+        let mut lists = Vec::with_capacity(grams.len() + children.len());
+        for gram in grams {
+            lists.push(Rc::new(self.eval_needle(gram)?));
+        }
+        for child in children {
+            lists.push(Rc::new(self.eval(child)?));
+        }
+        let all_text = || full_postings(self.backend.summaries().text_ordinals());
+        let mut candidates = intersect_all(lists, all_text);
+        if !needs.is_empty() {
+            let summaries = self.backend.summaries();
+            candidates.retain(|posting| summaries.meets(posting.ord, needs));
+        }
+        Ok(candidates)
+    }
+
+    fn eval_any_of(
+        &mut self,
+        grams: &[GramNeedle],
+        needs: &[ScanNeed],
+        children: &[PlanExpr],
+    ) -> anyhow::Result<Vec<Posting>> {
+        let mut lists = Vec::with_capacity(grams.len() + needs.len() + children.len());
+        for gram in grams {
+            lists.push(self.eval_needle(gram)?);
+        }
+        for need in needs {
+            let ords = self.backend.summaries().ordinals_satisfying(need);
+            lists.push(full_postings(ords));
+        }
+        for child in children {
+            lists.push(self.eval(child)?);
+        }
+        Ok(union_all(&borrowed(&lists)))
+    }
+
+    fn eval_needle(&mut self, needle: &GramNeedle) -> anyhow::Result<Vec<Posting>> {
+        let mut lists = Vec::new();
+        for key in needle.keys() {
+            lists.push(self.lookup_cached(key)?);
+        }
+        let slices = lists.iter().map(|list| list.as_slice()).collect::<Vec<_>>();
+        let mut acc = union_all(&slices);
+        let required = required_edges(needle);
+        if required != 0 {
+            acc.retain(|posting| posting.mask & required == required);
+        }
+        Ok(acc)
+    }
+
+    fn lookup_cached(&mut self, key: GramKey) -> anyhow::Result<Rc<Vec<Posting>>> {
+        if let Some(list) = self.cache.get(&key) {
+            return Ok(Rc::clone(list));
+        }
+        let mut list = self.backend.lookup_gram(key)?;
+        if self.precision == Precision::Doc {
+            for posting in &mut list {
+                posting.mask |= BLOCK_BITS;
+            }
+        }
+        let list = Rc::new(list);
+        self.cache.insert(key, Rc::clone(&list));
+        Ok(list)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use sngram::{
+        ByteSet256, EdgeBytes, GramKey, GramNeedle, PlanExpr, QueryPlan, SaturatingByteCounts256,
+        ScanFlags, ScanNeed, ScanSummary,
+    };
+
+    use super::*;
+    use crate::index::summary::{SummaryRecord, SummaryStatus};
+
+    struct FakeBackend {
+        summaries: SummaryIndex,
+        grams: HashMap<GramKey, Vec<Posting>>,
+        forced: Vec<usize>,
+        lookups: RefCell<usize>,
+    }
+
+    impl PlanBackend for FakeBackend {
+        fn summaries(&self) -> &SummaryIndex {
+            &self.summaries
+        }
+
+        fn lookup_gram(&self, key: GramKey) -> anyhow::Result<Vec<Posting>> {
+            *self.lookups.borrow_mut() += 1;
+            Ok(self.grams.get(&key).cloned().unwrap_or_default())
+        }
+
+        fn forced_candidates(&self) -> anyhow::Result<Vec<usize>> {
+            Ok(self.forced.clone())
+        }
+    }
+
+    fn run(backend: &FakeBackend, plan: &QueryPlan) -> Vec<usize> {
+        execute(backend, plan, Precision::Block).unwrap()
+    }
+
+    fn full(ords: &[usize]) -> Vec<Posting> {
+        ords.iter().map(|&ord| Posting::full(ord)).collect()
+    }
+
+    fn masked(pairs: &[(usize, u16)]) -> Vec<Posting> {
+        pairs
+            .iter()
+            .map(|&(ord, mask)| Posting { ord, mask })
+            .collect()
+    }
+
+    #[test]
+    fn all_of_intersects_grams_and_scan_needs() {
+        let backend = fake_backend(&[(GramKey::new(1), full(&[0, 1]))], Vec::new());
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(GramKey::new(1))],
+            needs: vec![ScanNeed::MinByteLen(2)],
+            children: vec![],
+        });
+
+        assert_eq!(run(&backend, &plan), vec![1]);
+    }
+
+    #[test]
+    fn all_of_rejects_disjoint_block_masks() {
+        let backend = fake_backend(
+            &[
+                (GramKey::new(1), masked(&[(1, 0b0000_0001)])),
+                (GramKey::new(2), masked(&[(1, 0b1000_0000)])),
+            ],
+            Vec::new(),
+        );
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![
+                GramNeedle::Key(GramKey::new(1)),
+                GramNeedle::Key(GramKey::new(2)),
+            ],
+            needs: vec![],
+            children: vec![],
+        });
+
+        assert_eq!(run(&backend, &plan), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn all_of_keeps_overlapping_block_masks() {
+        let backend = fake_backend(
+            &[
+                (GramKey::new(1), masked(&[(1, 0b0000_0011)])),
+                (GramKey::new(2), masked(&[(1, 0b0000_0010)])),
+            ],
+            Vec::new(),
+        );
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![
+                GramNeedle::Key(GramKey::new(1)),
+                GramNeedle::Key(GramKey::new(2)),
+            ],
+            needs: vec![],
+            children: vec![],
+        });
+
+        assert_eq!(run(&backend, &plan), vec![1]);
+    }
+
+    #[test]
+    fn doc_precision_ignores_block_masks() {
+        let backend = fake_backend(
+            &[
+                (GramKey::new(1), masked(&[(1, 0b0000_0001)])),
+                (GramKey::new(2), masked(&[(1, 0b1000_0000)])),
+            ],
+            Vec::new(),
+        );
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![
+                GramNeedle::Key(GramKey::new(1)),
+                GramNeedle::Key(GramKey::new(2)),
+            ],
+            needs: vec![],
+            children: vec![],
+        });
+
+        assert_eq!(execute(&backend, &plan, Precision::Doc).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn any_of_child_masks_flow_into_parent_intersection() {
+        let backend = fake_backend(
+            &[
+                (GramKey::new(1), masked(&[(1, 0b0000_0001)])),
+                (GramKey::new(2), masked(&[(1, 0b0000_0010)])),
+                (GramKey::new(3), masked(&[(1, 0b0000_0001)])),
+            ],
+            Vec::new(),
+        );
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(GramKey::new(3))],
+            needs: vec![],
+            children: vec![PlanExpr::AnyOf {
+                grams: vec![
+                    GramNeedle::Key(GramKey::new(1)),
+                    GramNeedle::Key(GramKey::new(2)),
+                ],
+                needs: vec![],
+                children: vec![],
+            }],
+        });
+
+        assert_eq!(run(&backend, &plan), vec![1]);
+    }
+
+    #[test]
+    fn any_of_unions_scan_needs_and_grams() {
+        let backend = fake_backend(&[(GramKey::new(7), full(&[2]))], Vec::new());
+        let plan = QueryPlan::new(PlanExpr::AnyOf {
+            grams: vec![GramNeedle::Key(GramKey::new(7))],
+            needs: vec![ScanNeed::MinByteLen(2)],
+            children: vec![],
+        });
+
+        assert_eq!(run(&backend, &plan), vec![1, 2]);
+    }
+
+    #[test]
+    fn forced_candidates_with_unknown_summary_are_retained_for_soundness() {
+        let backend = fake_backend(&[], vec![2]);
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(GramKey::new(99))],
+            needs: vec![ScanNeed::MinByteLen(9)],
+            children: vec![],
+        });
+
+        assert_eq!(run(&backend, &plan), vec![2]);
+    }
+
+    #[test]
+    fn forced_candidates_with_known_summary_must_satisfy_needs() {
+        let backend = fake_backend(&[], vec![0, 1, 2]);
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(GramKey::new(99))],
+            needs: vec![ScanNeed::MinByteLen(2)],
+            children: vec![],
+        });
+
+        assert_eq!(run(&backend, &plan), vec![1, 2]);
+    }
+
+    #[test]
+    fn forced_candidate_estimate_uses_execution_summary_filter() {
+        let backend = fake_backend(&[], vec![0, 1, 2]);
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![GramNeedle::Key(GramKey::new(99))],
+            needs: vec![ScanNeed::MinByteLen(2)],
+            children: vec![],
+        });
+        let df = FakeDf { total: 3 };
+
+        let sparse = estimate_candidates(&backend, &plan, &df);
+        let forced = estimate_forced_candidates(&backend, &plan).unwrap();
+
+        assert_eq!(sparse, 0);
+        assert_eq!(forced, 2);
+        assert_eq!(run(&backend, &plan).len() as u64, forced);
+    }
+
+    #[test]
+    fn line_edge_needles_require_their_bits_on_a_posting() {
+        let anchored = LINE_START_BIT | LINE_END_BIT | BLOCK_BITS;
+        let backend = fake_backend(
+            &[(
+                GramKey::new(1),
+                masked(&[(0, anchored), (1, LINE_START_BIT | BLOCK_BITS)]),
+            )],
+            Vec::new(),
+        );
+        let plan = |starts, ends| {
+            QueryPlan::new(PlanExpr::AllOf {
+                grams: vec![GramNeedle::AtLineEdge {
+                    keys: vec![GramKey::new(1)],
+                    starts,
+                    ends,
+                }],
+                needs: vec![],
+                children: vec![],
+            })
+        };
+
+        assert_eq!(run(&backend, &plan(true, false)), vec![0, 1]);
+        assert_eq!(
+            run(&backend, &plan(true, true)),
+            vec![0],
+            "a line-start-only posting cannot satisfy a `^lit$` needle"
+        );
+    }
+
+    #[test]
+    fn line_edge_bits_do_not_collide_with_word_or_block_bits() {
+        let edges = [
+            LINE_START_BIT,
+            LINE_END_BIT,
+            WORD_BOTH_BIT,
+            WORD_START_BIT,
+            WORD_END_BIT,
+        ];
+        for (idx, bit) in edges.iter().enumerate() {
+            assert_eq!(bit & BLOCK_BITS, 0, "edge bit {idx} overlaps a line bucket");
+            for other in &edges[idx + 1..] {
+                assert_eq!(bit & other, 0, "edge bits {bit:#b} and {other:#b} overlap");
+            }
+        }
+        assert_eq!(
+            FULL_MASK,
+            BLOCK_BITS | edges.iter().fold(0, |acc, bit| acc | bit),
+            "a forced candidate must satisfy every requirable bit"
+        );
+    }
+
+    #[test]
+    fn any_key_uses_one_lookup_per_key() {
+        let backend = fake_backend(
+            &[
+                (GramKey::new(1), full(&[0, 2])),
+                (GramKey::new(2), full(&[1, 2])),
+            ],
+            Vec::new(),
+        );
+        let plan = QueryPlan::new(PlanExpr::AllOf {
+            grams: vec![GramNeedle::AnyKey(vec![GramKey::new(1), GramKey::new(2)])],
+            needs: vec![],
+            children: vec![],
+        });
+
+        assert_eq!(run(&backend, &plan), vec![0, 1, 2]);
+        assert_eq!(*backend.lookups.borrow(), 2);
+    }
+
+    #[test]
+    fn impossible_composites_do_not_return_forced_candidates() {
+        let backend = fake_backend(&[], vec![2]);
+        let plans = [
+            QueryPlan::new(PlanExpr::AnyOf {
+                grams: vec![],
+                needs: vec![],
+                children: vec![],
+            }),
+            QueryPlan::new(PlanExpr::AnyOf {
+                grams: vec![],
+                needs: vec![],
+                children: vec![PlanExpr::None],
+            }),
+            QueryPlan::new(PlanExpr::AllOf {
+                grams: vec![],
+                needs: vec![],
+                children: vec![PlanExpr::None],
+            }),
+            QueryPlan::new(PlanExpr::AllOf {
+                grams: vec![GramNeedle::AnyKey(Vec::new())],
+                needs: vec![],
+                children: vec![],
+            }),
+        ];
+
+        for plan in plans {
+            assert_eq!(run(&backend, &plan), Vec::<usize>::new());
+        }
+    }
+
+    #[test]
+    fn all_scan_need_variants_use_scan_need_satisfied_by() {
+        let backend = fake_backend(&[], Vec::new());
+        let needs = vec![
+            ScanNeed::MinByteLen(4),
+            ScanNeed::MinLongestLineLen(4),
+            ScanNeed::ContainsAnyByte(byte_set(b"z1")),
+            ScanNeed::MinByteCounts(Box::new(byte_counts(b"aa"))),
+            ScanNeed::LineStartsWithAnyByte(byte_set(b"a")),
+            ScanNeed::LineEndsWithAnyByte(byte_set(b"1")),
+            ScanNeed::StartsWith(EdgeBytes::from_slice(b"aa")),
+            ScanNeed::EndsWith(EdgeBytes::from_slice(b"11")),
+        ];
+
+        for need in needs {
+            let plan = QueryPlan::new(PlanExpr::AllOf {
+                grams: vec![],
+                needs: vec![need],
+                children: vec![],
+            });
+            assert_eq!(run(&backend, &plan), vec![1, 2]);
+        }
+    }
+
+    fn fake_backend(pairs: &[(GramKey, Vec<Posting>)], forced: Vec<usize>) -> FakeBackend {
+        let records = vec![
+            SummaryRecord::new(0, SummaryStatus::Known(summary(1))),
+            SummaryRecord::new(1, SummaryStatus::Known(rich_summary())),
+            SummaryRecord::new(2, SummaryStatus::UnknownText),
+        ];
+        FakeBackend {
+            summaries: SummaryIndex::from_records(records, 3).unwrap(),
+            grams: pairs.iter().cloned().collect(),
+            forced,
+            lookups: RefCell::new(0),
+        }
+    }
+
+    fn summary(lines: u32) -> ScanSummary {
+        let mut summary = ScanSummary::default();
+        summary.byte_len = u64::from(lines);
+        summary.line_count = lines;
+        summary.longest_line_len = lines;
+        summary
+    }
+
+    fn rich_summary() -> ScanSummary {
+        let mut summary = ScanSummary::default();
+        summary.byte_len = 6;
+        summary.line_count = 2;
+        summary.empty_line_count = 1;
+        summary.longest_line_len = 4;
+        summary.gram_count = 3;
+        summary.flags = ScanFlags::default()
+            .with_ascii_lower()
+            .with_ascii_digit()
+            .with_lf();
+        summary.byte_counts = byte_counts(b"aa11\n\n");
+        summary.line_start_bytes = byte_set(b"a");
+        summary.line_end_bytes = byte_set(b"1");
+        summary.prefix = EdgeBytes::from_slice(b"aa11");
+        summary.suffix = EdgeBytes::from_slice(b"11");
+        summary
+    }
+
+    fn byte_set(bytes: &[u8]) -> ByteSet256 {
+        let mut set = ByteSet256::default();
+        for &byte in bytes {
+            set.insert(byte);
+        }
+        set
+    }
+
+    fn byte_counts(bytes: &[u8]) -> SaturatingByteCounts256 {
+        let mut counts = SaturatingByteCounts256::default();
+        for &byte in bytes {
+            counts.observe(byte);
+        }
+        counts
+    }
+
+    struct FakeDf {
+        total: u64,
+    }
+
+    impl DfStats for FakeDf {
+        fn entry_count(&self, _key: GramKey) -> u64 {
+            0
+        }
+
+        fn total_entries(&self) -> u64 {
+            self.total
+        }
+    }
+}

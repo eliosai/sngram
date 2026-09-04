@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/types", "crates/lib", "crates/lib/benches", "crates/python", "crates/eg"]
+members = ["crates/lib", "crates/lib/benches", "crates/python", "crates/eg"]
 
 [workspace.package]
-version = "0.7.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["Elios <dev@elios.ai>"]
 license = "MIT"
@@ -18,8 +18,7 @@ strip = true
 
 [workspace.dependencies]
 # Internal
-sngram-types = { version = "0.7.0", path = "crates/types" }
-sngram = { version = "0.7.0", path = "crates/lib" }
+sngram = { version = "1.0.0", path = "crates/lib" }
 
 # Types / zero-copy
 crc32fast = "1.5"
@@ -31,9 +30,6 @@ regex-lite = "0.1"
 
 # Benchmarking
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
-
-# Async
-tokio = { version = "1.52", default-features = false }
 
 # Utilities
 thiserror = "2.0"
@@ -69,7 +65,8 @@ too_many_arguments = "warn"
 
 # API design
 must_use_candidate = "warn"
-missing_errors_doc = "warn"
+# every doc is one line, so an errors section never appears
+missing_errors_doc = "allow"
 missing_const_for_fn = "warn"
 wildcard_imports = "warn"
 

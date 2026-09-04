@@ -38,7 +38,7 @@ use super::CompletionType;
 mod test_support {
     use super::ContextMode;
 
-    pub(super) fn limited_context(mode: &ContextMode) -> (usize, usize) {
+    pub fn limited_context(mode: &ContextMode) -> (usize, usize) {
         match *mode {
             ContextMode::Passthru => unreachable!("context mode is passthru"),
             ContextMode::Limited(ref limited) => limited.get(),
@@ -51,7 +51,7 @@ mod test_support {
 /// The order of these flags matter. It determines the order of the flags in
 /// the generated documentation (`-h`, `--help` and the man page) within each
 /// category. (This is why the deprecated flags are last.)
-pub(super) const FLAGS: &[&dyn Flag] = &[
+pub const FLAGS: &[&dyn Flag] = &[
     // -e/--regexp and -f/--file should come before anything else in the
     // same category.
     &Regexp,
@@ -7750,33 +7750,33 @@ mod convert {
 
     use anyhow::Context;
 
-    pub(super) fn str(v: &OsStr) -> anyhow::Result<&str> {
+    pub fn str(v: &OsStr) -> anyhow::Result<&str> {
         let Some(s) = v.to_str() else {
             anyhow::bail!("value is not valid UTF-8")
         };
         Ok(s)
     }
 
-    pub(super) fn string(v: OsString) -> anyhow::Result<String> {
+    pub fn string(v: OsString) -> anyhow::Result<String> {
         let Ok(s) = v.into_string() else {
             anyhow::bail!("value is not valid UTF-8")
         };
         Ok(s)
     }
 
-    pub(super) fn usize(v: &OsStr) -> anyhow::Result<usize> {
+    pub fn usize(v: &OsStr) -> anyhow::Result<usize> {
         str(v)?.parse().context("value is not a valid number")
     }
 
-    pub(super) fn u64(v: &OsStr) -> anyhow::Result<u64> {
+    pub fn u64(v: &OsStr) -> anyhow::Result<u64> {
         str(v)?.parse().context("value is not a valid number")
     }
 
-    pub(super) fn human_readable_u64(v: &OsStr) -> anyhow::Result<u64> {
+    pub fn human_readable_u64(v: &OsStr) -> anyhow::Result<u64> {
         grep::cli::parse_human_readable_size(str(v)?).context("invalid size")
     }
 
-    pub(super) fn human_readable_usize(v: &OsStr) -> anyhow::Result<usize> {
+    pub fn human_readable_usize(v: &OsStr) -> anyhow::Result<usize> {
         let size = human_readable_u64(v)?;
         let Ok(size) = usize::try_from(size) else {
             anyhow::bail!("size is too big")

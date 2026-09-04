@@ -1,6 +1,7 @@
 //! Streaming sparse n-gram scanner.
 
-use sngram_types::{HashKey, ScanEvent, WeightTable};
+use crate::hashing::HashKey;
+use crate::{ScanSummary, ScannedGram, WeightTable};
 
 use super::facts::SummaryBuilder;
 use super::settings::ScanSettings;
@@ -26,15 +27,11 @@ impl<'t> DocumentScanner<'t> {
         }
     }
 
-    pub fn begin_document(&mut self, emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+    pub fn begin_document(&mut self, emit: &mut impl FnMut(ScannedGram)) {
         self.push_sentinel(emit);
     }
 
-    pub fn push_content(
-        &mut self,
-        chunk: &[u8],
-        emit: &mut impl for<'event> FnMut(ScanEvent<'event>),
-    ) {
+    pub fn push_content(&mut self, chunk: &[u8], emit: &mut impl FnMut(ScannedGram)) {
         if chunk.is_empty() {
             return;
         }
@@ -44,23 +41,18 @@ impl<'t> DocumentScanner<'t> {
         self.push_to_spaces(chunk, emit);
     }
 
-    pub fn finish_document(&mut self, emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+    pub fn finish_document(&mut self, emit: &mut impl FnMut(ScannedGram)) -> ScanSummary {
         self.push_sentinel(emit);
-        let summary = self.summary.finish(self.gram_count);
-        emit(ScanEvent::Finish(&summary));
+        self.summary.finish(self.gram_count)
     }
 
-    fn push_sentinel(&mut self, emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+    fn push_sentinel(&mut self, emit: &mut impl FnMut(ScannedGram)) {
         self.push_to_spaces(&[ScanSettings::DOCUMENT_SENTINEL], emit);
     }
 
     // the folded space stays a bit-exact mirror of the primary space until
     // the first uppercase byte, so it only starts running at that byte
-    fn push_to_spaces(
-        &mut self,
-        chunk: &[u8],
-        emit: &mut impl for<'event> FnMut(ScanEvent<'event>),
-    ) {
+    fn push_to_spaces(&mut self, chunk: &[u8], emit: &mut impl FnMut(ScannedGram)) {
         if self.folded.is_some() {
             self.push_both(chunk, emit);
             return;
@@ -74,12 +66,12 @@ impl<'t> DocumentScanner<'t> {
         self.push_both(&chunk[at..], emit);
     }
 
-    fn push_both(&mut self, chunk: &[u8], emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+    fn push_both(&mut self, chunk: &[u8], emit: &mut impl FnMut(ScannedGram)) {
         let content_bytes = self.content_bytes;
         let gram_count = &mut self.gram_count;
         self.primary.push_bytes(chunk, content_bytes, &mut |gram| {
             *gram_count = gram_count.saturating_add(1);
-            emit(ScanEvent::Gram(gram));
+            emit(gram);
         });
 
         let Some(folded) = self.folded.as_mut() else {
@@ -87,16 +79,16 @@ impl<'t> DocumentScanner<'t> {
         };
         folded.push_bytes(chunk, content_bytes, &mut |gram| {
             *gram_count = gram_count.saturating_add(1);
-            emit(ScanEvent::Gram(gram));
+            emit(gram);
         });
     }
 
-    fn push_primary(&mut self, chunk: &[u8], emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+    fn push_primary(&mut self, chunk: &[u8], emit: &mut impl FnMut(ScannedGram)) {
         let gram_count = &mut self.gram_count;
         self.primary
             .push_bytes(chunk, self.content_bytes, &mut |gram| {
                 *gram_count = gram_count.saturating_add(1);
-                emit(ScanEvent::Gram(gram));
+                emit(gram);
             });
     }
 }
@@ -114,9 +106,9 @@ pub fn literal_scanner(table: &WeightTable) -> SpaceScanner<'_> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::io::Cursor;
 
-    use sngram_types::{ByteRange, GramKey, HashKey, ScanSummary, ScannedGram};
+    use crate::hashing::HashKey;
+    use crate::{ByteRange, GramKey, ScanSummary, ScannedGram};
 
     use super::*;
 
@@ -127,13 +119,7 @@ mod tests {
     fn collect(doc: &[u8]) -> CollectedScan {
         let table = table();
         let mut grams = Vec::new();
-        let mut summary = None;
-        crate::scan::scan(&table, Cursor::new(doc), |event| match event {
-            ScanEvent::Gram(gram) => grams.push(gram),
-            ScanEvent::Finish(done) => summary = Some(*done),
-        })
-        .expect("scan succeeds");
-        let summary = summary.unwrap_or_else(|| panic!("scanner emits summary"));
+        let summary = crate::scan::scan(&table, doc, |gram| grams.push(gram));
         CollectedScan { grams, summary }
     }
 
@@ -200,7 +186,7 @@ mod tests {
     #[test]
     fn boundary_spans_can_hash_virtual_sentinels() {
         let scan = collect(b"A");
-        let sentinel_key = GramKey(HashKey::UNKEYED.hash_bytes(b"\nA\n"));
+        let sentinel_key = GramKey::new(HashKey::UNKEYED.hash_bytes(b"\nA\n"));
 
         assert!(
             scan.grams
@@ -213,13 +199,10 @@ mod tests {
     #[test]
     fn document_spans_stay_in_content_bounds() {
         let table = table();
-        crate::scan::scan(&table, Cursor::new(b"abc"), |event| {
-            if let ScanEvent::Gram(gram) = event {
-                assert!(gram.span.start <= gram.span.end);
-                assert!(gram.span.end <= 3);
-            }
-        })
-        .expect("scan succeeds");
+        crate::scan::scan(&table, b"abc", |gram| {
+            assert!(gram.span.start <= gram.span.end);
+            assert!(gram.span.end <= 3);
+        });
     }
 
     #[test]
@@ -236,27 +219,21 @@ mod tests {
     }
 
     #[test]
-    fn scan_grams_do_not_depend_on_reader_chunk_size() {
+    fn scan_grams_do_not_depend_on_chunk_size() {
         let doc = repeated_source(9000);
         let expected = canonical_grams(collect(&doc).grams);
 
         for cap in [1, 2, 127, 128, 129, 895, 896, 1024] {
             let table = table();
-            let reader = std::io::BufReader::with_capacity(cap, Cursor::new(&doc));
             let mut grams = Vec::new();
-            crate::scan::scan(&table, reader, |event| {
-                collect_gram(event, &mut grams);
-            })
-            .expect("scan succeeds");
+            let mut scanner = DocumentScanner::new(&table);
+            scanner.begin_document(&mut |gram| grams.push(gram));
+            for chunk in doc.chunks(cap) {
+                scanner.push_content(chunk, &mut |gram| grams.push(gram));
+            }
+            scanner.finish_document(&mut |gram| grams.push(gram));
             assert_eq!(canonical_grams(grams), expected, "chunk capacity {cap}");
         }
-    }
-
-    fn collect_gram(event: ScanEvent<'_>, grams: &mut Vec<ScannedGram>) {
-        let ScanEvent::Gram(gram) = event else {
-            return;
-        };
-        grams.push(gram);
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -286,7 +263,7 @@ mod tests {
 
     fn folded_key(bytes: &[u8]) -> GramKey {
         let folded: Vec<u8> = bytes.iter().map(u8::to_ascii_lowercase).collect();
-        GramKey(HashKey::UNKEYED.folded().hash_bytes(&folded))
+        GramKey::new(HashKey::UNKEYED.folded().hash_bytes(&folded))
     }
 
     #[test]

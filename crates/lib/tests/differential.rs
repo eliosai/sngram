@@ -9,9 +9,9 @@
 //! `MAX_LEN`, and inputs that overflow the bounded stack.
 #![allow(missing_docs, clippy::unwrap_used)]
 
-use std::{collections::HashSet, io::Cursor};
+use std::collections::HashSet;
 
-use sngram_types::{ScanError, ScanEvent, WeightTable};
+use sngram::WeightTable;
 
 // Frozen algorithm parameters; must mirror crates/lib/src/scan/settings.rs
 const MIN_LEN: usize = 3;
@@ -227,23 +227,21 @@ fn reference_raw_keys(table: &WeightTable, content: &[u8]) -> HashSet<u64> {
     expected
 }
 
-fn scanned_keys(table: &WeightTable, content: &[u8]) -> Result<HashSet<u64>, ScanError> {
+fn scanned_keys(table: &WeightTable, content: &[u8]) -> HashSet<u64> {
     let mut got = HashSet::new();
-    sngram::scan(table, Cursor::new(content), |event| {
-        if let ScanEvent::Gram(gram) = event {
-            got.insert(gram.key.value());
-        }
-    })?;
-    Ok(got)
+    sngram::scan(table, content, |gram| {
+        got.insert(gram.key.value());
+    });
+    got
 }
 
 #[test]
-fn scan_emits_every_reference_raw_key() -> Result<(), ScanError> {
+fn scan_emits_every_reference_raw_key() {
     let mut cases = 0usize;
     for (tname, table) in tables() {
         for (iname, content) in inputs() {
             let expected = reference_raw_keys(&table, &content);
-            let got = scanned_keys(&table, &content)?;
+            let got = scanned_keys(&table, &content);
             let missing: Vec<_> = expected.difference(&got).copied().collect();
             assert!(
                 missing.is_empty(),
@@ -254,7 +252,6 @@ fn scan_emits_every_reference_raw_key() -> Result<(), ScanError> {
         }
     }
     eprintln!("scan differential cases passed: {cases}");
-    Ok(())
 }
 
 /// Deepest uncapped hull-stack depth the content drives the table to.

@@ -43,6 +43,16 @@ an archive where ripgrep reports nothing. On a django checkout that is
 The indexed and `--no-index` paths agree; the difference is against
 ripgrep, and it only ever adds files.
 
+## Upgrading to 1.0
+
+1.0 moves the postings schema from 21 to 22 and the tantivy schema from 6
+to 7. Indexing no longer runs a signature list and a control-byte density
+sniff over the bytes before the first NUL, so a file that sniff refused, an
+archive header or a console log, is indexed for its grams instead of being
+forced into every candidate set. No file that was indexed is skipped now,
+and `--files-with-matches` still names a file exactly when a plain scan
+does. The daemon rebuilds any index at an older schema on first contact.
+
 ## Upgrading to 0.7
 
 0.7 moves the postings schema from 16 to 21. The daemon rebuilds any

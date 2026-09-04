@@ -10,10 +10,9 @@
     reason = "tests assert by panicking; the fixture indexes a fixed-shape buffer"
 )]
 
-use std::{collections::HashSet, io::Cursor};
+use std::collections::HashSet;
 
-use sngram::{query, scan};
-use sngram_types::{GramNeedle, PlanExpr, ScanEvent, ScanSummary, WeightTable};
+use sngram::{GramNeedle, PlanExpr, ScanSummary, WeightTable, query, scan};
 
 /// A deterministic weight table: each byte pair hashed to a varied weight, so
 /// the sparse hull is non-trivial.
@@ -52,15 +51,10 @@ fn needle_satisfied(needle: &GramNeedle, grams: &HashSet<u64>) -> bool {
 
 fn index_scan(t: &WeightTable, doc: &[u8]) -> (HashSet<u64>, ScanSummary) {
     let mut grams = HashSet::new();
-    let mut summary = None;
-    scan(t, Cursor::new(doc), |event| match event {
-        ScanEvent::Gram(gram) => {
-            grams.insert(gram.key.value());
-        },
-        ScanEvent::Finish(done) => summary = Some(*done),
-    })
-    .expect("scan succeeds");
-    (grams, summary.expect("scan emits summary"))
+    let summary = scan(t, doc, |gram| {
+        grams.insert(gram.key.value());
+    });
+    (grams, summary)
 }
 
 /// Assert no document the oracle matches is rejected by the plan. The oracle

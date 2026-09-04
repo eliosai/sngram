@@ -26,7 +26,6 @@ mod snapshot;
 mod store;
 mod suite;
 mod summary;
-mod verbatim;
 mod verify;
 mod walk;
 
@@ -40,7 +39,7 @@ use catalog::GenerationCatalog;
 use generation::Generation;
 use request::{Requested, SearchRequest, Unsupported, refuse};
 use roots::{SearchRoots, absolute_path};
-use sngram_types::QueryPlan;
+use sngram::QueryPlan;
 
 use crate::flags::HiArgs;
 
@@ -341,7 +340,7 @@ fn plan_gram_count(plan: &QueryPlan) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use sngram_types::{QueryPlan, WeightTable};
+    use sngram::{QueryPlan, WeightTable};
 
     use super::{DEBUG_PLAN_PREVIEW_BYTES, debug_plan};
 

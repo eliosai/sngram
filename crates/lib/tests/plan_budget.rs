@@ -2,7 +2,7 @@
 #![allow(missing_docs, clippy::expect_used)]
 
 use sngram::query;
-use sngram_types::{QueryPlan, WeightTable};
+use sngram::{QueryPlan, WeightTable};
 
 fn weight_table() -> WeightTable {
     WeightTable::from_weight_fn(|c1, c2| crc32fast::hash(&[c1, c2]))

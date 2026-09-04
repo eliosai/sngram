@@ -18,7 +18,7 @@ long as it meets criteria 3 and 4 above.
 */
 
 /// Generate completions for zsh.
-pub(crate) fn generate() -> String {
+pub fn generate() -> String {
     let hyperlink_alias_descriptions = grep::printer::hyperlink_aliases()
         .iter()
         .map(|alias| format!(r#"    {}:"{}""#, alias.name(), alias.description()))

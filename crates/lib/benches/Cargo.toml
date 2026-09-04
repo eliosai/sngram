@@ -3,6 +3,7 @@ name = "sngram-benches"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+license.workspace = true
 publish = false
 
 [[bench]]
@@ -21,12 +22,10 @@ path = "src/counter.rs"
 harness = false
 
 [dependencies]
-sngram = { workspace = true, features = ["learn", "stream"] }
-sngram-types = { workspace = true }
+sngram = { workspace = true, features = ["learn"] }
 crc32fast = { workspace = true }
 rustc-hash = "2.1"
 divan = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true

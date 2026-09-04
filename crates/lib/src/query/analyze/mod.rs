@@ -12,7 +12,7 @@ mod repeat;
 
 use regex_syntax::hir::{Hir, HirKind, Look};
 
-use sngram_types::WeightTable;
+use crate::WeightTable;
 
 use super::algebra::Query;
 use super::info::RegexpInfo;

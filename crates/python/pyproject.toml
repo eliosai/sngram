@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sngram"
-version = "0.7.0"
+version = "1.0.0"
 description = "A sparse ngram library with trained weight tables"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,6 +23,16 @@ dependencies = []
 [project.urls]
 Repository = "https://github.com/eliosai/sngram"
 
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "src/**/*.rs" },
+    { file = "../lib/Cargo.toml" },
+    { file = "../lib/src/**/*.rs" },
+    { file = "../lib/data/weights.bin" },
+]
+
 [tool.maturin]
 manifest-path = "Cargo.toml"
 module-name = "sngram._core"
@@ -36,6 +46,7 @@ dev = [
     "numpy>=2",
     "maturin>=1.7",
     "pyarrow>=17",
+    "pytest-codspeed>=4",
 ]
 
 [tool.pytest.ini_options]

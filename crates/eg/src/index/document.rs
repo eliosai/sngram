@@ -2,13 +2,12 @@
 
 use std::{
     fs::{self, File},
-    io::Cursor,
     path::Path,
 };
 
 use anyhow::Context;
 use memmap2::{Mmap, MmapOptions};
-use sngram_types::{ScanError, ScanEvent, ScanSummary, WeightTable};
+use sngram::{ScanSummary, WeightTable};
 
 use super::executor::{
     BLOCK_BITS, LINE_END_BIT, LINE_START_BIT, WORD_BOTH_BIT, WORD_END_BIT, WORD_START_BIT,
@@ -18,14 +17,12 @@ use super::{
     grams::{PackedGram, collapse},
     manifest::CurrentFile,
     summary::{SummaryRecord, SummaryStatus},
-    verbatim::HeldDocument,
 };
 
 pub struct IndexedDocument {
     pub ord: u32,
     pub path_hash: u64,
     pub forced_candidate: bool,
-    pub held: Option<HeldDocument>,
     pub hashes: Vec<PackedGram>,
     pub summary: SummaryRecord,
 }
@@ -33,15 +30,6 @@ pub struct IndexedDocument {
 impl IndexedDocument {
     pub const fn is_skipped(&self) -> bool {
         matches!(self.summary.status(), SummaryStatus::Skipped)
-    }
-
-    /// Decide this document from stored bytes instead of forcing it everywhere
-    fn hold(&mut self, prefix: &[u8]) {
-        let Some(held) = HeldDocument::new(self.ord, prefix) else {
-            return;
-        };
-        self.held = Some(held);
-        self.forced_candidate = false;
     }
 
     pub const fn emitted_grams(&self) -> usize {
@@ -102,12 +90,7 @@ pub fn scan(
             SummaryStatus::Skipped,
         ));
     }
-    let Some((hashes, summary)) = scan_bytes(table, prefix)? else {
-        let mut refused = document(ord, path_hash, true, Vec::new(), SummaryStatus::UnknownText);
-        refused.hold(prefix);
-        return Ok(refused);
-    };
-    let mut hashes = hashes;
+    let (mut hashes, summary) = scan_bytes(table, prefix);
     collapse(&mut hashes);
     let forced_candidate = super::classify::is_high_entropy(prefix.len(), hashes.len());
     if forced_candidate {
@@ -122,26 +105,15 @@ pub fn scan(
     ))
 }
 
-fn scan_bytes(
-    table: &WeightTable,
-    bytes: &[u8],
-) -> anyhow::Result<Option<(Vec<PackedGram>, ScanSummary)>> {
+/// Grams and summary of one searchable prefix, which carries no NUL and needs no binary policy
+fn scan_bytes(table: &WeightTable, bytes: &[u8]) -> (Vec<PackedGram>, ScanSummary) {
     let mut blocks = BlockMap::new(bytes);
     let mut hashes = Vec::with_capacity(bytes.len().min(MAX_GRAM_PREALLOC));
-    let mut summary = None;
-    let scan = sngram::scan(table, Cursor::new(bytes), |event| match event {
-        ScanEvent::Gram(gram) => {
-            let mask = blocks.mask(bytes, &gram.span);
-            hashes.push(PackedGram::new(gram.key.value(), mask));
-        },
-        ScanEvent::Finish(facts) => summary = Some(*facts),
+    let summary = sngram::scan(table, bytes, |gram| {
+        let mask = blocks.mask(bytes, &gram.span);
+        hashes.push(PackedGram::new(gram.key.value(), mask));
     });
-    if matches!(scan, Err(ScanError::Binary)) {
-        return Ok(None);
-    }
-    scan?;
-    let summary = summary.context("scanner finished without emitting a summary")?;
-    Ok(Some((hashes, summary)))
+    (hashes, summary)
 }
 
 /// Maps content spans to five hashed line-bucket bits plus the line and
@@ -171,7 +143,7 @@ impl BlockMap {
         }
     }
 
-    fn mask(&mut self, bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
+    fn mask(&mut self, bytes: &[u8], span: &sngram::ByteRange) -> u16 {
         let last = self.line_of_end(span.end.saturating_sub(1).max(span.start));
         let first = self.line_of_start(last, span.start);
         let mut mask = 0u16;
@@ -220,7 +192,7 @@ fn bucket_of(line: usize) -> u32 {
 /// Word and line edge bits for one occurrence, read from the two bytes
 /// bracketing the span; `\r\n` counts as a line end so a CRLF verifier never
 /// loses a line its anchors still match
-fn edge_bits(bytes: &[u8], span: &sngram_types::ByteRange) -> u16 {
+fn edge_bits(bytes: &[u8], span: &sngram::ByteRange) -> u16 {
     let before = span
         .start
         .checked_sub(1)
@@ -256,7 +228,6 @@ fn document(
         ord,
         path_hash,
         forced_candidate,
-        held: None,
         hashes,
         summary: SummaryRecord::new(ord, status),
     }
@@ -300,7 +271,7 @@ mod tests {
         BLOCK_BITS, BlockMap, LINE_END_BIT, LINE_START_BIT, WORD_BOTH_BIT, WORD_END_BIT,
         WORD_START_BIT, bucket_of, edge_bits,
     };
-    use sngram_types::ByteRange;
+    use sngram::ByteRange;
 
     const WORD_BITS: u16 = WORD_START_BIT | WORD_END_BIT | WORD_BOTH_BIT;
     const LINE_BITS: u16 = LINE_START_BIT | LINE_END_BIT;

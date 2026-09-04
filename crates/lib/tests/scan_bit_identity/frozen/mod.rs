@@ -1,16 +1,14 @@
 //! Frozen copy of the baseline document scanner used as the identity oracle
 
 mod facts;
+mod hashing;
 mod space;
 
-use std::io::BufRead;
-
-use sngram_types::{Content, HashKey, ScanError, ScanEvent, WeightTable};
+use sngram::{ScanSummary, ScannedGram, WeightTable};
 
 use facts::SummaryBuilder;
+use hashing::HashKey;
 use space::{EmitPolicy, SpaceScanner, Transform};
-
-const SNIFF_BYTES: usize = 8192;
 
 /// Copy of the baseline scanner format settings
 pub struct ScanSettings;
@@ -54,11 +52,11 @@ impl<'t> DocumentScanner<'t> {
         }
     }
 
-    fn begin_document(&mut self, emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+    fn begin_document(&mut self, emit: &mut impl FnMut(ScannedGram)) {
         self.push_sentinel(emit);
     }
 
-    fn push_content(&mut self, chunk: &[u8], emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+    fn push_content(&mut self, chunk: &[u8], emit: &mut impl FnMut(ScannedGram)) {
         if chunk.is_empty() {
             return;
         }
@@ -68,81 +66,34 @@ impl<'t> DocumentScanner<'t> {
         self.push_to_spaces(chunk, emit);
     }
 
-    fn finish_document(&mut self, emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+    fn finish_document(&mut self, emit: &mut impl FnMut(ScannedGram)) -> ScanSummary {
         self.push_sentinel(emit);
-        let summary = self.summary.finish(self.gram_count);
-        emit(ScanEvent::Finish(&summary));
+        self.summary.finish(self.gram_count)
     }
 
-    fn push_sentinel(&mut self, emit: &mut impl for<'event> FnMut(ScanEvent<'event>)) {
+    fn push_sentinel(&mut self, emit: &mut impl FnMut(ScannedGram)) {
         self.push_to_spaces(&[ScanSettings::DOCUMENT_SENTINEL], emit);
     }
 
-    fn push_to_spaces(
-        &mut self,
-        chunk: &[u8],
-        emit: &mut impl for<'event> FnMut(ScanEvent<'event>),
-    ) {
+    fn push_to_spaces(&mut self, chunk: &[u8], emit: &mut impl FnMut(ScannedGram)) {
         let content_bytes = self.content_bytes;
         let gram_count = &mut self.gram_count;
         self.primary.push_bytes(chunk, content_bytes, &mut |gram| {
             *gram_count = gram_count.saturating_add(1);
-            emit(ScanEvent::Gram(gram));
+            emit(gram);
         });
 
         self.folded.push_bytes(chunk, content_bytes, &mut |gram| {
             *gram_count = gram_count.saturating_add(1);
-            emit(ScanEvent::Gram(gram));
+            emit(gram);
         });
     }
 }
 
-fn read_validated<R>(mut input: R) -> Result<(Vec<u8>, R), ScanError>
-where
-    R: BufRead,
-{
-    let mut bytes = Vec::new();
-
-    while bytes.len() < SNIFF_BYTES {
-        let chunk = input.fill_buf()?;
-        if chunk.is_empty() {
-            break;
-        }
-
-        let take = chunk.len().min(SNIFF_BYTES - bytes.len());
-        bytes.extend_from_slice(&chunk[..take]);
-        input.consume(take);
-    }
-
-    let content = Content::new(&bytes);
-    if content.has_binary_signature() || content.is_likely_binary() {
-        return Err(ScanError::Binary);
-    }
-    Ok((bytes, input))
-}
-
-/// Frozen copy of the public scan entry point
-pub fn scan<R>(
-    table: &WeightTable,
-    input: R,
-    mut emit: impl for<'event> FnMut(ScanEvent<'event>),
-) -> Result<(), ScanError>
-where
-    R: BufRead,
-{
-    let (prefix, mut input) = read_validated(input)?;
+/// Frozen copy of the scan entry point
+pub fn scan(table: &WeightTable, content: &[u8], mut emit: impl FnMut(ScannedGram)) -> ScanSummary {
     let mut scanner = DocumentScanner::new(table);
     scanner.begin_document(&mut emit);
-    scanner.push_content(&prefix, &mut emit);
-    loop {
-        let chunk = input.fill_buf()?;
-        if chunk.is_empty() {
-            break;
-        }
-        let len = chunk.len();
-        scanner.push_content(chunk, &mut emit);
-        input.consume(len);
-    }
-    scanner.finish_document(&mut emit);
-    Ok(())
+    scanner.push_content(content, &mut emit);
+    scanner.finish_document(&mut emit)
 }

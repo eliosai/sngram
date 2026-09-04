@@ -2,10 +2,10 @@
 //!
 //! Binary files are excluded from the full-corpus output modes. Grams are still
 //! indexed over the bytes binary detection lets the search path report a match
-//! in, so a candidate is never missed. Oversized, encoded, high-entropy, and
-//! scanner-rejected files are not indexed for their grams; they are recorded
-//! as forced candidates so the verifier still searches them with the
-//! configured text semantics, keeping the index sound and small.
+//! in, so a candidate is never missed. Oversized, encoded, and high-entropy
+//! files are not indexed for their grams; they are recorded as forced
+//! candidates so the verifier still searches them with the configured text
+//! semantics, keeping the index sound and small.
 
 use std::{
     fs::File,

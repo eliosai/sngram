@@ -60,7 +60,7 @@ const TEMPLATE_CASE_CHOICES: &'static str = "
 ///
 /// Note that these completions are based on what was produced for ripgrep <=13
 /// using Clap 2.x. Improvements on this are welcome.
-pub(crate) fn generate() -> String {
+pub fn generate() -> String {
     let mut opts = String::new();
     for flag in FLAGS.iter() {
         opts.push_str("--");

@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: ""
+
+jobs:
+  release:
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore(release)') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: "1.97"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-deny,cargo-semver-checks,git-cliff
+      - name: check, clippy, fmt
+        run: just check
+      - name: tests
+        run: just test-ci
+      - name: doc tests
+        run: just test-doc
+      - name: doc build
+        run: just doc-check
+      - name: package
+        run: just package-check
+      - name: audit
+        run: just audit
+      - name: crates.io token
+        id: crates
+        uses: rust-lang/crates-io-auth-action@v1.0.5
+      - name: release
+        run: bash scripts/release.sh
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates.outputs.token }}
+          GH_TOKEN: ${{ github.token }}

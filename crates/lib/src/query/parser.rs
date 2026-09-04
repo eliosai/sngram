@@ -2,7 +2,7 @@
 
 use regex_syntax::hir::Hir;
 
-use sngram_types::QueryError;
+use crate::QueryError;
 
 use super::{pattern::PatternFacts, settings::QuerySettings, validate::ValidatedPattern};
 

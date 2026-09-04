@@ -1,13 +1,4 @@
-//! Bigram counting for weight-table learning.
-//!
-//! The public learning API has one primary type: [`BigramCounter`]. Feed text
-//! values directly into it with [`BigramCounter::process`] or
-//! [`BigramCounter::process_batch`], merge completed staging counters with
-//! [`BigramCounter::merge`], and serialize a learned `SPNG` weight table with
-//! [`BigramCounter::to_table_bytes`].
-//!
-//! Counting is per-value: no bigram may straddle two inputs, so the learned
-//! table is a function of the data alone, not of batch geometry.
+//! Byte-pair counting that trains a weight table, one value at a time so no pair straddles two inputs
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -19,11 +10,24 @@ mod settings;
 use batch::BatchCounts;
 use settings::LearnSettings;
 
-/// Shared byte-pair frequency counter, written concurrently by workers.
-///
-/// `BigramCounter` is the learning abstraction: count text, merge completed
-/// staging counters, inspect progress, checkpoint, and serialize a learned
-/// weight table.
+/// Why a checkpoint does not restore
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LearnError {
+    /// The snapshot is not one little-endian `u64` per pair
+    #[error("snapshot must be {expected} bytes, got {actual}")]
+    InvalidSnapshotLen {
+        /// The byte length a snapshot has
+        expected: usize,
+        /// The byte length this one has
+        actual: usize,
+    },
+    /// The counter already holds counts
+    #[error("cannot restore into a non-empty counter")]
+    NotFresh,
+}
+
+/// A byte-pair frequency counter many threads write at once
 pub struct BigramCounter {
     counts: Box<[AtomicU64; LearnSettings::PAIR_COUNT]>,
     pairs_processed: AtomicU64,
@@ -38,7 +42,7 @@ impl Default for BigramCounter {
 }
 
 impl BigramCounter {
-    /// Fresh counter with all counts zero.
+    /// A counter with every count at zero
     #[must_use]
     pub fn new() -> Self {
         let counts: Box<[AtomicU64; LearnSettings::PAIR_COUNT]> = (0..LearnSettings::PAIR_COUNT)
@@ -55,7 +59,7 @@ impl BigramCounter {
         }
     }
 
-    /// Fold a completed staging counter into this counter.
+    /// Fold a completed staging counter into this one
     pub fn merge(&self, other: &Self) {
         for (idx, count) in other.counts.iter().enumerate() {
             let n = count.load(Ordering::Relaxed);
@@ -71,14 +75,12 @@ impl BigramCounter {
             .fetch_add(other.files_processed(), Ordering::Relaxed);
     }
 
-    /// Count one value's bytes directly.
+    /// Count the byte pairs of one value
     pub fn process(&self, content: &[u8]) {
         self.process_batch(core::iter::once(content));
     }
 
-    /// Count many independent values and merge them once.
-    ///
-    /// No byte pair is counted across two values.
+    /// Count many values and merge them once, with no pair counted across two values
     pub fn process_batch<'a, I>(&self, values: I) -> u64
     where
         I: IntoIterator<Item = &'a [u8]>,
@@ -92,30 +94,30 @@ impl BigramCounter {
         bytes
     }
 
-    /// Record completed files or shards.
+    /// Record completed files or shards
     pub fn add_files(&self, n: u64) {
         self.files_processed.fetch_add(n, Ordering::Relaxed);
     }
 
-    /// Byte pairs counted so far.
+    /// Byte pairs counted so far
     #[must_use]
     pub fn pairs_processed(&self) -> u64 {
         self.pairs_processed.load(Ordering::Relaxed)
     }
 
-    /// Decompressed text bytes counted so far.
+    /// Bytes counted so far
     #[must_use]
     pub fn bytes_processed(&self) -> u64 {
         self.bytes_processed.load(Ordering::Relaxed)
     }
 
-    /// Files or shards completed so far.
+    /// Files or shards completed so far
     #[must_use]
     pub fn files_processed(&self) -> u64 {
         self.files_processed.load(Ordering::Relaxed)
     }
 
-    /// Current count for one byte pair.
+    /// The count of one byte pair
     #[must_use]
     pub fn count(&self, c1: u8, c2: u8) -> u64 {
         self.counts[LearnSettings::pair_index(c1, c2)].load(Ordering::Relaxed)
@@ -150,7 +152,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use sngram_types::{LearnError, WeightTable};
+    use super::LearnError;
+    use crate::WeightTable;
 
     use super::*;
 

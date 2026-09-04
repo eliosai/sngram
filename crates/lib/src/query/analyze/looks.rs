@@ -3,7 +3,7 @@
 use regex_syntax::hir::{Hir, HirKind, Look};
 use regex_syntax::try_is_word_character;
 
-use sngram_types::Gram;
+use crate::query::gram::Gram;
 
 use super::super::algebra::Query;
 use super::super::info::RegexpInfo;

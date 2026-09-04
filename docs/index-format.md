@@ -4,7 +4,7 @@ The frozen on-disk format under `<root>/.eg/index/postings-v9/`. Five
 files: `table.bin`, `postings.bin`, `summaries.bin`, `manifest.bin`,
 `paths-v3.bin`. Format changes bump a version and rebuild destructively;
 there are no migration readers. The manifest carries a schema version of
-its own, 20 as of elgrep 0.7, and the daemon rebuilds any index whose
+its own, 22 as of elgrep 1.0, and the daemon rebuilds any index whose
 schema does not match.
 
 On the Linux kernel reference corpus (1.615GB text, 2026-07-26) the
@@ -48,7 +48,7 @@ per 848k.
 
 ## postings.bin
 
-Body layout: `[256B Huffman code lengths][lists]`. Each stored list is
+Body layout: `[1024B Huffman code lengths][lists]`. Each stored list is
 
 ```
 [count ordinal gaps, uvarint][mask column]
@@ -58,18 +58,20 @@ Ordinals are ascending document numbers, delta-coded. The measured gap
 stream sits within 14% of the Elias-Fano bound; Roaring and PEF lose on
 the df=1 majority, so plain varints stay.
 
-The mask column holds one byte per posting. Lists of 16 or more postings
-encode it as a canonical Huffman bitstream over the global code table in
-the prologue; shorter lists store raw bytes, because byte padding costs
-more than Huffman saves on them. The reader builds a 16-bit lookup table
+The mask column holds one ten-bit mask per posting. Lists of 16 or more
+postings encode it as a canonical Huffman bitstream over the global code
+table in the prologue; shorter lists store each mask as a uvarint, because
+padding costs more than Huffman saves on them. The reader builds a 16-bit lookup table
 from the code lengths at open, one probe per symbol.
 
-### The mask byte
+### The mask
 
 ```
-bit 7  WORD_END    some occurrence is followed by a non-word byte
-bit 6  WORD_START  some occurrence is preceded by a non-word byte
-bit 5  WORD_BOTH   one single occurrence has both word edges
+bit 9  LINE_END    some occurrence is followed by a line break
+bit 8  LINE_START  some occurrence is preceded by a line break
+bit 7  WORD_BOTH   one single occurrence has both word edges
+bit 6  WORD_END    some occurrence is followed by a non-word byte
+bit 5  WORD_START  some occurrence is preceded by a non-word byte
 bits 0-4           hashed line buckets: hash(line) % 5
 ```
 

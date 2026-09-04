@@ -35,7 +35,7 @@ use crate::{
 /// So while low level arguments are collected during parsing itself, high
 /// level arguments aren't created until parsing has completely finished.
 #[derive(Debug)]
-pub(crate) struct HiArgs {
+pub struct HiArgs {
     binary: BinaryDetection,
     compiled_matcher: std::sync::OnceLock<PatternMatcher>,
     index_walk_fingerprint: std::sync::OnceLock<u64>,
@@ -117,7 +117,7 @@ impl HiArgs {
     ///
     /// This process can fail for a variety of reasons. For example, invalid
     /// globs or some kind of environment issue.
-    pub(crate) fn from_low_args(mut low: LowArgs) -> anyhow::Result<HiArgs> {
+    pub fn from_low_args(mut low: LowArgs) -> anyhow::Result<HiArgs> {
         // Callers should not be trying to convert low-level arguments when
         // a short-circuiting special mode is present.
         assert_eq!(None, low.special, "special mode demands short-circuiting");
@@ -341,7 +341,7 @@ impl HiArgs {
     /// stdout.
     ///
     /// The file separator is the standard printer's when single threaded
-    pub(crate) fn buffer_writer(&self) -> termcolor::BufferWriter {
+    pub fn buffer_writer(&self) -> termcolor::BufferWriter {
         let mut wtr = termcolor::BufferWriter::stdout(self.color.to_termcolor());
         if self.threads != 1 {
             wtr.separator(self.file_separator.clone());
@@ -360,12 +360,12 @@ impl HiArgs {
     /// this warning is only emitted when ripgrep was called without any
     /// explicit file paths since otherwise the warning would likely be too
     /// aggressive.
-    pub(crate) fn has_implicit_path(&self) -> bool {
+    pub fn has_implicit_path(&self) -> bool {
         self.paths.has_implicit_path
     }
 
     /// Returns the current working directory captured during argument parsing.
-    pub(crate) fn cwd(&self) -> &Path {
+    pub fn cwd(&self) -> &Path {
         &self.cwd
     }
 
@@ -373,19 +373,19 @@ impl HiArgs {
     ///
     /// The builder can be used to turn a directory entry (from the `ignore`
     /// crate) into something that can be searched.
-    pub(crate) fn haystack_builder(&self) -> HaystackBuilder {
+    pub fn haystack_builder(&self) -> HaystackBuilder {
         let mut builder = HaystackBuilder::new();
         builder.strip_dot_prefix(self.paths.has_implicit_path);
         builder
     }
 
     /// Return eg index configuration.
-    pub(crate) fn index(&self) -> &IndexConfig {
+    pub fn index(&self) -> &IndexConfig {
         &self.index
     }
 
     /// Return true when -U multiline matching is enabled.
-    pub(crate) fn multiline(&self) -> bool {
+    pub fn multiline(&self) -> bool {
         self.multiline
     }
 
@@ -408,7 +408,7 @@ impl HiArgs {
     ///
     /// `-w` and `-x` boundaries sit inside the flag group because the verifier
     /// builds them under the same flags, so `--crlf` line anchors stay CRLF
-    pub(crate) fn indexed_pattern(&self) -> Option<String> {
+    pub fn indexed_pattern(&self) -> Option<String> {
         if self.invert_match {
             return None;
         }
@@ -427,32 +427,32 @@ impl HiArgs {
     }
 
     /// Returns true when a non-default regex engine may be used.
-    pub(crate) fn non_default_regex_engine(&self) -> bool {
+    pub fn non_default_regex_engine(&self) -> bool {
         !matches!(self.engine, EngineChoice::Default)
     }
 
     /// Returns true when the searcher decodes through an explicit encoding.
-    pub(crate) fn explicit_encoding(&self) -> bool {
+    pub fn explicit_encoding(&self) -> bool {
         matches!(self.encoding, EncodingMode::Some(_))
     }
 
     /// Returns true when a preprocessor command is configured.
-    pub(crate) fn has_preprocessor(&self) -> bool {
+    pub fn has_preprocessor(&self) -> bool {
         self.pre.is_some()
     }
 
     /// Returns true when compressed archives should be searched.
-    pub(crate) fn search_zip(&self) -> bool {
+    pub fn search_zip(&self) -> bool {
         self.search_zip
     }
 
     /// Returns true when line terminators are NUL bytes instead of newlines.
-    pub(crate) fn null_data(&self) -> bool {
+    pub fn null_data(&self) -> bool {
         self.null_data
     }
 
     /// Returns true when indexed scanning may use mmap.
-    pub(crate) fn index_mmap(&self) -> bool {
+    pub fn index_mmap(&self) -> bool {
         self.index_mmap
     }
 
@@ -463,7 +463,7 @@ impl HiArgs {
     /// answer a child `SearchRoots` query by applying a path restriction after
     /// sparse lookup, so path roots are identity data on the generation, not on
     /// the filter semantics.
-    pub(crate) fn index_walk_fingerprint(&self) -> u64 {
+    pub fn index_walk_fingerprint(&self) -> u64 {
         *self
             .index_walk_fingerprint
             .get_or_init(|| self.compute_index_walk_fingerprint())
@@ -508,7 +508,7 @@ impl HiArgs {
     }
 
     /// Returns true when Git status can conservatively accelerate freshness.
-    pub(crate) fn index_git_freshness_safe(&self) -> bool {
+    pub fn index_git_freshness_safe(&self) -> bool {
         self.ignore_file.is_empty()
             && !self.follow
             && self.max_filesize.is_none()
@@ -522,22 +522,22 @@ impl HiArgs {
     }
 
     /// Returns true when matches should be inverted.
-    pub(crate) fn invert_match(&self) -> bool {
+    pub fn invert_match(&self) -> bool {
         self.invert_match
     }
 
     /// Returns true when zero-count summaries should be printed.
-    pub(crate) fn include_zero(&self) -> bool {
+    pub fn include_zero(&self) -> bool {
         self.include_zero
     }
 
     /// Returns true when every line should be printed around matches.
-    pub(crate) fn passthru(&self) -> bool {
+    pub fn passthru(&self) -> bool {
         matches!(self.context, ContextMode::Passthru)
     }
 
     /// Return the search patterns compiled from positional, `-e`, and `-f` inputs.
-    pub(crate) fn patterns(&self) -> &[String] {
+    pub fn patterns(&self) -> &[String] {
         &self.patterns.patterns
     }
 
@@ -549,7 +549,7 @@ impl HiArgs {
     ///
     /// If there was a problem building the matcher (e.g., a syntax error),
     /// then this returns an error.
-    pub(crate) fn matcher(&self) -> anyhow::Result<PatternMatcher> {
+    pub fn matcher(&self) -> anyhow::Result<PatternMatcher> {
         if let Some(matcher) = self.compiled_matcher.get() {
             return Ok(matcher.clone());
         }
@@ -711,7 +711,7 @@ impl HiArgs {
     ///
     /// When this returns false, it is impossible for ripgrep to ever report
     /// a match.
-    pub(crate) fn matches_possible(&self) -> bool {
+    pub fn matches_possible(&self) -> bool {
         if self.patterns.patterns.is_empty() && !self.invert_match {
             return false;
         }
@@ -722,7 +722,7 @@ impl HiArgs {
     }
 
     /// Return true when indexed search must reject the requested binary mode.
-    pub(crate) fn index_rejects_binary_mode(&self) -> bool {
+    pub fn index_rejects_binary_mode(&self) -> bool {
         !matches!(self.binary_mode, BinaryMode::Auto)
     }
 
@@ -731,7 +731,7 @@ impl HiArgs {
     /// This is generally useful for determining what action ripgrep should
     /// take. The main mode is of course to "search," but there are other
     /// non-search modes such as `--type-list` and `--files`.
-    pub(crate) fn mode(&self) -> Mode {
+    pub fn mode(&self) -> Mode {
         self.mode
     }
 
@@ -740,7 +740,7 @@ impl HiArgs {
     /// This is useful for the `--files` mode in ripgrep, where the printer
     /// just needs to emit paths and not need to worry about the functionality
     /// of searching.
-    pub(crate) fn path_printer_builder(&self) -> grep::printer::PathPrinterBuilder {
+    pub fn path_printer_builder(&self) -> grep::printer::PathPrinterBuilder {
         let mut builder = grep::printer::PathPrinterBuilder::new();
         builder
             .color_specs(self.colors.clone())
@@ -754,11 +754,7 @@ impl HiArgs {
     ///
     /// This chooses which printer to build (JSON, summary or standard) based
     /// on the search mode given.
-    pub(crate) fn printer<W: termcolor::WriteColor>(
-        &self,
-        search_mode: SearchMode,
-        wtr: W,
-    ) -> Printer<W> {
+    pub fn printer<W: termcolor::WriteColor>(&self, search_mode: SearchMode, wtr: W) -> Printer<W> {
         let summary_kind = if self.quiet {
             match search_mode {
                 SearchMode::FilesWithMatches
@@ -855,7 +851,7 @@ impl HiArgs {
     /// anything to stdout. There are some exceptions. For example, when the
     /// user has provided `--stats`, then ripgrep will print statistics to
     /// stdout.
-    pub(crate) fn quiet(&self) -> bool {
+    pub fn quiet(&self) -> bool {
         self.quiet
     }
 
@@ -867,7 +863,7 @@ impl HiArgs {
     /// that finds all matches and a search that only finds one of them. (An
     /// exception here is if `--stats` is given, then `quit_after_match` will
     /// always return false since the user expects ripgrep to find everything.)
-    pub(crate) fn quit_after_match(&self) -> bool {
+    pub fn quit_after_match(&self) -> bool {
         self.quit_after_match
     }
 
@@ -875,7 +871,7 @@ impl HiArgs {
     ///
     /// Search results are found using the given matcher and written to the
     /// given printer.
-    pub(crate) fn search_worker<W: termcolor::WriteColor>(
+    pub fn search_worker<W: termcolor::WriteColor>(
         &self,
         matcher: PatternMatcher,
         searcher: grep::searcher::Searcher,
@@ -902,7 +898,7 @@ impl HiArgs {
     }
 
     /// Build a searcher from the command line parameters.
-    pub(crate) fn searcher(&self) -> anyhow::Result<grep::searcher::Searcher> {
+    pub fn searcher(&self) -> anyhow::Result<grep::searcher::Searcher> {
         let line_term = if self.crlf {
             grep::matcher::LineTerminator::crlf()
         } else if self.null_data {
@@ -953,7 +949,7 @@ impl HiArgs {
     /// any additional sorting. This is done because `walk_builder()` will sort
     /// the iterator it yields during directory traversal, so no additional
     /// sorting is needed.
-    pub(crate) fn sort<'a, I>(&self, haystacks: I) -> Box<dyn Iterator<Item = Haystack> + 'a>
+    pub fn sort<'a, I>(&self, haystacks: I) -> Box<dyn Iterator<Item = Haystack> + 'a>
     where
         I: Iterator<Item = Haystack> + 'a,
     {
@@ -1012,7 +1008,7 @@ impl HiArgs {
     ///
     /// When this returns `None`, then callers may assume that the user did
     /// not request statistics.
-    pub(crate) fn stats(&self) -> Option<grep::printer::Stats> {
+    pub fn stats(&self) -> Option<grep::printer::Stats> {
         self.stats.clone()
     }
 
@@ -1021,7 +1017,7 @@ impl HiArgs {
     /// The writer returned is also configured to do either line or block
     /// buffering, based on either explicit configuration from the user via CLI
     /// flags, or automatically based on whether stdout is connected to a tty.
-    pub(crate) fn stdout(&self) -> grep::cli::StandardStream {
+    pub fn stdout(&self) -> grep::cli::StandardStream {
         let color = self.color.to_termcolor();
         match self.buffer {
             BufferMode::Auto => {
@@ -1043,12 +1039,12 @@ impl HiArgs {
     /// the available number of cores) and whether ripgrep's mode supports
     /// parallelism. It is intended that this number be used to directly
     /// determine how many threads to spawn.
-    pub(crate) fn threads(&self) -> usize {
+    pub fn threads(&self) -> usize {
         self.threads
     }
 
     /// Return the paths supplied to the directory walker.
-    pub(crate) fn search_paths(&self) -> &[PathBuf] {
+    pub fn search_paths(&self) -> &[PathBuf] {
         &self.paths.paths
     }
 
@@ -1056,7 +1052,7 @@ impl HiArgs {
     ///
     /// The matcher includes both the default rules and any rules added by the
     /// user for this specific invocation.
-    pub(crate) fn types(&self) -> &ignore::types::Types {
+    pub fn types(&self) -> &ignore::types::Types {
         &self.types
     }
 
@@ -1069,7 +1065,7 @@ impl HiArgs {
     /// If `HiArgs::threads` is equal to `1`, then callers should generally
     /// choose to explicitly use single threaded traversal since it won't have
     /// the unnecessary overhead of synchronization.
-    pub(crate) fn walk_builder(&self) -> anyhow::Result<ignore::WalkBuilder> {
+    pub fn walk_builder(&self) -> anyhow::Result<ignore::WalkBuilder> {
         let mut builder = ignore::WalkBuilder::new(&self.paths.paths[0]);
         for path in self.paths.paths.iter().skip(1) {
             builder.add(path);
@@ -1078,7 +1074,7 @@ impl HiArgs {
     }
 
     /// Walk builder covering one root instead of the requested paths
-    pub(crate) fn walk_builder_rooted(
+    pub fn walk_builder_rooted(
         &self,
         root: &std::path::Path,
     ) -> anyhow::Result<ignore::WalkBuilder> {
@@ -1582,7 +1578,7 @@ impl BinaryDetection {
 
     /// Returns true when both implicit and explicit binary detection is
     /// disabled.
-    pub(crate) fn is_none(&self) -> bool {
+    pub fn is_none(&self) -> bool {
         let none = grep::searcher::BinaryDetection::none();
         self.explicit == none && self.implicit == none
     }

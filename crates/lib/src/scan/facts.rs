@@ -1,6 +1,6 @@
 //! Streaming scan-summary collection.
 
-use sngram_types::{ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanFlags, ScanSummary};
+use crate::{ByteSet256, EdgeBytes, SaturatingByteCounts256, ScanFlags, ScanSummary};
 
 const EDGE: usize = EdgeBytes::CAPACITY;
 
@@ -21,7 +21,7 @@ const fn class_flags_table() -> [u64; 256] {
 }
 
 const fn byte_class_flags(byte: u8) -> u64 {
-    let mut flags = ScanFlags(0);
+    let mut flags = ScanFlags::from_bits(0);
     if byte.is_ascii_uppercase() {
         flags = flags.with_ascii_upper();
     }
@@ -182,11 +182,10 @@ impl SummaryBuilder {
     fn record_counts_and_classes(&mut self, chunk: &[u8]) {
         let mut class = 0u64;
         for &byte in chunk {
-            let slot = &mut self.byte_counts.counts[usize::from(byte)];
-            *slot = slot.saturating_add(1);
+            self.byte_counts.observe(byte);
             class |= CLASS_FLAGS[usize::from(byte)];
         }
-        self.flags = self.flags.with_bits(class);
+        self.flags = ScanFlags::from_bits(self.flags.bits() | class);
     }
 
     fn record_lines(&mut self, chunk: &[u8]) {

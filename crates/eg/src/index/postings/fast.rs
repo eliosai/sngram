@@ -1,6 +1,6 @@
 //! Direct execution of the common all-of plan: one driver list, the rest filters.
 
-use sngram_types::{GramNeedle, PlanExpr, QueryPlan, ScanNeed};
+use sngram::{GramNeedle, PlanExpr, QueryPlan, ScanNeed};
 
 use super::PostingsIndex;
 use crate::index::executor::{self, combine};
