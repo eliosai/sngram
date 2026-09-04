@@ -1,0 +1,21 @@
+# The release script reads these subjects to pick the bump and git-cliff drops anything else
+style = "conventional"
+subject_capitalized = "never"
+subject_not_punctuated = true
+imperative_subject = true
+no_fixup = true
+no_wip = true
+subject_length = 72
+line_length = 100
+allowed_types = [
+    "feat",
+    "fix",
+    "perf",
+    "refactor",
+    "docs",
+    "test",
+    "build",
+    "ci",
+    "chore",
+    "revert",
+]

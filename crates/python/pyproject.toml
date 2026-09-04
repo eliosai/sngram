@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.7,<2"]
+requires = [ "maturin>=1.7,<2" ]
 build-backend = "maturin"
 
 [project]
@@ -9,8 +9,8 @@ description = "A sparse ngram library with trained weight tables"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Elios", email = "dev@elios.ai" }]
-keywords = ["ngram", "regex", "search", "code-search", "index"]
+authors = [ { name = "Elios", email = "dev@elios.ai" } ]
+keywords = [ "ngram", "regex", "search", "code-search", "index" ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -18,7 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Text Processing :: Indexing",
 ]
-dependencies = []
+dependencies = [  ]
 
 [project.urls]
 Repository = "https://github.com/eliosai/sngram"
@@ -37,7 +37,7 @@ cache-keys = [
 manifest-path = "Cargo.toml"
 module-name = "sngram._core"
 python-source = "."
-features = ["pyo3/extension-module", "weights"]
+features = [ "pyo3/extension-module", "weights" ]
 
 [dependency-groups]
 dev = [
@@ -50,7 +50,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = [ "tests" ]
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF", "BLE"]
+select = [ "E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF", "BLE" ]

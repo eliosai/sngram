@@ -1,0 +1,52 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "config:recommended",
+    // Pins every action to a digest and keeps the digest moving, which is why no pinact is installed
+    "helpers:pinGitHubActionDigests",
+    ":semanticCommits",
+  ],
+  // A compromised release is yanked within days, so nothing is proposed until it has survived a week
+  minimumReleaseAge: "7 days",
+  prConcurrentLimit: 3,
+  prHourlyLimit: 2,
+  lockFileMaintenance: { enabled: true, schedule: ["before 5am on monday"] },
+  packageRules: [
+    {
+      matchManagers: ["cargo"],
+      matchUpdateTypes: ["patch", "minor"],
+      groupName: "cargo patch and minor",
+      schedule: ["before 5am on monday"],
+    },
+    {
+      matchManagers: ["github-actions"],
+      groupName: "github actions",
+      schedule: ["before 5am on monday"],
+    },
+    // The datapath toolchain and its linker move together or the daemon links an object it cannot read
+    {
+      matchPackageNames: ["bpf-linker"],
+      groupName: "datapath toolchain",
+    },
+  ],
+  customManagers: [
+    {
+      // Cargo tool versions live as plain strings inside workflow yaml, where no manager looks
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/(workflows|actions)/.+\\.ya?ml$/"],
+      matchStrings: [
+        "(?<depName>cargo-[a-z-]+)@(?<currentValue>[0-9][0-9.]*)",
+        "cargo install (?<depName>[a-z][a-z0-9-]+) --version (?<currentValue>[0-9][0-9.]*)",
+      ],
+      datasourceTemplate: "crate",
+    },
+    {
+      // Kani installs from crates.io through its own action, which names the version as an input
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      matchStrings: ["kani-version:\\s*\"(?<currentValue>[0-9][0-9.]*)\""],
+      depNameTemplate: "kani-verifier",
+      datasourceTemplate: "crate",
+    },
+  ],
+}

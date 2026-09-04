@@ -1,0 +1,74 @@
+name: nightly
+# Everything too slow for a pull request
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Miri interprets the real tests and rules out undefined behaviour on the paths they reach
+  miri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          components: miri, rust-src
+          tools: cargo-nextest
+      - run: cargo miri setup
+      - run: MIRIFLAGS="-Zmiri-tree-borrows" cargo miri nextest run --workspace
+
+  # The standard library's own debug assertions, which only fire under a release build in production
+  careful:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          components: rust-src
+          tools: cargo-careful
+      - run: cargo careful test --workspace --all-features
+
+  # A lockfile hides a wrong lower bound, and importers resolve against their own trees
+  # It sits here and not on the gate because a transitive floor nobody here owns can block it
+  minimal-versions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          tools: just,cargo-hack,cargo-minimal-versions
+      - run: just minimal
+
+  # A dead link fails on the day it dies and not on the pull request that happened to be open
+  links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: "--no-progress README.md 'docs/**/*.md'"
+          fail: true

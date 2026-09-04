@@ -18,13 +18,13 @@ conventional_commits = true
 filter_unconventional = true
 split_commits = false
 commit_parsers = [
-  { message = "^chore\\(release\\)", skip = true },
-  { message = "^feat", group = "<!-- 0 -->Features" },
-  { message = "^fix", group = "<!-- 1 -->Fixes" },
-  { message = "^perf", group = "<!-- 2 -->Performance" },
-  { message = "^refactor", group = "<!-- 3 -->Refactoring" },
-  { message = "^docs", group = "<!-- 4 -->Documentation" },
-  { message = "^(build|ci|chore|test)", group = "<!-- 5 -->Housekeeping" },
+    { message = "^chore\\(release\\)", skip = true },
+    { message = "^feat", group = "<!-- 0 -->Features" },
+    { message = "^fix", group = "<!-- 1 -->Fixes" },
+    { message = "^perf", group = "<!-- 2 -->Performance" },
+    { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+    { message = "^docs", group = "<!-- 4 -->Documentation" },
+    { message = "^(build|ci|chore|test)", group = "<!-- 5 -->Housekeeping" },
 ]
 filter_commits = false
 tag_pattern = "v[0-9].*"
