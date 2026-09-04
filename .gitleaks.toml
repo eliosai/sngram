@@ -1,0 +1,11 @@
+# Baseline rules plus the paths that hold deliberate test material
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "fuzz corpora and dictionaries are opaque bytes by design"
+paths = [ '''fuzz/corpus/''', '''fuzz/dictionaries/''' ]
+
+[[allowlists]]
+description = "test fixtures mint their own keys at runtime and hold none at rest"
+paths = [ '''crates/[a-z]+/tests/''', '''crates/testkit/''' ]

@@ -8,15 +8,38 @@ default:
     @just --list
 
 # Scan docs and layout, then format-check, type-check and lint the workspace and both sngram feature sets
+# Run every file level check, which is the same set prek runs on a commit and ci runs on a push
+lint:
+    prek run --all-files
+
+# Format check, then compile every feature pair, then lint every target
+# Clippy runs the same front end as `cargo check`, so no plain check pass runs beside it
 check:
-    bash .github/scripts/check-agent-layout.sh
-    bash scripts/doc-scan.sh
-    bash scripts/layout-scan.sh
     cargo fmt --all -- --check
-    cargo check --workspace --all-targets --all-features
-    cargo check -p sngram --all-targets --no-default-features
+    cargo hack check -p sngram --feature-powerset --depth 2 --no-dev-deps
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo clippy -p sngram --all-targets --no-default-features -- -D warnings
+
+# Compile every feature subset of the library crate, which the paired sweep in `check` bounds at two
+features:
+    cargo hack check -p sngram --feature-powerset --no-dev-deps
+
+# Ask whether the lower bounds the manifests declare actually resolve and build
+minimal:
+    cargo minimal-versions check --workspace --all-features --direct
+
+# Name every dependency no crate in the workspace reaches
+unused:
+    cargo machete --with-metadata
+
+# Report line coverage over the same run the gate makes, which is a figure to read and never a gate
+coverage:
+    cargo llvm-cov nextest --profile ci --workspace --all-features --lcov --output-path lcov.info
+
+# Name every mutant that no test noticed, bounded to what this branch changed
+mutants base="origin/main":
+    git diff {{base}}... > /tmp/sngram-mutants.diff
+    cargo mutants --test-tool=nextest --workspace --in-diff /tmp/sngram-mutants.diff
 
 # Count the comments that still run past one line
 comment-scan:
@@ -116,7 +139,7 @@ size:
 
 # Install the git hooks
 hooks:
-    prek install --hook-type pre-commit --hook-type pre-push
+    prek install --prepare-hooks
 
 # Run the hooks against every file
 hooks-run:
@@ -128,6 +151,7 @@ release-plan:
 
 # Run every check the gate blocks on
 ci:
+    just lint
     just check
     just test-ci
     just test-doc

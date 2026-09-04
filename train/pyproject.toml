@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = [ "hatchling" ]
 build-backend = "hatchling.build"
 
 [project]
@@ -9,7 +9,7 @@ description = "Training pipeline for sngram weight tables"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Elios", email = "dev@elios.ai" }]
+authors = [ { name = "Elios", email = "dev@elios.ai" } ]
 dependencies = [
     "sngram",
     "huggingface-hub>=1.0",
@@ -25,13 +25,13 @@ sngram = "sngram_train.cli:main"
 sngram = { path = "../crates/python" }
 
 [tool.hatch.build.targets.wheel]
-packages = ["sngram_train"]
+packages = [ "sngram_train" ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [ "pytest>=8" ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = [ "tests" ]
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF", "BLE"]
+select = [ "E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF", "BLE" ]

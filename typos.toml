@@ -1,0 +1,26 @@
+# House vocabulary, the corpora the benchmarks name, and the paths a fixer must not rewrite
+[files]
+extend-exclude = [
+    "CHANGELOG.md",
+    ".agents/skills/",
+    # Training data: a corrected token here silently changes the dataset
+    "train/bins/",
+    # elgrep carries ripgrep derived comments, and correcting them drifts from upstream
+    "crates/eg/",
+    # An n-gram library's fixtures are three letter fragments, not words
+    "crates/lib/tests/",
+    "crates/lib/benches/",
+]
+
+[default.extend-words]
+# Home Assistant Core, the corpus the benchmark table names
+hass = "hass"
+# Extensible Data Notation, and OpenEdge ABL, both real language tags in the manifests
+edn = "edn"
+ABL = "ABL"
+# Three letter n-grams the query engine names literally, which are grams and not words
+abd = "abd"
+ABD = "ABD"
+ba = "ba"
+tha = "tha"
+siz = "siz"

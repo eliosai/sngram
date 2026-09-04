@@ -8,17 +8,17 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-keywords = ["regex", "search", "ngram", "index", "code-search"]
-categories = ["text-processing", "algorithms", "data-structures"]
+keywords = [ "regex", "search", "ngram", "index", "code-search" ]
+categories = [ "text-processing", "algorithms", "data-structures" ]
 publish = true
-exclude = ["data/.checkpoint"]
+exclude = [ "data/.checkpoint" ]
 
 [features]
-default = ["weights"]
+default = [ "weights" ]
 # learn adds the bigram counters that train weight tables
-learn = []
+learn = [  ]
 # weights embeds the trained production weight table
-weights = []
+weights = [  ]
 
 [dependencies]
 crc32fast = { workspace = true }
