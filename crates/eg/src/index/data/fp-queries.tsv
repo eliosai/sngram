@@ -124,7 +124,7 @@ uni_utf8_lit	Björn
 uni_arrow	→
 uni_ci_fold	björn	-i
 uni_emoji_dash	序列
-uni_class	caf[éè]
+uni_class	calf[éè]
 
 # --- escaped control chars in source text ---
 nl_esc_in_lit	\\0
@@ -376,7 +376,7 @@ gap_three_stage	static.*int.*return
 anchor_close_brace	^}$
 anchor_return_only	^\treturn;$
 anchor_endif	^#endif
-anchor_star_comment	^ \* 
+anchor_star_comment	^ \*
 
 # --- config and structured text ---
 config_compatible	compatible = "

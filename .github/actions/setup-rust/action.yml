@@ -1,0 +1,37 @@
+name: setup-rust
+description: Install the workspace toolchain, the shared cache and named cargo tools
+
+inputs:
+  toolchain:
+    description: Toolchain the workspace builds on
+    required: false
+    default: "1.97"
+  components:
+    description: Comma separated rustup components for the workspace toolchain
+    required: false
+    default: ""
+  tools:
+    description: Comma separated tools for taiki-e/install-action
+    required: false
+    default: ""
+  cache:
+    description: Restore and save the shared cargo cache
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+    # Macro runners are arm64 and every other runner is x86_64, so the arch keys the cache apart
+    - if: inputs.cache == 'true'
+      uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+      with:
+        key: ${{ runner.arch }}
+    - if: inputs.tools != ''
+      uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+      with:
+        tool: ${{ inputs.tools }}

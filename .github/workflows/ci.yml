@@ -1,0 +1,240 @@
+name: ci
+# Every check a pull request has to pass
+# Nothing here benchmarks: benchmarks measure their neighbours on a shared runner, so they live in bench.yml
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Every file level check, run through prek so a commit hook and this job can never disagree
+  lint:
+    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+          tools: just,prek
+      # Every hook builds its own environment once, which is most of what this job would spend
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/prek
+          key: prek-${{ runner.os }}-${{ hashFiles('prek.toml') }}
+          restore-keys: prek-${{ runner.os }}-
+      - run: just lint
+
+  # The type check, the feature sweep and clippy
+  check:
+    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy, rustfmt
+          tools: just,cargo-hack,cargo-machete
+      - run: just check
+      - run: just unused
+
+  # The suite, the doc tests and the rendered docs, which run beside the checks rather than after them
+  test:
+    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: just,cargo-nextest
+      - run: just test-ci
+      - run: just test-doc
+      - run: just doc-check
+      - name: publish the test report
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          detailed_summary: true
+          include_passed: false
+
+  # What every publishable crate ships, and what its dependency tree is allowed to carry
+  package:
+    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: just,cargo-deny
+      - run: just package-check
+      - run: just audit
+
+  # The floor the manifests declare, which an importer may resolve to
+  msrv:
+    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: "1.96"
+          tools: just
+      - run: just msrv
+
+  # The library has importers, so a break in its surface costs a major release
+  semver:
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: just,cargo-semver-checks
+      - id: compare
+        continue-on-error: true
+        run: just semver-check ${{ github.event.pull_request.base.sha }}
+      - name: require the semver-major label for a breaking change
+        if: ${{ steps.compare.outcome == 'failure' && !contains(github.event.pull_request.labels.*.name, 'semver-major') }}
+        run: |
+          echo "the public api breaks against the base branch; label the pull request semver-major to accept a major release"
+          exit 1
+
+  # A mutant no test noticed is a hole the suite claims to cover
+  mutants:
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: cargo-nextest,cargo-mutants
+      - name: mutate what this branch changed
+        run: |
+          git diff "${BASE_SHA}...${HEAD_SHA}" -- '*.rs' > mutants.diff
+          test -s mutants.diff || { echo "no rust changed on this branch"; exit 0; }
+          cargo mutants --test-tool=nextest --workspace --in-diff mutants.diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: mutants
+          path: mutants.out
+
+  # Coverage is a figure to read, never a gate: a percentage is a trend, and a trend cannot fail a build
+  coverage:
+    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
+          tools: just,cargo-nextest,cargo-llvm-cov
+      - run: just coverage
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: lcov.info
+
+  # A diff past the review budget is a diff nobody reads line by line
+  size:
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: enforce the reviewable diff budget
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: bash scripts/pr-size-gate.sh
+
+  py-lint:
+    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: ruff
+        run: just py-lint
+
+  py-test:
+    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: python and trainer tests
+        run: just py-test
+
+  wheel:
+    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: build and import the wheel
+        run: just wheel

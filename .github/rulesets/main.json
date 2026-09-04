@@ -1,0 +1,97 @@
+{
+  "name": "main",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "~DEFAULT_BRANCH"
+      ],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [
+    {
+      "actor_id": null,
+      "actor_type": "DeployKey",
+      "bypass_mode": "always"
+    }
+  ],
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "allowed_merge_methods": [
+          "merge",
+          "squash"
+        ],
+        "dismiss_stale_reviews_on_push": true,
+        "dismissal_restriction": {
+          "allowed_actors": [],
+          "enabled": false
+        },
+        "require_code_owner_review": false,
+        "require_extra_approval_for_unattributed_changes": true,
+        "require_last_push_approval": true,
+        "required_approving_review_count": 1,
+        "required_review_thread_resolution": false,
+        "required_reviewers": []
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "do_not_enforce_on_create": false,
+        "strict_required_status_checks_policy": false,
+        "required_status_checks": [
+          {
+            "context": "lint",
+            "integration_id": 15368
+          },
+          {
+            "context": "check",
+            "integration_id": 15368
+          },
+          {
+            "context": "test",
+            "integration_id": 15368
+          },
+          {
+            "context": "package",
+            "integration_id": 15368
+          },
+          {
+            "context": "msrv",
+            "integration_id": 15368
+          },
+          {
+            "context": "semver",
+            "integration_id": 15368
+          },
+          {
+            "context": "size",
+            "integration_id": 15368
+          },
+          {
+            "context": "py-lint",
+            "integration_id": 15368
+          },
+          {
+            "context": "py-test",
+            "integration_id": 15368
+          },
+          {
+            "context": "wheel",
+            "integration_id": 15368
+          }
+        ]
+      }
+    }
+  ]
+}

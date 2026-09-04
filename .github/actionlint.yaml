@@ -1,0 +1,4 @@
+# Runner labels this organization provides, which actionlint cannot discover on its own
+self-hosted-runner:
+  labels:
+    - codspeed-macro

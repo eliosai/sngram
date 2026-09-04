@@ -11,8 +11,8 @@ future-size-threshold = 8192
 large-error-threshold = 64
 
 # Naming
-disallowed-names = ["foo", "bar", "baz", "quux", "temp", "tmp"]
-allowed-prefixes = ["to", "as", "into", "from", "try_into", "try_from", "with"]
+disallowed-names = [ "foo", "bar", "baz", "quux", "temp", "tmp" ]
+allowed-prefixes = [ "to", "as", "into", "from", "try_into", "try_from", "with" ]
 
 # Test exceptions
 allow-unwrap-in-tests = true
