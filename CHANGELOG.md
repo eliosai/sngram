@@ -1,5 +1,127 @@
 # Changelog
 
+## 1.0.0 (2026-09-04)
+
+
+### Features
+- Fixed training?
+- train: Code-dominant scan distribution and hf dataset publishing
+- eg: Pin anchored patterns to line-edge posting bits
+- train: Train from The Stack v3 parquet shards on the Hub
+- train: Stream stack-v3 parquet and mint from inline content
+- train: Count vendored files instead of skipping them
+- daemon: Give watches to the tree someone is searching
+- train: Restore the blended production corpus, keep stack-v3
+- lib: Add async sparse scan
+- lib: Add incremental text scanner
+- Trim the API to scan, is_binary, query and weights
+
+
+### Fixes
+- Cap stack source share per area
+- train: Survive hub stream network blips
+- train: Honest resumed averages and corpus-identity checkpoints
+- train: Show trained share against target per group
+- index: Cover the searchable prefix of binary files
+- eg: Search the pre-NUL prefix of binary files deterministically
+- index: Render indexed paths from the current search argument
+- index: Decide tiny binary prefixes from held bytes
+- train: Honest eta from run averages, not windowed rates
+- train: Bound and retry the shard listing
+- query: Repin anchored plans after the line-edge bits
+- index: Report every match the line-by-line searcher finds
+- daemon: Bound the watch budget and give watches back
+- eg: Credit the right author and say what the index is doing
+- index: Answer from a scan rather than a stale index or an error
+- eg: Only draw a progress bar for a wait worth reporting
+- eg: Print one block separator on the indexed path
+- eg: Scan when the published index cannot be read
+- index: Union the index with the paths changed since it was published
+- ci: Test the feature that exists and lint the whole workspace clean
+
+
+### Performance
+- scan: Collect the scan summary chunk-wise
+- scan: Stream the hull scan without a copy window
+- scan: Start the folded space at the first uppercase byte
+- scan: Reserve the sniff buffer up front
+- scan: Build the folded space lazily from the primary state
+- index: Balance scan chunks and parallelize the postings merge
+- train: Bound decode memory while staying link-bound
+- query: Cut plan construction from milliseconds to microseconds
+- index: Cut index build work by about 45 percent
+- eg: Compile the query pattern once and size verify to the work
+- index: Decode posting lists about 1.55 times faster
+- query: Cut plan construction by about a tenth
+- index: Walk filter lists with a cursor instead of researching them
+- bench: Standardize on CodSpeed Divan
+
+
+### Refactoring
+- train: Reduce training to the published hub dataset
+- One weights feature and provenance-stamped mints
+- Split oversized modules and tighten the api surface
+- train: Stream the corpus from the hub, no local manifest
+- lib: Separate core responsibilities
+- lib: Share scanner lifecycle
+- lib: Fold sngram-types into sngram
+- Move paired modules to mod.rs and drop scoped visibility
+- lib: LearnError in learn, one line per public doc
+- lib: Drop the checksum-skipping table constructor
+- index: Drop the unreachable held-document path
+
+
+### Documentation
+- train: Describe the hub-dataset training flow
+- Rewrite for release around the published corpus and one weights feature
+- Retell the training story for stack v3 and cut to 0.7.0
+- Record the doubled heading separator in indexed output
+- Carry ripgrep's license with the code copied from it
+- Record the 0.7 release numbers and the schema it lands on
+- Record the fixes merged since the release notes were written
+- Measure against ripgrep and grep, and correct the release numbers
+- Cut the suite table from the front page
+- Fold the speedups into the ripgrep and grep columns
+- Describe the single crate, the gate and the release
+- List the public API and the open work
+- Correct the binary policy, the index format and the counts
+- Cleaned up main rust docs
+
+
+### Housekeeping
+- training: Track minted weight tables and training state in bins
+- Add a changelog and point the guard recipe at a real corpus
+- Lint both python projects with ruff in CI
+- bench: Cover streaming scan paths
+- Bump the workspace to 0.8.0
+- Adopt the just, prek, nextest and deny tooling
+- skills: Copy the shared agent skills
+- Gate, size, semver, release and bench workflows
+- Retry elgrep's timing tests twice in nextest
+- index: Cover the files the old binary sniff refused
+- scripts: Fail the doc scan on an uncompiled rust block
+- Pin the toolchain, drop write scopes, gate before publishing
+- Run every gate step through a recipe and steady the daemon tests
+- Release 1.0.0
+- lib: Split plan tuning out of the structure tests
+- Run the python benches in the ci recipe
+- Add walltime benches on CodSpeed macro runners
+- Run all benches on CodSpeed macro runners
+- Build benches with the instrument each job runs
+
+
+### Merge
+- Deterministic pre-NUL binary search
+- Render indexed paths from the current search argument
+- Faster scan
+- Balanced scan chunking and parallel postings merge
+- Index correctness, faster scan, faster index build
+- Decide tiny binary prefixes from held bytes
+- Line-anchor mask bits
+- Held binary prefixes and line-anchor mask bits
+- Stack-v3 parquet trainer with bounded memory
+- Cut plan construction from milliseconds to microseconds
+
 ## 0.7.0
 
 Indexes built by earlier versions are rebuilt on first use: the postings
