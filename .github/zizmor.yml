@@ -1,0 +1,14 @@
+# Findings this repository accepts, each with the reason it is accepted
+rules:
+  # GitHub reads `$/` since July 2026 and actionlint 1.7.12 rejects it, so `./` stays until it parses
+  self-repository:
+    ignore:
+      - ci.yml
+      - bench.yml
+      - nightly.yml
+      - privileged.yml
+      - release.yml
+  unpinned-uses:
+    config:
+      policies:
+        "*": hash-pin

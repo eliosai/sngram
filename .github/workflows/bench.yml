@@ -1,104 +1,85 @@
 name: bench
+# Benchmarks only ever run on codspeed hardware
+# A shared runner measures its neighbours, so no benchmark belongs on the general fleet
 
 on:
+  # A macro minute costs $0.032 after the first 600 a month, so the paths decide whether this runs
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "crates/**"
+      - "src/**"
+      - "benches/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/bench.yml"
+      - ".github/actions/setup-rust/action.yml"
   push:
     branches: [main]
+    paths:
+      - "crates/**"
+      - "src/**"
+      - "benches/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/bench.yml"
+      - ".github/actions/setup-rust/action.yml"
+  # Walltime holds to a weekly reading, since a shared instrument reads noise the rest of the time
+  schedule:
+    - cron: "0 5 * * 1"
   workflow_dispatch:
-
-permissions:
-  contents: read
-  id-token: write
 
 concurrency:
   group: bench-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-  # valgrind cannot execute the repo-local native codegen
-  RUSTFLAGS: ""
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
-  bench:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+  # Instructions and memory, which a simulated cpu reads the same way on any machine
+  simulation:
+    if: ${{ github.event_name != 'schedule' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: codspeed-macro
-    timeout-minutes: 30
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: "1.97"
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
         with:
-          tool: just,cargo-codspeed
-      - name: build the benches
-        run: just bench-build
-      - name: run the benches on CodSpeed
-        uses: CodSpeedHQ/action@v5
+          tools: cargo-codspeed
+      - run: cargo codspeed build -m simulation
+      - uses: CodSpeedHQ/action@07725aac5ac9e687bba40b9bed8e2bd389a641c8 # v5.2.1
         with:
           mode: simulation
-          run: just bench-run
-  bench-walltime:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    runs-on: codspeed-macro
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
-        with:
-          toolchain: "1.97"
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,cargo-codspeed
-      - name: build the benches
-        run: just bench-build walltime
-      - name: run the benches on CodSpeed
-        uses: CodSpeedHQ/action@v5
-        with:
-          mode: walltime
-          run: just bench-run walltime
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: cargo codspeed run
 
-  python:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+  # Walltime reads what a syscall hides from simulation, weekly so it does not spend the budget
+  walltime:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: codspeed-macro
-    timeout-minutes: 30
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: "1.97"
-      - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v5
-      - name: build the extension and install the benchmark dependencies
-        run: uv sync
-        working-directory: crates/python
-      - name: run the python benches on CodSpeed
-        uses: CodSpeedHQ/action@v5
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
         with:
-          mode: simulation
-          working-directory: crates/python
-          run: uv run --no-sync pytest benchmarks --codspeed
-  python-walltime:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    runs-on: codspeed-macro
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
-        with:
-          toolchain: "1.97"
-      - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v5
-      - name: build the extension and install the benchmark dependencies
-        run: uv sync
-        working-directory: crates/python
-      - name: run the python benches on CodSpeed
-        uses: CodSpeedHQ/action@v5
+          tools: cargo-codspeed
+      - run: cargo codspeed build -m walltime
+      - uses: CodSpeedHQ/action@07725aac5ac9e687bba40b9bed8e2bd389a641c8 # v5.2.1
         with:
           mode: walltime
-          working-directory: crates/python
-          run: uv run --no-sync pytest benchmarks --codspeed
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: cargo codspeed run

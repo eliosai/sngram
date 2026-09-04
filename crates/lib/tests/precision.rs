@@ -292,7 +292,7 @@ fn budget_reaches_the_pattern_tail() {
     // holding only the head.
     assert_rejects(
         "(?i)trace_event_raw_event_sched_switch",
-        b"trace_event_raw_event noth",
+        b"trace_event_raw_event north",
     );
 }
 

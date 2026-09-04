@@ -1,4 +1,5 @@
 name: release
+# Every merge to main may release: the tag, the changelog, and the crates.io publish
 
 on:
   push:
@@ -13,44 +14,33 @@ permissions:
   contents: write
   id-token: write
 
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: ""
-
 jobs:
   release:
     if: ${{ !startsWith(github.event.head_commit.message, 'chore(release)') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+          persist-credentials: true
+      - uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.97"
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v5
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,cargo-nextest,cargo-deny,cargo-semver-checks,git-cliff
-      - name: check, clippy, fmt
-        run: just check
-      - name: tests
-        run: just test-ci
-      - name: doc tests
-        run: just test-doc
-      - name: doc build
-        run: just doc-check
-      - name: package
-        run: just package-check
-      - name: audit
-        run: just audit
+          tools: just,prek,cargo-nextest,cargo-deny,cargo-hack,cargo-semver-checks,git-cliff
+      # The gate already passed on the pull request, so this reruns it against the merge commit alone
+      - run: just lint
+      - run: just check
+      - run: just test-ci
+      - run: just test-doc
+      - run: just doc-check
+      - run: just package-check
+      - run: just audit
+      # OIDC mints a token that lives fifteen minutes, so no long lived credential sits in settings
       - name: crates.io token
         id: crates
-        uses: rust-lang/crates-io-auth-action@v1.0.5
+        uses: rust-lang/crates-io-auth-action@e919bc7605cde86df457cf5b93c5e103838bd879 # v1.0.5
       - name: release
         run: bash scripts/release.sh
         env:
