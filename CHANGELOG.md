@@ -4,6 +4,42 @@
 
 
 ### Features
+- Sparse n-gram extraction library and types
+- CLI modules — counter, resources, session, commands
+- Checkpoint save/restore via redb
+- Complete CLI — HF streaming, learn, resume, progress
+- Final dataset config — 4 datasets, ~49TB total
+- Added bins for minted weight tables
+- Dead-simple sequential learn loop, retry forever, never crash
+- Tracing-based logging with file output and extensive debug sites
+- Split stdout (compact human) from file (firehose tracing)
+- Minted the 5TB weights
+- 10tb weight table
+- Sngram-weights crate + license & publishing metadata
+- query: Redo regex->plan as 1:1 codesearch port over sparse n-grams
+- Added 15tb weights
+- Added 15tb weights and made them default
+- Streaming StreamScanner extraction, release 0.4.2
+- 0.5.0 — fused rolling-hash core, Python trainer, retire 0.4 tables
+- Dashboard ready — segmented event log, bounded-memory streaming, total-bytes ETA
+- 10TB Linux-filesystem corpus, weighted blend, KL convergence, FS validation
+- trained: New bins and distribution5;5u
+- Delted old bins
+- 15TB run which ended at 12TB
+- A new the stack dedup v2 distribution
+- Harden sparse ngram indexed search
+- eg: Harden fp bench suite
+- lib: Derive class, anchor, and edge scan needs
+- eg: Delta-varint postings and a 16-byte gram cap
+- eg: Pack table records into 12 bytes
+- eg: Line-block posting masks (postings-v7)
+- lib: Pin edge windows and center grams for oversized crosses
+- Word-edge posting bits prune mid-word candidates (postings-v8)
+- Demand longest-line length for single-line patterns
+- Postings-v9 final index format
+- Huffman mask column and planner residual pruning
+- Inline-record bitmap, detached lease renewal, bench comparison
+- Production CI, semver gate, embedded table in python package
 - Fixed training?
 - train: Code-dominant scan distribution and hf dataset publishing
 - eg: Pin anchored patterns to line-edge posting bits
@@ -18,7 +54,25 @@
 
 
 ### Fixes
+- Address all reviewer findings for CLI orchestration
+- Datasets reviewer findings
+- Recursion limit for opendal type nesting
+- HF token from .env, recursive file listing, progress labels
+- Fast HF file listing via tree API + reqwest
+- Use FineWeb (has content) instead of the-stack-v2-dedup (metadata-only)
+- Use codeparrot/github-code (ungated, 1TB code with content)
+- Eliminate false negatives in sparse n-gram extraction
+- Per-row-group timeout to break silent stalls; timestamp every log line
+- Aligned column names to actual hf column names
+- Stream shards by row group with mid-file resume + read heartbeat
+- eg: Survive daemon restarts without index loss
+- train: Remove credential missing error
+- trainig: Made MB/s processed goto 34MB/s from 0MB/s
+- training: Fix training low throughput
+- trainig: Fix minting bug
 - Cap stack source share per area
+- eg: Sound index ownership and a daemon that never blocks the hot path
+- Hide postings progress counters
 - train: Survive hub stream network blips
 - train: Honest resumed averages and corpus-identity checkpoints
 - train: Show trained share against target per group
@@ -41,6 +95,10 @@
 
 
 ### Performance
+- 2-file prefetch pipeline + decode overlap + bigger HTTP chunks
+- Bigger prefetch buffer + bigger opendal gap + correct decode timer
+- Reduce indexed benchmark overhead
+- Speed up hot indexed startup
 - scan: Collect the scan summary chunk-wise
 - scan: Stream the hull scan without a copy window
 - scan: Start the folded space at the first uppercase byte
@@ -58,7 +116,15 @@
 
 
 ### Refactoring
+- types,weights: Cleaned up weights and types crates
+- Clean up lib api
+- lib: Move everything into right position and cleanup scan api
+- lib: Cleanesd lib and introduced better logic for fuller index with more meta
+- sngram: Cleanup scan
+- eg: Embed fp bench suite and consolidate index runtime
+- python: Split the sngram library from the training pipeline
 - train: Reduce training to the published hub dataset
+- lib,python: One library per language with per-tier embedded weights
 - One weights feature and provenance-stamped mints
 - Split oversized modules and tighten the api surface
 - train: Stream the corpus from the hub, no local manifest
@@ -72,7 +138,16 @@
 
 
 ### Documentation
+- Update READMEs for the 0.3 QueryPlan API
+- Add fp optimization plan
+- Record phase 2 results
+- Record phase 3 results
+- Record phase 4 mint sweep verdict
+- Record phase 5b word-edge results
+- Replace historical plans with a current system doc set
+- Sync endline and commands with the frozen state
 - train: Describe the hub-dataset training flow
+- Rewrite the READMEs around the four dev surfaces
 - Rewrite for release around the published corpus and one weights feature
 - Retell the training story for stack v3 and cut to 0.7.0
 - Record the doubled heading separator in indexed output
@@ -89,7 +164,9 @@
 
 
 ### Housekeeping
+- Freeze postings-v9 and ship a single production weight tier
 - training: Track minted weight tables and training state in bins
+- Prepare elgrep 0.6 release
 - Add a changelog and point the guard recipe at a real corpus
 - Lint both python projects with ruff in CI
 - bench: Cover streaming scan paths
@@ -102,12 +179,18 @@
 - scripts: Fail the doc scan on an uncompiled rust block
 - Pin the toolchain, drop write scopes, gate before publishing
 - Run every gate step through a recipe and steady the daemon tests
-- Release 1.0.0
 - lib: Split plan tuning out of the structure tests
 - Run the python benches in the ci recipe
 - Add walltime benches on CodSpeed macro runners
 - Run all benches on CodSpeed macro runners
 - Build benches with the instrument each job runs
+
+
+### Eg
+- Add sparse index baseline
+- Memoize postings lookups within a query
+- Plan through PlanOptions; support --no-unicode and non-search modes
+- Batch OR unions; corpus rows for reviewer findings and flag modes
 
 
 ### Merge
@@ -122,163 +205,19 @@
 - Stack-v3 parquet trainer with bounded memory
 - Cut plan construction from milliseconds to microseconds
 
-## 0.7.0
 
-Indexes built by earlier versions are rebuilt on first use: the postings
-schema moved from 16 to 21.
+### Plan
+- Sparse-native windows, scan covers, bounded repetition
+- Harden the analyzer and add verifier-semantics PlanOptions
+- Document load-bearing invariants; dedup flush paths; spec tests
+- Stop analyzing once the gram budget saturates
+- Exact flush accounting, final-flush reserve, x{2,} split, look filtering
+- Full-exact bounded reps + plus-base seam tracking
+- Boundary-byte seams for wide classes; reject two-class contiguity
 
-### Correctness
 
-Nine ways an indexed search could return fewer matches than a plain scan:
+### Scripts
+- Add fp-rate harness and 130-query corpus
+- Differential false-negative check
+- Audit sentinel rows for the fp corpus
 
-- A tree being written to could be served from a generation built before the
-  last writes. Roughly one query in eight returned in milliseconds having
-  missed every new file. A query whose index lost its freshness proof now
-  answers from the same walk and workers `--no-index` uses.
-- Any file holding a NUL was dropped whole, so a 3.4 MB protobuf whose only
-  NUL sat 82 bytes from the end never matched. The bytes before the first NUL
-  are indexed.
-- Binary files were searched differently depending on how wide a directory
-  tree the search covered.
-- A UTF-8 byte order mark was indexed as content, so an anchored query whose
-  only hit sat on line one of such a file was lost.
-- `\A` and `\z` were planned as file edges, but search hands the matcher one
-  line at a time. `os\z` on django returned nothing where a scan returned 202
-  files.
-- A query reaching a generation the daemon had just republished failed with
-  "daemon-owned index is not ready" and returned nothing, in 11 of 24 first
-  queries against a fresh index. An index a query cannot read now falls back
-  to the exact scan. A `--bench` run still fails, because it exists to measure
-  the indexed path.
-- A build that raced a write still published a generation carrying the
-  freshness proof, and for the 35 to 46 ms until the daemon drained the events
-  the build had outrun, a query trusted it. Twenty files written during a
-  rebuild of a 7,117 file tree were missed by every query in that window. The
-  daemon now writes the proof itself, only once a drain after the build finds
-  nothing changed since the walk began.
-- A tree that lost its watches to a more recently queried tree kept its
-  freshness proof file, so re-watching it restored the proof over a generation
-  that missed every change made while it was unwatched. An eviction now
-  withdraws the proof and the change set with the watches.
-- A freshness proof was trusted on its own, so a query that beat the daemon to
-  the change it was about to search answered from a generation that missed it.
-  A save followed within about 13 ms by a search returned nothing where a scan
-  returned the file. Serving from the index now needs the daemon to name, after
-  the query started, everything the generation no longer covers.
-
-Also:
-
-- `eg PATTERN ../` returned nothing whenever an index existed, and a
-  multi-path search built its index at the working directory rather than
-  anywhere containing the requested paths.
-- `-w` and `-x` under `--crlf` asked for a line ending in the last pattern
-  byte while the verifier saw the carriage return.
-- Anchored patterns carry line-start and line-end requirements into the plan.
-- A sorted indexed search doubled every block separator: `--` between context
-  blocks, a blank line between `--heading` blocks. Sorting runs single
-  threaded, where the standard printer owns the separator, but the indexed
-  path also handed one to the buffer writer.
-
-### Behaviour
-
-- The `stream` feature exposes `scan_async` for `AsyncBufRead` inputs. It
-  emits the same key set and scan summary as synchronous `scan` without
-  materializing the complete document.
-- `TextScanner` accepts externally classified chunks while preserving the
-  same gram and summary format, so storage engines can verify one stream pass.
-- Queries the index cannot express, an inverted match, `--passthru`, binary
-  flags, a stdin pipe, or a pattern too broad to prefilter, now scan instead
-  of exiting 2. Invalid patterns and missing paths still fail.
-- The daemon claims at most a third of the system inotify limit, refuses a
-  tree whole when it does not fit, and says which knob to turn. It previously
-  took as many watches as it wanted, which starved editors and language
-  servers, and then hung for an hour when the kernel refused.
-- The daemon releases watches for trees without a live lease, and reclaims
-  staging from an interrupted build, generations a schema change retired, and
-  the state shell of a corpus that is gone.
-- A tree that does not fit the watch budget takes the watches of the least
-  recently queried tree instead of being refused until capacity frees. Query
-  recency comes from the request a foreground query rewrites, so a build
-  directory nobody searches does not count as used. A tree whose lease a
-  query holds is never evicted, a tree keeps its watches for at least 30
-  seconds, and an evicted tree loses its freshness proof before it loses its
-  watches, so the next query on it rebuilds or scans.
-- A query on a tree with unindexed changes no longer waits for the rebuild.
-  The daemon publishes the paths changed since the generation it published,
-  and a query searches those directly while trusting the index for the rest.
-  A search after a save took 108 ms on a 7,102 file tree and now takes 5 ms,
-  and every such query used to abandon the index for a full scan where none
-  does now. Above 128 changed paths, or after a directory moves, the query
-  falls back to waiting or scanning.
-- A tree under continuous writes waits for quiet instead of rebuilding once
-  per event, and keeps draining its watcher while the rebuild runs.
-- A query waiting on the daemon drew a progress bar the moment it started, so
-  every indexed query flashed "indexing changes (0s)". The bar now appears
-  only once a wait passes 150ms. Cold builds report progress as before.
-
-### Performance
-
-Measured on isolated corpus copies, same weight table throughout.
-
-| corpus | index build | speedup vs scan | false positives |
-|---|---|---|---|
-| linux 1.6 GB | 88.5 s to 11.9 s | 6.83x to 8.45x | 27.75% to 26.56% |
-| kubernetes | 6.8 s to 2.7 s | 6.72x to 8.31x | 39.69% to 39.64% |
-| django | 1.6 s to 0.8 s | 3.83x to 4.34x | 28.04% to 26.58% |
-| home-assistant | 3.8 s to 1.7 s | 7.20x to 8.30x | 44.65% |
-
-- `sngram::scan` runs at about 208 MiB/s on code, up from 90.
-- Query plan construction drops from 65 ms to 4.4 ms on its worst pattern.
-- Posting decode runs at 174 million postings per second, up from 113.
-- Index build stopped chunking scan work by file count, which left one thread
-  with thousands of generated headers while the rest idled.
-
-### Training
-
-- Two corpora, chosen with `--corpus`. `blend` is the default and the one
-  the shipped table was minted from: nine families over 38 sources with
-  per-family and per-source byte ceilings summing to 15 TB, dispatched to
-  whichever family sits furthest below its target share. `stack-v3` is the
-  single-dataset path, kept and still runnable.
-- A Stack v3 table was measured against the shipped one and rejected. It
-  lost on all four corpora like-for-like, worst on kubernetes at +7.17pp
-  false positives, because taking whole repositories at their natural mix
-  puts no Go in the top eight languages and 11.9% HTML and XML in them.
-  The mint is kept under `train/runs/v3`.
-- Shards are read by declared layout and text field, so nested stack
-  files, flat parquet columns, and gzipped JSON lines all count.
-- A checkpoint is bound to its corpus name and roster fingerprint, so
-  resuming into a different corpus is refused rather than silently
-  trained. The checkpoint schema moved to 9; existing checkpoints do not
-  resume.
-- Sampling counts vendored files.
-- A stalled shard listing used to hang startup with no output. Each attempt is
-  bounded and transport failures retry.
-
-### Attribution
-
-`eg --help` credited ripgrep's author as this project's. The byline now comes
-from package metadata. ripgrep keeps every credit it had and gains an explicit
-one in the help description and the man page, and its license now ships with
-the code copied from it. See `LICENSE-RIPGREP-MIT`.
-
-## Known issues
-
-- `--stats` reports fewer files and bytes searched than the same query under
-  `--no-index`, because the index proves most files cannot match and never
-  opens them. Match, line, and file-with-match counts agree.
-- With about 6,000 watches per large repository and a third of a 65,536 limit,
-  roughly four large trees can be watched at once. A fifth takes the watches
-  of the least recently queried tree, so the trees in use are the watched
-  ones, but a working set larger than the budget still costs one exact scan
-  per tree that lost its watches.
-- Every indexed answer now depends on the daemon replying within 30ms. A
-  daemon that is alive but wedged turns every query into an exact scan. That
-  is the right direction to fail, but it is a tighter coupling than before.
-- Publishing a generation renames the postings directory into place in two
-  steps, so a query can read a manifest from one generation and postings from
-  the next. Document counts are checked and any mismatch scans instead, but
-  equal counts could still pass. `renameat2(RENAME_EXCHANGE)` would close it.
-- Under `--max-depth`, a changed file is collected from its parent directory
-  and can surface where the depth limit would have excluded it. That adds a
-  candidate the verifier rejects; it never loses one.
