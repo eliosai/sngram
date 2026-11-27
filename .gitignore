@@ -18,6 +18,11 @@ __pycache__/
 .idea/
 .vscode/
 
+# reports the mutants and coverage recipes write
+mutants.out/
+mutants.diff
+lcov.info
+
 # scratch
 .env
 *.log

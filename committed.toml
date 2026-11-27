@@ -1,4 +1,4 @@
-# The release script reads these subjects to pick the bump and git-cliff drops anything else
+# git-cliff reads these subjects for the changelog and the release notes, and drops anything else
 style = "conventional"
 subject_capitalized = "never"
 subject_not_punctuated = true

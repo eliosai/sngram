@@ -7,8 +7,7 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 default:
     @just --list
 
-# Scan docs and layout, then format-check, type-check and lint the workspace and both sngram feature sets
-# Run every file level check, which is the same set prek runs on a commit and ci runs on a push
+# Run every file level check, which is the same set prek runs on a commit and ci runs on a pull request
 lint:
     prek run --all-files
 
@@ -118,12 +117,12 @@ py-lint:
 
 # Build the python extension and run the python and trainer tests
 py-test:
-    cd crates/python && uv sync && uv run pytest -q
-    cd train && uv sync && uv run pytest -q
+    cd crates/python && uv sync --locked && uv run pytest -q
+    cd train && uv sync --locked && uv run pytest -q
 
 # Run the python benches the way CodSpeed does
 py-bench:
-    cd crates/python && RUSTFLAGS="" uv sync && uv run --no-sync pytest benchmarks --codspeed
+    cd crates/python && RUSTFLAGS="" uv sync --locked && uv run --no-sync pytest benchmarks --codspeed
 
 # Build the wheel into a clean directory and import it into a fresh environment
 wheel:
@@ -145,11 +144,15 @@ hooks:
 hooks-run:
     prek run --all-files
 
-# Print the version the next merge to main would release
-release-plan:
-    bash scripts/release.sh --dry-run
+# Write X.Y.Z into the manifests, the lockfiles and CHANGELOG.md, for a pull request from release/vX.Y.Z
+release version:
+    bash scripts/release.sh bump "{{ version }}"
 
-# Run every check the gate blocks on
+# Print the version main would publish now, which is empty while its version has a tag
+release-plan:
+    bash scripts/release.sh plan
+
+# Run the build and test checks the pull request gate runs
 ci:
     just lint
     just check

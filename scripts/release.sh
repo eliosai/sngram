@@ -1,135 +1,103 @@
 #!/usr/bin/env bash
-# Release from main: pick the version, write the changelog, tag, publish sngram then elgrep, cut the release
-# `--dry-run` prints the version it would release and stops
+# One version names every package: bumps it, judges a release pull request and plans what main publishes
+# Usage:
+#   scripts/release.sh bump <X.Y.Z>           write the version into the manifest, the lockfile and CHANGELOG.md
+#   scripts/release.sh check <branch> <head>  a release pull request names its version and breaks no API that version may not break
+#   scripts/release.sh plan                   version=<X.Y.Z> and commit=<sha that set it> when HEAD carries a version no tag names, else version=
+#   scripts/release.sh notes <X.Y.Z>          the release notes of the version main is about to tag
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+root="$(git rev-parse --show-toplevel)"
+readonly root
 
-dry_run=false
-if [[ "${1:-}" == "--dry-run" ]]; then
-    dry_run=true
-fi
-
-current=$(cargo metadata --no-deps --format-version 1 |
-    python3 -c 'import json, sys; meta = json.load(sys.stdin); print(next(p["version"] for p in meta["packages"] if p["name"] == "sngram"))')
-last_tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
-
-published() {
-    curl -sf "https://index.crates.io/$2" | grep -q "\"vers\":\"$1\""
+# the version the workspace carries
+current() {
+    sed -nE '/^\[workspace\.package\]/,/^\[/ s/^version = "([^"]+)"/\1/p' "$root/Cargo.toml"
 }
 
-# Both crates ship together, so a version is released only when both carry it
-fully_published() {
-    published "$1" sn/gr/sngram && published "$1" el/gr/elgrep
+# the newest release tag, or nothing before the first release
+previous() {
+    git -C "$root" tag --list 'v[0-9]*' --sort=-version:refname | head -n 1
 }
 
-# The newest sngram release on crates.io, where the notes for an untagged release start
-last_published_version() {
-    curl -sf "https://index.crates.io/sn/gr/sngram" |
-        python3 -c 'import json, sys; print(max((json.loads(line)["vers"] for line in sys.stdin if line.strip()), key=lambda v: tuple(int(part) for part in v.split("."))))'
+# fails unless the version is X.Y.Z and above every release
+fresh() {
+    local version="$1" last newest
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "'$version' is not X.Y.Z" >&2; exit 2; }
+    last="$(previous)"
+    [ -n "$last" ] || return 0
+    newest="$(printf '%s\n' "${last#v}" "$version" | sort -V | tail -n 1)"
+    [ "$newest" = "$version" ] && [ "v$version" != "$last" ] || { echo "$version does not follow $last" >&2; exit 1; }
 }
 
-# The commit that set the last published version, so the first tagged release does not replay the whole history
-last_release_commit() {
-    git log -S"version = \"$(last_published_version)\"" --format=%H -- Cargo.toml | tail -1
+bump() {
+    local version="$1" old
+    fresh "$version"
+    # the fetch fills the cache before any manifest moves, so the offline update below only moves the workspace's own entries
+    cargo fetch --manifest-path "$root/Cargo.toml" --locked
+    old="$(current)"
+    old="${old//./\\.}"
+    sed -i -E "/^\[workspace\.package\]/,/^\[/ s/^version = \"$old\"/version = \"$version\"/" "$root/Cargo.toml"
+    sed -i -E "s/^(sngram = \{ version = )\"$old\"/\1\"$version\"/" "$root/Cargo.toml"
+    [ "$(current)" = "$version" ] || { echo "the manifest did not take $version" >&2; exit 1; }
+    cargo update --manifest-path "$root/Cargo.toml" --workspace --offline
+    python "$root/crates/python" sngram "$old" "$version"
+    python "$root/train" sngram-train "$old" "$version"
+    # the trainer locks the binding by path, under its own name
+    sed -i -E "/^name = \"sngram\"$/{n;s/^version = \"$old\"/version = \"$version\"/}" "$root/train/uv.lock"
+    sed -i -E "s/^__version__ = \"$old\"/__version__ = \"$version\"/" "$root/crates/python/sngram/__init__.py"
+    (cd "$root" && git-cliff --tag "v$version" --output CHANGELOG.md)
 }
 
-# major when the API breaks or a subject carries `!`, minor for a feat, patch for a fix, perf or refactor
-bump_kind() {
-    local subjects
-    subjects=$(git log --format=%s "$last_tag..HEAD")
-    if grep -qE '^[a-z]+(\([^)]*\))?!:' <<<"$subjects"; then
-        echo major
-    elif ! cargo semver-checks -p sngram --all-features --release-type minor --baseline-rev "$last_tag" >/dev/null 2>&1; then
-        echo major
-    elif grep -qE '^feat(\([^)]*\))?:' <<<"$subjects"; then
-        echo minor
-    elif grep -qE '^(fix|perf|refactor)(\([^)]*\))?:' <<<"$subjects"; then
-        echo patch
+# the python project and its own entry in uv.lock, which `uv sync --locked` holds to the project
+python() {
+    local dir="$1" name="$2" old="$3" version="$4"
+    sed -i -E "/^\[project\]/,/^\[/ s/^version = \"$old\"/version = \"$version\"/" "$dir/pyproject.toml"
+    sed -i -E "/^name = \"$name\"$/{n;s/^version = \"$old\"/version = \"$version\"/}" "$dir/uv.lock"
+    grep -q "^version = \"$version\"" "$dir/pyproject.toml" || { echo "$dir/pyproject.toml did not take $version" >&2; exit 1; }
+}
+
+# the release publishes and tags the commit which set the version, even on a later rerun
+shipped() {
+    local version="$1" commit
+    commit="$(git -C "$root" log -1 --format=%H -G "^version = \"${version//./\\.}\"" -- Cargo.toml)"
+    [ -n "$commit" ] || { echo "no commit sets $version" >&2; exit 1; }
+    echo "$commit"
+}
+
+check() {
+    local branch="$1" head="$2" version last
+    version="$(current)"
+    [ "$branch" = "release/v$version" ] || { echo "$branch releases $version: name it release/v$version" >&2; exit 1; }
+    fresh "$version"
+    [ "$(shipped "$version")" = "$head" ] || { echo "the release commit is not the head of $branch: keep it last" >&2; exit 1; }
+    last="$(previous)"
+    [ -n "$last" ] || { echo "v$version is the first release: no API to compare"; return 0; }
+    cargo semver-checks --manifest-path "$root/Cargo.toml" -p sngram --all-features --baseline-rev "$last"
+}
+
+plan() {
+    local version commit
+    version="$(current)"
+    if git -C "$root" rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+        [ "v$version" = "$(previous)" ] || { echo "$version is older than $(previous)" >&2; exit 1; }
+        echo "version="
     else
-        echo none
+        fresh "$version"
+        echo "version=$version"
+        commit="$(shipped "$version")"
+        echo "commit=$commit"
     fi
 }
 
-next_version() {
-    local major minor patch
-    IFS=. read -r major minor patch <<<"${last_tag#v}"
-    case "$1" in
-        major) echo "$((major + 1)).0.0" ;;
-        minor) echo "$major.$((minor + 1)).0" ;;
-        patch) echo "$major.$minor.$((patch + 1))" ;;
-    esac
+notes() {
+    (cd "$root" && git-cliff --tag "v$1" --unreleased --strip all)
 }
 
-newer() {
-    python3 -c 'import sys; a, b = (tuple(map(int, v.split("."))) for v in sys.argv[1:]); sys.exit(0 if a > b else 1)' "$1" "$2"
-}
-
-if [[ -z "$last_tag" ]]; then
-    next=$current
-    reason="first tagged release, from Cargo.toml"
-elif [[ "v$current" == "$last_tag" ]] && ! fully_published "$current"; then
-    next=$current
-    reason="tagged but not published by both crates"
-elif [[ "v$current" != "$last_tag" ]]; then
-    if ! newer "$current" "${last_tag#v}"; then
-        echo "Cargo.toml says $current but $last_tag is already released" >&2
-        exit 1
-    fi
-    next=$current
-    reason="version set by hand"
-else
-    kind=$(bump_kind)
-    if [[ "$kind" == none ]]; then
-        echo "nothing to release since $last_tag"
-        exit 0
-    fi
-    next=$(next_version "$kind")
-    reason="$kind bump from $last_tag"
-fi
-
-echo "release v$next ($reason)"
-if $dry_run; then
-    exit 0
-fi
-
-if [[ "$next" != "$current" ]]; then
-    sed -i "s/^version = \"$current\"$/version = \"$next\"/" Cargo.toml
-    sed -i "s/^sngram = { version = \"$current\", path = \"crates\/lib\" }$/sngram = { version = \"$next\", path = \"crates\/lib\" }/" Cargo.toml
-    sed -i "s/^version = \"$current\"$/version = \"$next\"/" crates/python/pyproject.toml
-    sed -i "s/^__version__ = \"$current\"$/__version__ = \"$next\"/" crates/python/sngram/__init__.py
-    sed -i "s/^version = \".*\"$/version = \"$next\"/" train/pyproject.toml
-    cargo update --workspace
-    (cd crates/python && uv lock -q)
-    (cd train && uv lock -q)
-fi
-
-notes=$(mktemp)
-range=()
-if [[ -z "$last_tag" ]]; then
-    range=("$(last_release_commit)..HEAD")
-fi
-git-cliff --tag "v$next" --unreleased --strip all "${range[@]}" >"$notes"
-git-cliff --tag "v$next" --unreleased --prepend CHANGELOG.md "${range[@]}"
-
-git config user.name "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-git add Cargo.toml Cargo.lock CHANGELOG.md crates/python/pyproject.toml crates/python/sngram/__init__.py crates/python/uv.lock train/pyproject.toml train/uv.lock
-if ! git diff --cached --quiet; then
-    git commit -m "chore(release): v$next"
-fi
-if ! git rev-parse -q --verify "refs/tags/v$next" >/dev/null; then
-    git tag -a "v$next" -m "v$next"
-fi
-git push origin HEAD:main
-git push origin "v$next"
-
-if ! published "$next" sn/gr/sngram; then
-    cargo publish -p sngram --locked
-fi
-if ! published "$next" el/gr/elgrep; then
-    cargo publish -p elgrep --locked
-fi
-if ! gh release view "v$next" >/dev/null 2>&1; then
-    gh release create "v$next" --title "v$next" --notes-file "$notes"
-fi
+case "${1:-}" in
+    bump) [ $# -eq 2 ] || exit 2; bump "$2" ;;
+    check) [ $# -eq 3 ] || exit 2; check "$2" "$3" ;;
+    plan) plan ;;
+    notes) [ $# -eq 2 ] || exit 2; notes "$2" ;;
+    *) sed -n '2,7p' "${BASH_SOURCE[0]}" >&2; exit 2 ;;
+esac

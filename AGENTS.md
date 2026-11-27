@@ -28,17 +28,17 @@ is the `sngram` Python package and `crates/lib/benches` the bench crate; neither
 
 ## Commands
 
-Every task has a `just` recipe, and the gate runs nothing a recipe does not run. `just check` scans
-the agent layout, the docs and the module layout, format-checks, then type-checks and lints the
-workspace with every feature and the `sngram` crate with none, with warnings denied. `just test`
+Every task has a `just` recipe. `just lint` runs the prek hooks, which scan the agent layout, the
+docs and the module layout. `just check` format-checks, then type-checks and lints the workspace
+with every feature and the `sngram` crate with none, with warnings denied. `just test`
 runs nextest, `just test-doc` the doc examples, `just doc-check` the docs.rs build,
 `just package-check` the crates.io packages, `just msrv` the 1.96 build, `just audit` cargo-deny,
 `just bench` and `just py-bench` the benches the way CodSpeed runs them, and `just py-lint`,
-`just py-test` and `just wheel` the Python side. `just ci` runs every one of those in order and
-clears the test fixtures, so a green `just ci` is a green gate. Only the two label-aware gates stay
-out, because a pull request may carry the label that accepts their failure: `just semver-check <rev>`
-compares the `sngram` API and `just size` counts the added lines. `just hooks` installs the prek
-hooks, so a commit runs `just check` and a push runs `just test`.
+`just py-test` and `just wheel` the Python side. `just ci` runs the build and test checks of the
+gate in order and clears the test fixtures. The gate also runs `just semver-check <rev>` on the
+`sngram` API, `just size` on the added lines, the mutants of the change and, on a release pull
+request, the release check and the deep checks. `just hooks` installs the prek hooks, which a
+commit and a push run.
 
 ## The Index Never Misses
 
@@ -105,11 +105,10 @@ and bare `eg --bench` runs the embedded 296-query suite; `docs/benchmarking.md` 
 
 ## Releases
 
-Every merge to `main` may release. The release workflow reads the commits since the last tag: a
-breaking `sngram` API change reported by cargo-semver-checks or a `!` subject bumps the major, a
-`feat` the minor, a `fix`, `perf` or `refactor` the patch, and anything
-else ships nothing. It publishes `sngram` and then `elgrep`. A breaking pull request carries the
-`semver-major` label or the semver gate fails it. `docs/releasing.md` has the rest.
+A release is a pull request from `release/vX.Y.Z` which ran `just release X.Y.Z`; its merge
+publishes `sngram` and then `elgrep`, tags the version and creates the GitHub release. A breaking
+`sngram` API change needs a major version, and a breaking pull request carries the `semver-major`
+label or the semver gate fails it. `docs/releasing.md` has the rest.
 
 ## Skills
 
@@ -137,7 +136,7 @@ renames and deletes. Only a reviewer adds `size-exempt`.
 
 ## Enforcement
 
-`just check` runs `scripts/doc-scan.sh`, which fails on a Rust block in a document rustdoc does not
+`just lint` runs `scripts/doc-scan.sh`, which fails on a Rust block in a document rustdoc does not
 compile and on any the doc tests skip, and `scripts/layout-scan.sh`, which fails on scoped visibility
 or a module file paired with a directory.
 Fix a violation by deleting lines or renaming, never by rewording around the rule.

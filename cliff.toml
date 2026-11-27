@@ -18,7 +18,7 @@ conventional_commits = true
 filter_unconventional = true
 split_commits = false
 commit_parsers = [
-    { message = "^chore\\(release\\)", skip = true },
+    { message = "^chore(\\(release\\)|: release)", skip = true },
     { message = "^feat", group = "<!-- 0 -->Features" },
     { message = "^fix", group = "<!-- 1 -->Fixes" },
     { message = "^perf", group = "<!-- 2 -->Performance" },
