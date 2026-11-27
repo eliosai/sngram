@@ -1,0 +1,58 @@
+name: deep
+# Everything too slow for every pull request, which a release pull request runs before its version ships
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# rust-toolchain.toml pins the stable toolchain, which outranks the default the setup action sets
+env:
+  RUSTUP_TOOLCHAIN: nightly
+  # .cargo/config.toml builds for the native cpu, and a cached object from another runner's cpu dies on SIGILL
+  RUSTFLAGS: "-C target-cpu=x86-64-v2"
+
+jobs:
+  # The standard library's debug and UB checks, which cover the one unsafe copy no Miri run can reach inside the budget
+  careful:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          components: rust-src
+          tools: cargo-careful
+      - run: cargo careful test -p sngram -p elgrep --all-features
+
+  # A lockfile hides a wrong lower bound, and importers resolve against their own trees
+  minimal-versions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          tools: just,cargo-hack,cargo-minimal-versions
+      - run: just minimal
+
+  # A dead link in the docs a release ships
+  links:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: "--no-progress README.md 'docs/**/*.md'"
+          fail: true
