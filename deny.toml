@@ -4,6 +4,10 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # arrow-array needs chrono, which has no maintained drop-in; revisit on the next arrow upgrade
+    "RUSTSEC-2026-0543",
+]
 
 [licenses]
 unused-allowed-license = "allow"
