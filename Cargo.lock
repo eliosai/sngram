@@ -518,7 +518,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "elgrep"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "bstr",
@@ -1475,7 +1475,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "sngram"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "crc32fast",
  "regex",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "sngram-benches"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "codspeed-divan-compat",
  "crc32fast",
@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "sngram-python"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "arrow-array",
  "arrow-schema",

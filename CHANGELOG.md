@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.1 (2026-11-28)
+
+
+### Fixes
+- ci: Keep the tsv fixtures byte exact and pin the python jobs' actions
+- deps: Refresh the lockfile the dropped dependencies left stale
+- ci: Build the package and wheel jobs against a cpu the runner holds
+- deps: Move past the zstd advisories
+- deps: Raise direct floors to the tested versions
+
+
+### Documentation
+- Regenerate the changelog from cliff.toml
+
+
+### Housekeeping
+- Rebuild the pipeline on canonical workflows and one setup action
+- Gate pull requests and release from a release PR
+- Pin CodSpeed and rust-cache by commit
+- eg: Run the eg binary Cargo built for the test
+- Skip link checks back into this repository
+
 ## 1.0.0 (2026-09-04)
 
 
