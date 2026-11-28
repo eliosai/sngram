@@ -5,26 +5,13 @@
 //! `--no-index` would give, not an error and an empty result.
 #![allow(missing_docs, clippy::unwrap_used)]
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{fs, path::Path, process::Command};
 
 const FILES: usize = 120;
 const NEEDLE: &str = "quokka";
 
-fn eg_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.join("eg")
-}
-
 fn run(root: &Path, runtime: &Path, args: &[&str]) -> (String, Option<i32>) {
-    let output = Command::new(eg_binary())
+    let output = Command::new(env!("CARGO_BIN_EXE_eg"))
         .args(args)
         .arg("./")
         .current_dir(root)
