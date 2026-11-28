@@ -25,20 +25,20 @@ path = "benches/index.rs"
 harness = false
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.103"
 bstr = "1.7.0"
 grep = "0.4.1"
 ignore = "0.4.24"
 indicatif = "0.18.4"
-libc = "0.2"
+libc = "0.2.186"
 lexopt = "0.3.0"
-log = "0.4.5"
+log = "0.4.33"
 rayon = "1.10.0"
-memchr = "2"
+memchr = "2.8.2"
 memmap2 = "0.9"
 regex-syntax = { workspace = true }
-serde = { version = "1.0", features = [ "derive" ] }
-serde_json = "1.0.23"
+serde = { version = "1.0.228", features = [ "derive" ] }
+serde_json = "1.0.150"
 sngram = { workspace = true, features = [ "weights" ] }
 tantivy = "0.26.1"
 textwrap = { version = "0.16.2", default-features = false }
@@ -46,7 +46,7 @@ termcolor = "1.4.1"
 
 [dev-dependencies]
 divan = { workspace = true }
-tempfile = "3"
+tempfile = "3.27.0"
 
 [features]
 default = [  ]
